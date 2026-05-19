@@ -3,8 +3,11 @@ use std::{fs, sync::Arc};
 use anyhow::Context;
 use axum::{
     Json,
-    extract::{Query, State},
-    http::StatusCode,
+    extract::{Path as AxumPath, Query, State},
+    http::{
+        StatusCode,
+        header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue},
+    },
     response::{Html, IntoResponse, Response},
 };
 use chrono::Local;
@@ -17,8 +20,8 @@ use crate::{
     error::AppResult,
     markdown::{
         ensure_inside, escape_html, escape_html_attr, mark_todo_content, normalize_markdown_rel,
-        random_markdown_file, rel_to_vault, resolve_markdown_request, save_data_url_image,
-        search_markdown,
+        normalize_rel_path, random_markdown_file, rel_to_vault, resolve_markdown_request,
+        save_data_url_image, search_markdown,
     },
 };
 
@@ -67,10 +70,21 @@ pub(crate) async fn login(
     session: Session,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<Response> {
+    let limiter_key = state.login_limiter_key(&body.username);
+    if !state.login_limiter.is_allowed(&limiter_key) {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many failed login attempts",
+        )
+            .into_response());
+    }
+
     if !verify_login(&state.config, &body.username, &body.password) {
+        state.login_limiter.record_failure(&limiter_key);
         return Ok((StatusCode::UNAUTHORIZED, "failed").into_response());
     }
 
+    state.login_limiter.record_success(&limiter_key);
     session.cycle_id().await?;
     session.insert(AUTH_SESSION_KEY, true).await?;
     Ok("ok".into_response())
@@ -155,6 +169,34 @@ pub(crate) async fn search(
         ));
     }
     Ok(Html(body).into_response())
+}
+
+pub(crate) async fn image(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+    AxumPath(path): AxumPath<String>,
+) -> AppResult<Response> {
+    ensure_auth(&session).await?;
+
+    let rel = normalize_rel_path(&path)?;
+    let images_root = state.config.vault_path.join("Pics").canonicalize()?;
+    let path = images_root.join(rel);
+    ensure_inside(&images_root, &path)?;
+    if !path.is_file() {
+        return Ok((StatusCode::NOT_FOUND, "not found").into_response());
+    }
+
+    let bytes = fs::read(&path).with_context(|| format!("read image {}", path.display()))?;
+    let content_type = mime_guess::from_path(&path).first_or_octet_stream();
+    let mut response = bytes.into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_str(content_type.as_ref())?);
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=3600"),
+    );
+    Ok(response)
 }
 
 pub(crate) async fn post_entry(

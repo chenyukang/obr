@@ -130,13 +130,23 @@ pub(crate) fn resolve_markdown_request(vault: &Path, input: &str) -> Result<Path
     Ok(requested)
 }
 
+pub(crate) fn normalize_rel_path(input: &str) -> Result<PathBuf> {
+    normalize_rel(input, None)
+}
+
 pub(crate) fn normalize_markdown_rel(input: &str, add_extension: bool) -> Result<PathBuf> {
+    normalize_rel(input, add_extension.then_some(".md"))
+}
+
+fn normalize_rel(input: &str, extension: Option<&str>) -> Result<PathBuf> {
     let mut trimmed = input.trim().trim_start_matches('/').to_string();
     if trimmed.contains('\0') {
         bail!("path contains null byte");
     }
-    if add_extension && !trimmed.ends_with(".md") {
-        trimmed.push_str(".md");
+    if let Some(extension) = extension
+        && !trimmed.ends_with(extension)
+    {
+        trimmed.push_str(extension);
     }
     let path = Path::new(&trimmed);
     if path.is_absolute() {
@@ -309,6 +319,21 @@ mod tests {
         assert!(normalize_markdown_rel("../secret", true).is_err());
         assert!(normalize_markdown_rel("Life/../secret", true).is_err());
         assert!(normalize_markdown_rel("a\0b", true).is_err());
+    }
+
+    #[test]
+    fn normalize_rel_path_allows_safe_static_paths() {
+        assert_eq!(
+            normalize_rel_path("nested/photo.png").unwrap(),
+            PathBuf::from("nested/photo.png")
+        );
+    }
+
+    #[test]
+    fn normalize_rel_path_rejects_static_path_escape() {
+        assert!(normalize_rel_path("../secret.png").is_err());
+        assert!(normalize_rel_path("nested/../../secret.png").is_err());
+        assert!(normalize_rel_path("nested\0secret.png").is_err());
     }
 
     #[test]

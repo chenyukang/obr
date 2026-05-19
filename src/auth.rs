@@ -1,4 +1,9 @@
-use std::io::{self, Read};
+use std::{
+    collections::HashMap,
+    io::{self, Read},
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use argon2::{
@@ -14,6 +19,55 @@ use crate::{
 };
 
 pub(crate) const AUTH_SESSION_KEY: &str = "authenticated";
+const MAX_FAILED_LOGINS: u32 = 5;
+const LOGIN_LOCKOUT: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+pub(crate) struct LoginLimiter {
+    attempts: Mutex<HashMap<String, LoginAttempt>>,
+}
+
+#[derive(Clone, Copy)]
+struct LoginAttempt {
+    failures: u32,
+    locked_until: Option<Instant>,
+}
+
+impl LoginLimiter {
+    pub(crate) fn is_allowed(&self, key: &str) -> bool {
+        let mut attempts = self.attempts.lock().expect("login limiter lock poisoned");
+        let Some(attempt) = attempts.get_mut(key) else {
+            return true;
+        };
+        if let Some(locked_until) = attempt.locked_until {
+            if locked_until > Instant::now() {
+                return false;
+            }
+            attempt.failures = 0;
+            attempt.locked_until = None;
+        }
+        true
+    }
+
+    pub(crate) fn record_failure(&self, key: &str) {
+        let mut attempts = self.attempts.lock().expect("login limiter lock poisoned");
+        let attempt = attempts.entry(key.to_string()).or_insert(LoginAttempt {
+            failures: 0,
+            locked_until: None,
+        });
+        attempt.failures = attempt.failures.saturating_add(1);
+        if attempt.failures >= MAX_FAILED_LOGINS {
+            attempt.locked_until = Some(Instant::now() + LOGIN_LOCKOUT);
+        }
+    }
+
+    pub(crate) fn record_success(&self, key: &str) {
+        self.attempts
+            .lock()
+            .expect("login limiter lock poisoned")
+            .remove(key);
+    }
+}
 
 pub(crate) fn session_layer(config: &Config) -> SessionManagerLayer<MemoryStore> {
     let session_store = MemoryStore::default();
@@ -93,9 +147,11 @@ mod tests {
         Config {
             listen: "127.0.0.1:8010".to_string(),
             vault_path: PathBuf::from("."),
+            log_path: PathBuf::from("logs/obr.log"),
             username: "admin".to_string(),
             password_hash,
             password,
+            allow_plaintext_password: false,
             session_days: 21,
             secure_cookies: false,
             auto_git_sync: false,
@@ -133,5 +189,27 @@ mod tests {
             config.session_duration(),
             CookieDuration::days(i64::MAX / 86_400)
         );
+    }
+
+    #[test]
+    fn login_limiter_locks_after_repeated_failures() {
+        let limiter = LoginLimiter::default();
+
+        for _ in 0..MAX_FAILED_LOGINS {
+            assert!(limiter.is_allowed("admin"));
+            limiter.record_failure("admin");
+        }
+
+        assert!(!limiter.is_allowed("admin"));
+    }
+
+    #[test]
+    fn login_limiter_success_clears_failures() {
+        let limiter = LoginLimiter::default();
+
+        limiter.record_failure("admin");
+        limiter.record_success("admin");
+
+        assert!(limiter.is_allowed("admin"));
     }
 }

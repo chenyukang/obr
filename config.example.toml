@@ -1,5 +1,6 @@
 listen = "127.0.0.1:8010"
 vault_path = "vault"
+log_path = "logs/obr.log"
 username = "admin"
 # Generate with:
 #   read -rsp 'Password: ' OBR_PASSWORD; echo
@@ -7,6 +8,8 @@ username = "admin"
 #   unset OBR_PASSWORD
 # This example hash is for the development password "change-me".
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$5tMFL98jFzMMDO53hOkZHg$iAAWgoWfbfSCiMKWVHUCAc2Gfbam0K4nowD5DFPKkek"
+# Plaintext passwords are disabled by default. Only set this to true for throwaway local development.
+allow_plaintext_password = false
 session_days = 21
 # Keep false for plain http://127.0.0.1 local development.
 # Set true when Obr is served through HTTPS, for example behind Tailscale Serve/Funnel or a reverse proxy.

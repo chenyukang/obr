@@ -1,36 +1,78 @@
-use std::{fs, net::SocketAddr, process::Command, sync::Arc};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    net::SocketAddr,
+    process::{Command, Stdio},
+    sync::Arc,
+};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
     Router,
+    body::Body,
+    extract::DefaultBodyLimit,
+    http::{
+        HeaderValue, Request,
+        header::{CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS},
+    },
+    middleware::{self, Next},
+    response::{Redirect, Response},
     routing::{get, post},
 };
+use chrono::Local;
 use tokio::net::TcpListener;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tower_sessions::{MemoryStore, SessionManagerLayer};
 use tracing::{info, warn};
 
 use crate::{
-    auth::{print_password_hash_from_stdin, session_layer},
+    auth::{LoginLimiter, print_password_hash_from_stdin, session_layer},
     config::Config,
     routes,
 };
 
-#[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) config: Config,
+    pub(crate) login_limiter: LoginLimiter,
 }
 
-pub async fn run() -> Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("hash-password") {
-        print_password_hash_from_stdin()?;
-        return Ok(());
+const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
+const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
+    "default-src 'self'; ",
+    "script-src 'self'; ",
+    "style-src 'self'; ",
+    "img-src 'self' data:; ",
+    "connect-src 'self'; ",
+    "object-src 'none'; ",
+    "base-uri 'none'; ",
+    "frame-ancestors 'none'; ",
+    "form-action 'self'"
+);
+
+pub fn run() -> Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("hash-password") => {
+            print_password_hash_from_stdin()?;
+            return Ok(());
+        }
+        Some("daemon") | Some("--daemon") => {
+            start_daemon()?;
+            return Ok(());
+        }
+        Some("run") | None => {}
+        Some(command) => bail!("unknown command: {command}"),
     }
 
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime")?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "obr=info,tower_http=info".to_string()),
-        )
+        .with_env_filter(log_filter())
         .init();
 
     let config = Config::load()?;
@@ -38,12 +80,78 @@ pub async fn run() -> Result<()> {
 
     let listen: SocketAddr = config.listen.parse().context("invalid listen address")?;
     let session_layer = session_layer(&config);
-    let state = Arc::new(AppState { config });
+    let state = Arc::new(AppState {
+        config,
+        login_limiter: LoginLimiter::default(),
+    });
     let app = router(Arc::clone(&state), session_layer);
 
     let listener = TcpListener::bind(listen).await?;
     info!("listening on http://{listen}");
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn log_filter() -> String {
+    std::env::var("RUST_LOG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "obr=info,tower_http=info".to_string())
+}
+
+fn start_daemon() -> Result<()> {
+    let config = Config::load()?;
+    if let Some(parent) = config.log_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create log directory {}", parent.display()))?;
+    }
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config.log_path)
+        .with_context(|| format!("open log file {}", config.log_path.display()))?;
+    let stderr = log.try_clone().context("clone daemon log file")?;
+    let mut parent_log = log
+        .try_clone()
+        .context("clone daemon log file for parent")?;
+
+    let mut command = Command::new(std::env::current_exe().context("resolve current executable")?);
+    command
+        .arg("run")
+        .current_dir(std::env::current_dir().context("resolve current directory")?)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let child = command.spawn().context("spawn obr daemon")?;
+    writeln!(
+        parent_log,
+        "{} started obr daemon pid {} listening on {}",
+        Local::now().to_rfc3339(),
+        child.id(),
+        config.listen
+    )
+    .with_context(|| format!("write daemon log {}", config.log_path.display()))?;
+    println!(
+        "started obr daemon pid {} log {}",
+        child.id(),
+        config.log_path.display()
+    );
     Ok(())
 }
 
@@ -57,6 +165,10 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
     Router::new()
         .route("/", get(routes::index))
         .route("/obweb", get(routes::index))
+        .route("/front", get(routes::index))
+        .route("/front/", get(routes::index))
+        .route("/front/index.html", get(routes::index))
+        .route("/index/front.html", get(|| async { Redirect::permanent("/") }))
         .route("/api/login", post(routes::login))
         .route("/api/logout", post(routes::logout))
         .route("/api/verify", get(routes::verify))
@@ -64,17 +176,36 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/search", get(routes::search))
         .route("/api/entry", post(routes::post_entry))
         .route("/api/mark", post(routes::mark_todo))
-        .nest_service(
-            "/static/images",
-            ServeDir::new(state.config.vault_path.join("Pics")),
-        )
+        .route("/static/images/{*path}", get(routes::image))
         .nest_service("/assets", ServeDir::new("static"))
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(security_headers))
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(session_layer)
         .with_state(state)
 }
 
+async fn security_headers(request: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY_VALUE),
+    );
+    response
+}
+
 impl AppState {
+    pub(crate) fn login_limiter_key(&self, username: &str) -> String {
+        if username == self.config.username {
+            "configured-user".to_string()
+        } else {
+            "unknown-user".to_string()
+        }
+    }
+
     pub(crate) fn maybe_git_pull(&self) {
         if !self.config.auto_git_sync {
             return;
