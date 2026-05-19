@@ -33,6 +33,10 @@ textarea {
 }
 
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #ffffff;
@@ -43,6 +47,17 @@ button {
 
 button:hover {
   border-color: #9fb0bb;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 button[type="submit"],
@@ -60,6 +75,13 @@ textarea {
   background: #ffffff;
   color: var(--text);
   padding: 10px 12px;
+}
+
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-results-button,
+input[type="search"]::-webkit-search-results-decoration {
+  display: none;
 }
 
 textarea {
@@ -87,6 +109,11 @@ textarea {
   padding-left: 0;
 }
 
+.brand .icon {
+  width: 18px;
+  height: 18px;
+}
+
 nav {
   display: flex;
   gap: 8px;
@@ -111,24 +138,61 @@ main {
 
 .toolbar,
 .page-actions,
-.search-bar {
+.search-bar,
+.todo-form {
   display: flex;
   gap: 10px;
   align-items: center;
 }
 
-.search-bar {
+.search-bar,
+.todo-form {
   margin-bottom: 14px;
 }
 
-.search-bar input {
+.search-field,
+.todo-form input {
   flex: 1;
+}
+
+.search-field {
+  position: relative;
+  min-width: 180px;
+}
+
+.search-field input {
+  padding-right: 42px;
+}
+
+.input-clear {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  transform: translateY(-50%);
+}
+
+.input-clear:hover {
+  background: #edf1f3;
+  border-color: transparent;
+}
+
+.input-clear .icon {
+  width: 15px;
+  height: 15px;
 }
 
 .file-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 7px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #ffffff;
@@ -195,6 +259,36 @@ main {
   margin: 8px 0;
 }
 
+.todo-list ul {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.todo-list li {
+  margin: 10px 0;
+}
+
+.todo-list input[type="checkbox"],
+.markdown input[type="checkbox"] {
+  width: auto;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+.todo-list input[type="checkbox"]:not(:disabled) {
+  cursor: pointer;
+}
+
+.todo-list label:has(input[type="checkbox"]:not(:checked)) {
+  color: #b42318;
+  font-weight: 700;
+}
+
+.empty {
+  margin: 0;
+  color: var(--muted);
+}
+
 a {
   color: var(--blue);
 }
@@ -245,6 +339,26 @@ a {
   border-radius: 6px;
 }
 
+.logout-fab {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 20;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  box-shadow: 0 10px 28px rgb(27 37 43 / 14%);
+}
+
+.logout-fab .icon {
+  width: 21px;
+  height: 21px;
+}
+
 @media (max-width: 640px) {
   .topbar {
     align-items: flex-start;
@@ -254,12 +368,18 @@ a {
   nav,
   .toolbar,
   .page-actions,
-  .search-bar {
+  .search-bar,
+  .todo-form {
     width: 100%;
     flex-wrap: wrap;
   }
 
   nav button {
     flex: 1 1 74px;
+  }
+
+  .logout-fab {
+    right: 16px;
+    bottom: 16px;
   }
 }

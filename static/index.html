@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Obr</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/assets/style.css">
   </head>
   <body>
@@ -18,20 +19,18 @@
           Password
           <input id="password" name="password" type="password" autocomplete="current-password">
         </label>
-        <button type="submit">Log in</button>
+        <button type="submit" data-icon="log-in">Log in</button>
         <p id="login-error" class="error" hidden>Login failed.</p>
       </form>
     </div>
 
     <div id="app" hidden>
       <header class="topbar">
-        <button class="brand" data-view="day">Obr</button>
+        <button class="brand" data-view="day" data-icon="book-open">Obr</button>
         <nav>
-          <button data-view="day">Day</button>
-          <button data-view="find">Find</button>
-          <button data-view="todo">Todo</button>
-          <button data-view="rss">RSS</button>
-          <button id="logout-button" type="button">Logout</button>
+          <button data-view="day" data-icon="calendar-days">Day</button>
+          <button data-view="find" data-icon="search">Find</button>
+          <button data-view="todo" data-icon="list-checks">Todo</button>
         </nav>
       </header>
 
@@ -42,12 +41,12 @@
             <input id="entry-page" placeholder="Link page, optional">
             <input id="entry-links" placeholder="Tags / links, comma separated">
             <div class="toolbar">
-              <label class="file-button">
+              <label class="file-button" data-icon="image">
                 Photo
                 <input id="entry-image-file" type="file" accept="image/*">
               </label>
-              <button id="entry-reset" type="button">Reset</button>
-              <button id="entry-save" type="submit">Save</button>
+              <button id="entry-reset" type="button" data-icon="rotate-ccw">Reset</button>
+              <button id="entry-save" type="submit" data-icon="save">Save</button>
             </div>
             <img id="entry-preview" class="preview" hidden>
             <p id="entry-status" class="status" hidden></p>
@@ -56,23 +55,28 @@
 
         <section id="find-view" class="view" hidden>
           <form id="search-form" class="search-bar">
-            <input id="search-input" placeholder="Search markdown">
-            <button type="submit">Search</button>
+            <div class="search-field">
+              <input id="search-input" type="search" placeholder="Search markdown" autocomplete="off">
+              <button id="search-clear" class="input-clear" type="button" aria-label="Clear search" title="Clear search" data-icon="x" hidden></button>
+            </div>
+            <button type="submit" data-icon="search">Search</button>
           </form>
           <div id="search-results" class="panel list-panel"></div>
         </section>
 
-        <section id="rss-view" class="view" hidden>
-          <div class="panel">
-            <h2>RSS</h2>
-            <p>RSS is not implemented in the Rust rewrite yet.</p>
-          </div>
+        <section id="todo-view" class="view" hidden>
+          <form id="todo-form" class="todo-form">
+            <input id="todo-input" placeholder="New todo">
+            <button type="submit" data-icon="plus">Add</button>
+          </form>
+          <div id="todo-list" class="panel markdown todo-list"></div>
+          <p id="todo-status" class="status" hidden></p>
         </section>
 
         <section id="page-view" class="view" hidden>
           <div class="page-actions">
-            <button id="back-button">Back</button>
-            <button id="edit-button">Edit</button>
+            <button id="back-button" data-icon="arrow-left">Back</button>
+            <button id="edit-button" data-icon="pencil">Edit</button>
           </div>
           <article class="panel">
             <h2 id="page-title"></h2>
@@ -81,6 +85,8 @@
           </article>
         </section>
       </main>
+
+      <button id="logout-button" class="logout-fab" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
     </div>
 
     <script src="/assets/app.js"></script>

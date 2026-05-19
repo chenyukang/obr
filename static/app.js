@@ -4,11 +4,29 @@ const state = {
   currentFile: "",
   currentContent: "",
   image: "",
+  searchTimer: 0,
 };
 
 const el = (id) => document.getElementById(id);
 
+const ICONS = {
+  "arrow-left": '<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>',
+  "book-open": '<path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path>',
+  "calendar-days": '<path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path><path d="M8 14h.01"></path><path d="M12 14h.01"></path><path d="M16 14h.01"></path><path d="M8 18h.01"></path><path d="M12 18h.01"></path><path d="M16 18h.01"></path>',
+  image: '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
+  "list-checks": '<path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>',
+  "log-in": '<path d="m10 17 5-5-5-5"></path><path d="M15 12H3"></path><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>',
+  "log-out": '<path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>',
+  pencil: '<path d="M21.2 6.8a1 1 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8L2 21.4a.5.5 0 0 0 .6.6L7 20.7a2 2 0 0 0 .8-.5z"></path><path d="m15 5 4 4"></path>',
+  plus: '<path d="M5 12h14"></path><path d="M12 5v14"></path>',
+  "rotate-ccw": '<path d="M3 12a9 9 0 1 0 9-9 9.8 9.8 0 0 0-6.7 2.7L3 8"></path><path d="M3 3v5h5"></path>',
+  save: '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"></path><path d="M17 21v-7H7v7"></path><path d="M7 3v5h8"></path>',
+  search: '<circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path>',
+  x: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
+};
+
 document.addEventListener("DOMContentLoaded", async () => {
+  installIcons();
   bindEvents();
   restoreDraft();
   const ok = await verify();
@@ -45,14 +63,39 @@ function bindEvents() {
 
   el("search-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    window.clearTimeout(state.searchTimer);
     await search();
   });
+  el("search-input").addEventListener("input", () => {
+    updateSearchClear();
+    window.clearTimeout(state.searchTimer);
+    state.searchTimer = window.setTimeout(search, 180);
+  });
+  el("search-input").addEventListener("keydown", async (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      await clearSearch();
+    }
+  });
+  el("search-clear").addEventListener("click", clearSearch);
 
   el("search-results").addEventListener("click", async (event) => {
     const link = event.target.closest("a[id]");
     if (!link) return;
     event.preventDefault();
     await fetchPage(link.id);
+  });
+
+  el("todo-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await addTodo();
+  });
+
+  el("todo-list").addEventListener("change", async (event) => {
+    const task = event.target.closest("input[data-task-index]");
+    if (!task || !task.checked) return;
+    await markTodo(task.dataset.taskIndex);
+    await loadTodo();
   });
 
   el("back-button").addEventListener("click", () => showView(state.lastListView));
@@ -145,16 +188,15 @@ async function showView(name) {
   }
   if (name === "todo") {
     state.lastListView = "todo";
-    await fetchPage("Unsort/todo", "todo");
-    return;
-  }
-  if (name === "rss") {
-    el("rss-view").hidden = false;
+    el("todo-view").hidden = false;
+    await loadTodo();
     return;
   }
   if (name === "find") {
     state.lastListView = "find";
     el("find-view").hidden = false;
+    updateSearchClear();
+    focusSearchInput();
     if (!el("search-results").innerHTML.trim()) {
       await search();
     }
@@ -241,9 +283,62 @@ function readImage(file) {
 }
 
 async function search() {
-  const keyword = el("search-input").value;
+  const keyword = el("search-input").value.trim();
+  updateSearchClear();
   const response = await request(`/api/search?keyword=${encodeURIComponent(keyword)}`);
   el("search-results").innerHTML = `<ul>${await response.text()}</ul>`;
+}
+
+async function clearSearch() {
+  window.clearTimeout(state.searchTimer);
+  if (!el("search-input").value) return;
+  el("search-input").value = "";
+  updateSearchClear();
+  await search();
+  el("search-input").focus();
+}
+
+function updateSearchClear() {
+  el("search-clear").hidden = !el("search-input").value;
+}
+
+function focusSearchInput() {
+  window.requestAnimationFrame(() => el("search-input").focus());
+}
+
+async function loadTodo() {
+  const response = await request("/api/page?path=Unsort%2Ftodo");
+  const data = await response.json();
+  const content = data[0] === "NoPage" ? "" : data[1] || "";
+  el("todo-list").innerHTML = content.trim()
+    ? renderMarkdown(content)
+    : '<p class="empty">No todos.</p>';
+}
+
+async function addTodo() {
+  const text = el("todo-input").value.trim();
+  if (!text) return;
+  el("todo-status").textContent = "Saving...";
+  el("todo-status").hidden = false;
+  try {
+    const response = await request("/api/entry", {
+      method: "POST",
+      body: JSON.stringify({
+        page: "todo",
+        links: "",
+        text,
+        image: "",
+      }),
+    });
+    const result = await response.text();
+    if (result !== "ok") throw new Error(result);
+    el("todo-input").value = "";
+    el("todo-status").hidden = true;
+    await loadTodo();
+  } catch (error) {
+    console.error(error);
+    el("todo-status").textContent = "Save failed.";
+  }
 }
 
 async function fetchPage(path, sourceView = state.view) {
@@ -271,7 +366,7 @@ function showPage(title, html, sourceView) {
   el("page-content").innerHTML = html;
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
-  el("edit-button").textContent = "Edit";
+  setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
 }
 
@@ -282,7 +377,7 @@ async function toggleEdit() {
     editor.value = state.currentContent;
     editor.hidden = false;
     content.hidden = true;
-    el("edit-button").textContent = "Save";
+    setButtonIcon(el("edit-button"), "save", "Save");
     return;
   }
   const response = await request("/api/page", {
@@ -297,8 +392,28 @@ async function toggleEdit() {
     content.innerHTML = renderMarkdown(state.currentContent);
     editor.hidden = true;
     content.hidden = false;
-    el("edit-button").textContent = "Edit";
+    setButtonIcon(el("edit-button"), "pencil", "Edit");
   }
+}
+
+function installIcons() {
+  document.querySelectorAll("[data-icon]").forEach((element) => {
+    addIcon(element, element.dataset.icon);
+  });
+}
+
+function addIcon(element, iconName) {
+  if (!ICONS[iconName] || element.firstElementChild?.classList.contains("icon")) return;
+  element.insertAdjacentHTML("afterbegin", iconSvg(iconName));
+}
+
+function setButtonIcon(button, iconName, label) {
+  button.dataset.icon = iconName;
+  button.innerHTML = `${iconSvg(iconName)}<span>${escapeHtml(label)}</span>`;
+}
+
+function iconSvg(iconName) {
+  return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[iconName]}</svg>`;
 }
 
 async function markTodo(index) {
@@ -390,8 +505,10 @@ function inline(value) {
       return `<img src="/static/images/${encodeURIComponent(name.trim())}" alt="">`;
     })
     .replace(/\[\[([^\]]+)\]\]/g, (_match, name) => {
-      const page = name.trim();
-      return `<a href="#" data-page="${escapeHtml(page)}">${escapeHtml(page)}</a>`;
+      const [target, label] = name.split("|", 2).map((part) => part.trim());
+      const page = target || label || "";
+      const text = label || target.split("#")[0] || target;
+      return `<a href="#" data-page="${escapeHtml(page)}">${escapeHtml(text)}</a>`;
     })
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
     .replace(/`([^`]+)`/g, "<code>$1</code>")
