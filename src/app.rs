@@ -206,6 +206,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
             "/api/passkey/login/finish",
             post(routes::passkey_login_finish),
         )
+        .route("/api/passkey/available", get(routes::passkey_available))
         .route("/api/passkey/status", get(routes::passkey_status))
         .route("/api/logout", post(routes::logout))
         .route("/api/verify", get(routes::verify))

@@ -5,7 +5,7 @@ use axum::{
     Json,
     extract::{Path as AxumPath, Query, State},
     http::{
-        StatusCode,
+        HeaderMap, StatusCode,
         header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue},
     },
     response::{Html, IntoResponse, Response},
@@ -19,7 +19,9 @@ use webauthn_rs::prelude::{
 
 use crate::{
     app::AppState,
-    auth::{AUTH_SESSION_KEY, ensure_auth, is_authenticated, verify_login},
+    auth::{
+        AUTH_SESSION_KEY, allows_local_password_login, ensure_auth, is_authenticated, verify_login,
+    },
     error::{AppError, AppResult},
     markdown::{
         ensure_inside, escape_html, escape_html_attr, mark_todo_content, normalize_markdown_rel,
@@ -79,8 +81,17 @@ pub(crate) async fn index() -> Html<&'static str> {
 pub(crate) async fn login(
     State(state): State<Arc<AppState>>,
     session: Session,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<Response> {
+    if state.passkey_store.has_credentials() && !allows_local_password_login(&headers) {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            "password login is disabled outside localhost after passkey registration",
+        )
+            .into_response());
+    }
+
     let limiter_key = state.login_limiter_key(&body.username);
     if !state.login_limiter.is_allowed(&limiter_key) {
         return Ok((
@@ -188,6 +199,13 @@ pub(crate) async fn passkey_login_finish(
     session.cycle_id().await?;
     session.insert(AUTH_SESSION_KEY, true).await?;
     Ok("ok".into_response())
+}
+
+pub(crate) async fn passkey_available(State(state): State<Arc<AppState>>) -> AppResult<Response> {
+    Ok(Json(PasskeyStatus {
+        registered: state.passkey_store.has_credentials(),
+    })
+    .into_response())
 }
 
 pub(crate) async fn passkey_status(

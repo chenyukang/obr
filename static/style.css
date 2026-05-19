@@ -275,10 +275,21 @@ main {
   margin: 0 0 4px;
 }
 
+.password-login-fields {
+  display: grid;
+  gap: 14px;
+}
+
 .login-card label {
   display: grid;
   gap: 6px;
   color: var(--muted);
+}
+
+.login-card.passkey-login-only #passkey-login-button {
+  background: var(--green);
+  border-color: var(--green);
+  color: #ffffff;
 }
 
 .list-panel ul {

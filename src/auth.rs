@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self, Read},
+    net::IpAddr,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -10,6 +11,7 @@ use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
     password_hash::{SaltString, rand_core::OsRng},
 };
+use axum::http::{HeaderMap, header::HOST};
 use subtle::ConstantTimeEq;
 use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, cookie::SameSite};
 
@@ -134,11 +136,56 @@ pub(crate) fn verify_login(config: &Config, username: &str, password: &str) -> b
     expected.as_bytes().ct_eq(password.as_bytes()).into()
 }
 
+pub(crate) fn allows_local_password_login(headers: &HeaderMap) -> bool {
+    !has_forwarded_headers(headers) && host_is_loopback(headers)
+}
+
+fn has_forwarded_headers(headers: &HeaderMap) -> bool {
+    [
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name))
+}
+
+fn host_is_loopback(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(HOST).and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    host_name(host).is_some_and(|name| {
+        name.eq_ignore_ascii_case("localhost")
+            || name
+                .parse::<IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+    })
+}
+
+fn host_name(host: &str) -> Option<&str> {
+    let host = host.trim().trim_end_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+    if let Some(rest) = host.strip_prefix('[') {
+        let (addr, _) = rest.split_once(']')?;
+        return Some(addr);
+    }
+    if host.matches(':').count() == 1 {
+        return host.rsplit_once(':').map(|(name, _)| name);
+    }
+    Some(host)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use argon2::password_hash::SaltString;
+    use axum::http::HeaderValue;
     use tower_sessions::cookie::time::Duration as CookieDuration;
 
     use super::*;
@@ -215,5 +262,39 @@ mod tests {
         limiter.record_success("admin");
 
         assert!(limiter.is_allowed("admin"));
+    }
+
+    #[test]
+    fn local_password_login_allows_loopback_hosts_without_proxy_headers() {
+        for host in ["localhost:8010", "127.0.0.1:8010", "[::1]:8010"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(HOST, HeaderValue::from_str(host).unwrap());
+
+            assert!(allows_local_password_login(&headers), "{host}");
+        }
+    }
+
+    #[test]
+    fn local_password_login_rejects_public_hosts() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("ob.taild09124.ts.net"));
+
+        assert!(!allows_local_password_login(&headers));
+    }
+
+    #[test]
+    fn local_password_login_rejects_forwarded_loopback_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("localhost:8010"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.10"));
+
+        assert!(!allows_local_password_login(&headers));
+    }
+
+    #[test]
+    fn local_password_login_rejects_missing_host() {
+        let headers = HeaderMap::new();
+
+        assert!(!allows_local_password_login(&headers));
     }
 }

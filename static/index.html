@@ -11,16 +11,18 @@
     <div id="login" class="login-panel" hidden>
       <form id="login-form" class="login-card">
         <h1>Obr</h1>
-        <label>
-          Username
-          <input id="username" name="username" autocomplete="username">
-        </label>
-        <label>
-          Password
-          <input id="password" name="password" type="password" autocomplete="current-password">
-        </label>
-        <button type="submit" data-icon="log-in">Log in</button>
-        <button id="passkey-login-button" type="button" data-icon="key">Use passkey</button>
+        <div id="password-login-fields" class="password-login-fields">
+          <label>
+            Username
+            <input id="username" name="username" autocomplete="username">
+          </label>
+          <label>
+            Password
+            <input id="password" name="password" type="password" autocomplete="current-password">
+          </label>
+          <button id="password-login-button" type="submit" data-icon="log-in">Log in</button>
+        </div>
+        <button id="passkey-login-button" type="button" data-icon="key" hidden>Log in with passkey</button>
         <p id="login-error" class="error" hidden>Login failed.</p>
       </form>
     </div>

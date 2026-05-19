@@ -5,6 +5,7 @@ const state = {
   currentContent: "",
   image: "",
   searchTimer: 0,
+  passkeyRegistered: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -35,6 +36,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     showApp();
     showView("day");
   } else {
+    state.passkeyRegistered = await fetchPasskeyAvailability();
     showLogin();
   }
 });
@@ -130,6 +132,7 @@ async function request(path, options = {}) {
     },
   });
   if (response.status === 401) {
+    state.passkeyRegistered = await fetchPasskeyAvailability();
     showLogin();
     throw new Error("unauthorized");
   }
@@ -140,6 +143,17 @@ async function verify() {
   try {
     const response = await fetch("/api/verify", { credentials: "same-origin" });
     return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchPasskeyAvailability() {
+  try {
+    const response = await fetch("/api/passkey/available", { credentials: "same-origin" });
+    if (!response.ok) return false;
+    const status = await response.json();
+    return Boolean(status.registered);
   } catch {
     return false;
   }
@@ -201,6 +215,7 @@ async function passkeyLogin() {
       }),
     });
     if (!finish.ok) throw new Error(await finish.text());
+    state.passkeyRegistered = true;
     setLoginError("", true);
     showApp();
     showView("day");
@@ -236,6 +251,7 @@ async function registerPasskey() {
       }),
     });
     if (!finish.ok) throw new Error(await finish.text());
+    state.passkeyRegistered = true;
     el("passkey-register-button").hidden = true;
     alert("Passkey registered.");
   } catch (error) {
@@ -279,6 +295,9 @@ async function logout() {
 function showLogin() {
   el("app").hidden = true;
   el("login").hidden = false;
+  el("login-form").classList.toggle("passkey-login-only", state.passkeyRegistered);
+  el("password-login-fields").hidden = state.passkeyRegistered;
+  el("passkey-login-button").hidden = !state.passkeyRegistered;
   el("password").value = "";
   setLoginError("", true);
 }
@@ -293,6 +312,7 @@ async function refreshPasskeyRegisterButton() {
   try {
     const response = await request("/api/passkey/status");
     const status = await response.json();
+    state.passkeyRegistered = Boolean(status.registered);
     el("passkey-register-button").hidden = Boolean(status.registered);
   } catch (error) {
     console.error(error);
