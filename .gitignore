@@ -2,3 +2,4 @@
 /config/local.toml
 /vault
 /logs
+/data

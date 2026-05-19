@@ -28,11 +28,17 @@
     <div id="app" hidden>
       <header class="topbar">
         <button class="brand" data-view="day" data-icon="book-open">Obr</button>
-        <nav>
-          <button data-view="day" data-icon="calendar-days">Day</button>
-          <button data-view="find" data-icon="search">Find</button>
-          <button data-view="todo" data-icon="list-checks">Todo</button>
-        </nav>
+        <div class="topbar-right">
+          <nav>
+            <button data-view="day" data-icon="calendar-days">Day</button>
+            <button data-view="find" data-icon="search">Find</button>
+            <button data-view="todo" data-icon="list-checks">Todo</button>
+          </nav>
+          <div class="auth-actions">
+            <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key" hidden></button>
+            <button id="logout-button" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
+          </div>
+        </div>
       </header>
 
       <main>
@@ -87,10 +93,6 @@
         </section>
       </main>
 
-      <div class="auth-actions">
-        <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key"></button>
-        <button id="logout-button" class="logout-fab" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
-      </div>
     </div>
 
     <script src="/assets/app.js"></script>

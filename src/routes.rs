@@ -11,7 +11,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use chrono::Local;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 use webauthn_rs::prelude::{
     PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
@@ -62,6 +62,11 @@ pub(crate) struct EntryRequest {
 #[derive(Deserialize)]
 pub(crate) struct MarkQuery {
     index: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct PasskeyStatus {
+    registered: bool,
 }
 
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
@@ -116,11 +121,7 @@ pub(crate) async fn passkey_register_start(
             &state.config.username,
             exclude_credentials,
         )
-        .map_err(|err| {
-            AppError::bad_request(match err {
-                _ => "could not start passkey registration",
-            })
-        })?;
+        .map_err(|_| AppError::bad_request("could not start passkey registration"))?;
     session
         .insert(PASSKEY_REGISTRATION_SESSION_KEY, registration_state)
         .await?;
@@ -187,6 +188,17 @@ pub(crate) async fn passkey_login_finish(
     session.cycle_id().await?;
     session.insert(AUTH_SESSION_KEY, true).await?;
     Ok("ok".into_response())
+}
+
+pub(crate) async fn passkey_status(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+) -> AppResult<Response> {
+    ensure_auth(&session).await?;
+    Ok(Json(PasskeyStatus {
+        registered: state.passkey_store.has_credentials(),
+    })
+    .into_response())
 }
 
 pub(crate) async fn logout(session: Session) -> AppResult<Response> {
@@ -317,7 +329,7 @@ pub(crate) async fn post_entry(
             .join("Daily")
             .join(format!("{date}.md"))
     } else {
-        let rel = normalize_markdown_rel(&format!("Unsort/{page}"), true)?;
+        let rel = normalize_markdown_rel(&format!("Zero/{page}"), true)?;
         state.config.vault_path.join(rel)
     };
     ensure_inside(&state.config.vault_path, &path)?;
@@ -382,7 +394,7 @@ pub(crate) async fn mark_todo(
     let Some(index) = query.index else {
         return Ok((StatusCode::BAD_REQUEST, "missing index").into_response());
     };
-    let path = state.config.vault_path.join("Unsort").join("todo.md");
+    let path = state.config.vault_path.join("Zero").join("todo.md");
     ensure_inside(&state.config.vault_path, &path)?;
     let content = fs::read_to_string(&path).unwrap_or_default();
 

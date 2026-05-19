@@ -61,6 +61,15 @@ impl PasskeyStore {
             .collect()
     }
 
+    pub(crate) fn has_credentials(&self) -> bool {
+        !self
+            .data
+            .lock()
+            .expect("passkey store lock poisoned")
+            .credentials
+            .is_empty()
+    }
+
     pub(crate) fn add_credential(&self, passkey: Passkey) -> Result<()> {
         {
             let mut data = self.data.lock().expect("passkey store lock poisoned");

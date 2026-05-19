@@ -119,6 +119,37 @@ nav {
   gap: 8px;
 }
 
+.topbar-right,
+.auth-actions {
+  display: flex;
+  align-items: center;
+}
+
+.topbar-right {
+  gap: 12px;
+}
+
+.auth-actions {
+  gap: 6px;
+}
+
+.auth-actions button {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--muted);
+}
+
+.auth-actions button:hover {
+  color: var(--text);
+}
+
+.auth-actions .icon {
+  width: 16px;
+  height: 16px;
+}
+
 main {
   width: min(920px, calc(100vw - 28px));
   margin: 24px auto 56px;
@@ -339,36 +370,20 @@ a {
   border-radius: 6px;
 }
 
-.auth-actions {
-  position: fixed;
-  right: 22px;
-  bottom: 22px;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.auth-actions button {
-  width: 44px;
-  height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border-radius: 50%;
-  box-shadow: 0 10px 28px rgb(27 37 43 / 14%);
-}
-
-.auth-actions .icon {
-  width: 21px;
-  height: 21px;
-}
-
 @media (max-width: 640px) {
   .topbar {
-    align-items: flex-start;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 14px 12px;
+  }
+
+  .topbar-right {
+    display: contents;
+  }
+
+  .brand {
+    justify-self: start;
   }
 
   nav,
@@ -384,8 +399,14 @@ a {
     flex: 1 1 74px;
   }
 
+  nav {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
   .auth-actions {
-    right: 16px;
-    bottom: 16px;
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
   }
 }

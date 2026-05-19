@@ -106,9 +106,9 @@ function bindEvents() {
 
   el("page-content").addEventListener("click", async (event) => {
     const task = event.target.closest("input[data-task-index]");
-    if (task && state.currentFile === "Unsort/todo.md") {
+    if (task && state.currentFile === "Zero/todo.md") {
       await markTodo(task.dataset.taskIndex);
-      await fetchPage("Unsort/todo", "todo");
+      await fetchPage("Zero/todo", "todo");
       return;
     }
 
@@ -236,6 +236,7 @@ async function registerPasskey() {
       }),
     });
     if (!finish.ok) throw new Error(await finish.text());
+    el("passkey-register-button").hidden = true;
     alert("Passkey registered.");
   } catch (error) {
     console.error(error);
@@ -285,6 +286,18 @@ function showLogin() {
 function showApp() {
   el("login").hidden = true;
   el("app").hidden = false;
+  refreshPasskeyRegisterButton();
+}
+
+async function refreshPasskeyRegisterButton() {
+  try {
+    const response = await request("/api/passkey/status");
+    const status = await response.json();
+    el("passkey-register-button").hidden = Boolean(status.registered);
+  } catch (error) {
+    console.error(error);
+    el("passkey-register-button").hidden = true;
+  }
 }
 
 async function showView(name) {
@@ -413,7 +426,7 @@ function focusSearchInput() {
 }
 
 async function loadTodo() {
-  const response = await request("/api/page?path=Unsort%2Ftodo");
+  const response = await request("/api/page?path=Zero%2Ftodo");
   const data = await response.json();
   const content = data[0] === "NoPage" ? "" : data[1] || "";
   el("todo-list").innerHTML = content.trim()
@@ -628,4 +641,3 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 }
-
