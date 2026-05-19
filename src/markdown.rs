@@ -168,23 +168,58 @@ fn normalize_rel(input: &str, extension: Option<&str>) -> Result<PathBuf> {
 }
 
 pub(crate) fn ensure_inside(vault: &Path, path: &Path) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| anyhow!("path has no parent"))?;
-    let canonical_parent = if parent.exists() {
-        parent.canonicalize()?
-    } else {
-        let mut existing = parent;
-        while !existing.exists() {
-            existing = existing
-                .parent()
-                .ok_or_else(|| anyhow!("no existing parent for {}", path.display()))?;
-        }
-        existing.canonicalize()?
-    };
-    if canonical_parent.starts_with(vault) {
+    let canonical_vault = vault
+        .canonicalize()
+        .with_context(|| format!("resolve root {}", vault.display()))?;
+    let candidate = canonical_candidate(path)?;
+    if candidate.starts_with(&canonical_vault) {
         Ok(())
     } else {
         bail!("path escapes vault: {}", path.display())
     }
+}
+
+fn canonical_candidate(path: &Path) -> Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return path
+                .canonicalize()
+                .with_context(|| format!("resolve path {}", path.display()));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("inspect path {}", path.display())),
+    }
+
+    let parent = path.parent().ok_or_else(|| anyhow!("path has no parent"))?;
+    let mut existing = parent;
+    loop {
+        match fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| anyhow!("no existing parent for {}", path.display()))?;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("inspect path {}", existing.display()));
+            }
+        }
+    }
+
+    let remainder = path
+        .strip_prefix(existing)
+        .with_context(|| format!("resolve path remainder {}", path.display()))?;
+    for component in remainder.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => bail!("parent path components are not allowed"),
+            _ => bail!("unsupported path component"),
+        }
+    }
+    Ok(existing
+        .canonicalize()
+        .with_context(|| format!("resolve parent {}", existing.display()))?
+        .join(remainder))
 }
 
 pub(crate) fn rel_to_vault(vault: &Path, path: &Path) -> Result<String> {
@@ -393,6 +428,51 @@ mod tests {
         let outside = vault.path.parent().unwrap().join("outside.md");
 
         assert!(ensure_inside(&vault.path, &outside).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_inside_rejects_file_symlink_to_outside_vault() {
+        use std::os::unix::fs::symlink;
+
+        let vault = TestVault::new();
+        let outside = vault.path.with_extension("outside.md");
+        fs::write(&outside, "secret").unwrap();
+        let link = vault.path.join("leak.md");
+        symlink(&outside, &link).unwrap();
+
+        assert!(ensure_inside(&vault.path, &link).is_err());
+
+        let _ = fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_inside_rejects_broken_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let vault = TestVault::new();
+        let outside = vault.path.with_extension("missing.md");
+        let link = vault.path.join("broken.md");
+        symlink(&outside, &link).unwrap();
+
+        assert!(ensure_inside(&vault.path, &link).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_inside_rejects_new_file_under_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let vault = TestVault::new();
+        let outside_dir = vault.path.with_extension("outside-dir");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let link = vault.path.join("Linked");
+        symlink(&outside_dir, &link).unwrap();
+
+        assert!(ensure_inside(&vault.path, &link.join("note.md")).is_err());
+
+        let _ = fs::remove_dir_all(outside_dir);
     }
 
     #[test]
