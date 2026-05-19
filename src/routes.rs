@@ -13,11 +13,14 @@ use axum::{
 use chrono::Local;
 use serde::Deserialize;
 use tower_sessions::Session;
+use webauthn_rs::prelude::{
+    PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+};
 
 use crate::{
     app::AppState,
     auth::{AUTH_SESSION_KEY, ensure_auth, is_authenticated, verify_login},
-    error::AppResult,
+    error::{AppError, AppResult},
     markdown::{
         ensure_inside, escape_html, escape_html_attr, mark_todo_content, normalize_markdown_rel,
         normalize_rel_path, random_markdown_file, rel_to_vault, resolve_markdown_request,
@@ -61,6 +64,9 @@ pub(crate) struct MarkQuery {
     index: Option<usize>,
 }
 
+const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
+const PASSKEY_AUTHENTICATION_SESSION_KEY: &str = "passkey_authentication";
+
 pub(crate) async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
@@ -85,6 +91,99 @@ pub(crate) async fn login(
     }
 
     state.login_limiter.record_success(&limiter_key);
+    session.cycle_id().await?;
+    session.insert(AUTH_SESSION_KEY, true).await?;
+    Ok("ok".into_response())
+}
+
+pub(crate) async fn passkey_register_start(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+) -> AppResult<Response> {
+    ensure_auth(&session).await?;
+    let _ = session.remove_value(PASSKEY_REGISTRATION_SESSION_KEY).await;
+    let exclude_credentials = state.passkey_store.credential_ids();
+    let exclude_credentials = if exclude_credentials.is_empty() {
+        None
+    } else {
+        Some(exclude_credentials)
+    };
+    let (challenge, registration_state) = state
+        .webauthn
+        .start_passkey_registration(
+            state.passkey_store.user_id(),
+            &state.config.username,
+            &state.config.username,
+            exclude_credentials,
+        )
+        .map_err(|err| {
+            AppError::bad_request(match err {
+                _ => "could not start passkey registration",
+            })
+        })?;
+    session
+        .insert(PASSKEY_REGISTRATION_SESSION_KEY, registration_state)
+        .await?;
+    Ok(Json(challenge).into_response())
+}
+
+pub(crate) async fn passkey_register_finish(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+    Json(credential): Json<RegisterPublicKeyCredential>,
+) -> AppResult<Response> {
+    ensure_auth(&session).await?;
+    let registration_state: PasskeyRegistration = session
+        .get(PASSKEY_REGISTRATION_SESSION_KEY)
+        .await?
+        .ok_or_else(|| AppError::bad_request("missing passkey registration state"))?;
+    let _ = session.remove_value(PASSKEY_REGISTRATION_SESSION_KEY).await;
+    let passkey = state
+        .webauthn
+        .finish_passkey_registration(&credential, &registration_state)
+        .map_err(|_| AppError::bad_request("passkey registration failed"))?;
+    state.passkey_store.add_credential(passkey)?;
+    Ok("ok".into_response())
+}
+
+pub(crate) async fn passkey_login_start(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+) -> AppResult<Response> {
+    let _ = session
+        .remove_value(PASSKEY_AUTHENTICATION_SESSION_KEY)
+        .await;
+    let credentials = state.passkey_store.credentials();
+    if credentials.is_empty() {
+        return Ok((StatusCode::NOT_FOUND, "no passkey registered").into_response());
+    }
+    let (challenge, authentication_state) = state
+        .webauthn
+        .start_passkey_authentication(&credentials)
+        .map_err(|_| AppError::bad_request("could not start passkey login"))?;
+    session
+        .insert(PASSKEY_AUTHENTICATION_SESSION_KEY, authentication_state)
+        .await?;
+    Ok(Json(challenge).into_response())
+}
+
+pub(crate) async fn passkey_login_finish(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+    Json(credential): Json<PublicKeyCredential>,
+) -> AppResult<Response> {
+    let authentication_state: PasskeyAuthentication = session
+        .get(PASSKEY_AUTHENTICATION_SESSION_KEY)
+        .await?
+        .ok_or_else(|| AppError::bad_request("missing passkey login state"))?;
+    let _ = session
+        .remove_value(PASSKEY_AUTHENTICATION_SESSION_KEY)
+        .await;
+    let auth_result = state
+        .webauthn
+        .finish_passkey_authentication(&credential, &authentication_state)
+        .map_err(|_| AppError::bad_request("passkey login failed"))?;
+    state.passkey_store.update_credential(&auth_result)?;
     session.cycle_id().await?;
     session.insert(AUTH_SESSION_KEY, true).await?;
     Ok("ok".into_response())

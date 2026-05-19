@@ -66,6 +66,14 @@ impl AppError {
             source: None,
         }
     }
+
+    pub(crate) fn bad_request(message: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message,
+            source: None,
+        }
+    }
 }
 
 pub(crate) type AppResult<T> = std::result::Result<T, AppError>;

@@ -15,3 +15,11 @@ session_days = 21
 # Set true when Obr is served through HTTPS, for example behind Tailscale Serve/Funnel or a reverse proxy.
 secure_cookies = false
 auto_git_sync = false
+
+# Passkeys/WebAuthn. Keep RP ID stable; changing it invalidates registered passkeys.
+passkey_store_path = "data/passkeys.json"
+webauthn_rp_name = "Obr"
+# Defaults to http://localhost:<listen-port> for local development.
+# For phone/browser use, set these to your HTTPS origin, e.g.:
+# webauthn_rp_id = "obr.example.com"
+# webauthn_origin = "https://obr.example.com"

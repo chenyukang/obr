@@ -339,11 +339,17 @@ a {
   border-radius: 6px;
 }
 
-.logout-fab {
+.auth-actions {
   position: fixed;
   right: 22px;
   bottom: 22px;
   z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.auth-actions button {
   width: 44px;
   height: 44px;
   display: inline-flex;
@@ -354,7 +360,7 @@ a {
   box-shadow: 0 10px 28px rgb(27 37 43 / 14%);
 }
 
-.logout-fab .icon {
+.auth-actions .icon {
   width: 21px;
   height: 21px;
 }
@@ -378,7 +384,7 @@ a {
     flex: 1 1 74px;
   }
 
-  .logout-fab {
+  .auth-actions {
     right: 16px;
     bottom: 16px;
   }

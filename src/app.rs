@@ -24,16 +24,20 @@ use tokio::net::TcpListener;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tower_sessions::{MemoryStore, SessionManagerLayer};
 use tracing::{info, warn};
+use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 
 use crate::{
     auth::{LoginLimiter, print_password_hash_from_stdin, session_layer},
     config::Config,
+    passkeys::PasskeyStore,
     routes,
 };
 
 pub(crate) struct AppState {
     pub(crate) config: Config,
     pub(crate) login_limiter: LoginLimiter,
+    pub(crate) webauthn: Arc<Webauthn>,
+    pub(crate) passkey_store: Arc<PasskeyStore>,
 }
 
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -77,12 +81,16 @@ async fn serve() -> Result<()> {
 
     let config = Config::load()?;
     prepare_vault(&config)?;
+    let webauthn = build_webauthn(&config)?;
+    let passkey_store = PasskeyStore::load(config.passkey_store_path.clone())?;
 
     let listen: SocketAddr = config.listen.parse().context("invalid listen address")?;
     let session_layer = session_layer(&config);
     let state = Arc::new(AppState {
         config,
         login_limiter: LoginLimiter::default(),
+        webauthn,
+        passkey_store: Arc::new(passkey_store),
     });
     let app = router(Arc::clone(&state), session_layer);
 
@@ -161,6 +169,15 @@ fn prepare_vault(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn build_webauthn(config: &Config) -> Result<Arc<Webauthn>> {
+    let rp_id = config.webauthn_rp_id()?;
+    let rp_origin = config.webauthn_origin()?;
+    let builder = WebauthnBuilder::new(&rp_id, &rp_origin)
+        .with_context(|| format!("configure passkey rp_id={rp_id} origin={rp_origin}"))?
+        .rp_name(&config.webauthn_rp_name);
+    Ok(Arc::new(builder.build().context("build webauthn")?))
+}
+
 fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>) -> Router {
     Router::new()
         .route("/", get(routes::index))
@@ -168,8 +185,27 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/front", get(routes::index))
         .route("/front/", get(routes::index))
         .route("/front/index.html", get(routes::index))
-        .route("/index/front.html", get(|| async { Redirect::permanent("/") }))
+        .route(
+            "/index/front.html",
+            get(|| async { Redirect::permanent("/") }),
+        )
         .route("/api/login", post(routes::login))
+        .route(
+            "/api/passkey/register/start",
+            post(routes::passkey_register_start),
+        )
+        .route(
+            "/api/passkey/register/finish",
+            post(routes::passkey_register_finish),
+        )
+        .route(
+            "/api/passkey/login/start",
+            post(routes::passkey_login_start),
+        )
+        .route(
+            "/api/passkey/login/finish",
+            post(routes::passkey_login_finish),
+        )
         .route("/api/logout", post(routes::logout))
         .route("/api/verify", get(routes::verify))
         .route("/api/page", get(routes::get_page).post(routes::post_page))

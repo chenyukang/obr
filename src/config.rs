@@ -32,6 +32,14 @@ pub(crate) struct Config {
     pub(crate) secure_cookies: bool,
     #[serde(default)]
     pub(crate) auto_git_sync: bool,
+    #[serde(default = "default_passkey_store_path")]
+    pub(crate) passkey_store_path: PathBuf,
+    #[serde(default = "default_webauthn_rp_name")]
+    pub(crate) webauthn_rp_name: String,
+    #[serde(default)]
+    pub(crate) webauthn_rp_id: Option<String>,
+    #[serde(default)]
+    pub(crate) webauthn_origin: Option<String>,
 }
 
 fn default_session_days() -> u64 {
@@ -40,6 +48,14 @@ fn default_session_days() -> u64 {
 
 fn default_log_path() -> PathBuf {
     PathBuf::from("logs/obr.log")
+}
+
+fn default_passkey_store_path() -> PathBuf {
+    PathBuf::from("data/passkeys.json")
+}
+
+fn default_webauthn_rp_name() -> String {
+    "Obr".to_string()
 }
 
 impl Config {
@@ -60,6 +76,9 @@ impl Config {
         if config.log_path.is_relative() {
             config.log_path = cwd.join(config.log_path);
         }
+        if config.passkey_store_path.is_relative() {
+            config.passkey_store_path = cwd.join(config.passkey_store_path);
+        }
         config.vault_path = config.vault_path.canonicalize().map_err(|err| {
             anyhow!(
                 "vault path does not exist or cannot be resolved: {}: {err}",
@@ -79,6 +98,12 @@ impl Config {
         }
         if self.log_path.as_os_str().is_empty() {
             bail!("log_path cannot be empty");
+        }
+        if self.passkey_store_path.as_os_str().is_empty() {
+            bail!("passkey_store_path cannot be empty");
+        }
+        if self.webauthn_rp_name.trim().is_empty() {
+            bail!("webauthn_rp_name cannot be empty");
         }
         match (&self.password_hash, &self.password) {
             (Some(hash), _) => {
@@ -119,6 +144,34 @@ impl Config {
             .map(|addr| addr.ip().is_loopback())
             .unwrap_or(false)
     }
+
+    pub(crate) fn webauthn_origin(&self) -> Result<url::Url> {
+        if let Some(origin) = &self.webauthn_origin {
+            return url::Url::parse(origin)
+                .map_err(|err| anyhow!("invalid webauthn_origin: {err}"));
+        }
+        let listen: SocketAddr = self
+            .listen
+            .parse()
+            .map_err(|err| anyhow!("invalid listen address for webauthn origin: {err}"))?;
+        let host = if listen.ip().is_loopback() {
+            "localhost".to_string()
+        } else {
+            listen.ip().to_string()
+        };
+        url::Url::parse(&format!("http://{host}:{}", listen.port()))
+            .map_err(|err| anyhow!("build default webauthn origin: {err}"))
+    }
+
+    pub(crate) fn webauthn_rp_id(&self) -> Result<String> {
+        if let Some(rp_id) = &self.webauthn_rp_id {
+            return Ok(rp_id.clone());
+        }
+        self.webauthn_origin()?
+            .host_str()
+            .map(ToString::to_string)
+            .ok_or_else(|| anyhow!("webauthn origin must include a host"))
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +190,10 @@ mod tests {
             session_days: 21,
             secure_cookies: false,
             auto_git_sync: false,
+            passkey_store_path: PathBuf::from("data/passkeys.json"),
+            webauthn_rp_name: "Obr".to_string(),
+            webauthn_rp_id: None,
+            webauthn_origin: None,
         }
     }
 

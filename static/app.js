@@ -17,6 +17,7 @@ const ICONS = {
   "list-checks": '<path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>',
   "log-in": '<path d="m10 17 5-5-5-5"></path><path d="M15 12H3"></path><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>',
   "log-out": '<path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>',
+  key: '<path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-2.8-2.8L21 2"></path><path d="m15 5 4 4"></path><path d="m13 7 4 4"></path>',
   pencil: '<path d="M21.2 6.8a1 1 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8L2 21.4a.5.5 0 0 0 .6.6L7 20.7a2 2 0 0 0 .8-.5z"></path><path d="m15 5 4 4"></path>',
   plus: '<path d="M5 12h14"></path><path d="M12 5v14"></path>',
   "rotate-ccw": '<path d="M3 12a9 9 0 1 0 9-9 9.8 9.8 0 0 0-6.7 2.7L3 8"></path><path d="M3 3v5h5"></path>',
@@ -43,6 +44,8 @@ function bindEvents() {
     button.addEventListener("click", () => showView(button.dataset.view));
   });
   el("logout-button").addEventListener("click", logout);
+  el("passkey-login-button").addEventListener("click", passkeyLogin);
+  el("passkey-register-button").addEventListener("click", registerPasskey);
 
   el("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -162,6 +165,108 @@ async function login() {
   showView("day");
 }
 
+
+async function passkeyLogin() {
+  try {
+    if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys.");
+    setLoginError("Touch your passkey to log in.", false);
+    const start = await fetch("/api/passkey/login/start", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    if (!start.ok) throw new Error(await start.text());
+    const requestOptions = await start.json();
+    requestOptions.publicKey.challenge = base64urlToUint8Array(requestOptions.publicKey.challenge);
+    requestOptions.publicKey.allowCredentials?.forEach((credential) => {
+      credential.id = base64urlToUint8Array(credential.id);
+    });
+
+    const assertion = await navigator.credentials.get({ publicKey: requestOptions.publicKey });
+    const finish = await fetch("/api/passkey/login/finish", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: assertion.id,
+        rawId: uint8ArrayToBase64url(new Uint8Array(assertion.rawId)),
+        type: assertion.type,
+        response: {
+          authenticatorData: uint8ArrayToBase64url(new Uint8Array(assertion.response.authenticatorData)),
+          clientDataJSON: uint8ArrayToBase64url(new Uint8Array(assertion.response.clientDataJSON)),
+          signature: uint8ArrayToBase64url(new Uint8Array(assertion.response.signature)),
+          userHandle: assertion.response.userHandle
+            ? uint8ArrayToBase64url(new Uint8Array(assertion.response.userHandle))
+            : null,
+        },
+      }),
+    });
+    if (!finish.ok) throw new Error(await finish.text());
+    setLoginError("", true);
+    showApp();
+    showView("day");
+  } catch (error) {
+    console.error(error);
+    setLoginError(error.message || "Passkey login failed.");
+  }
+}
+
+async function registerPasskey() {
+  try {
+    if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys.");
+    const start = await request("/api/passkey/register/start", { method: "POST" });
+    if (!start.ok) throw new Error(await start.text());
+    const creationOptions = await start.json();
+    creationOptions.publicKey.challenge = base64urlToUint8Array(creationOptions.publicKey.challenge);
+    creationOptions.publicKey.user.id = base64urlToUint8Array(creationOptions.publicKey.user.id);
+    creationOptions.publicKey.excludeCredentials?.forEach((credential) => {
+      credential.id = base64urlToUint8Array(credential.id);
+    });
+
+    const credential = await navigator.credentials.create({ publicKey: creationOptions.publicKey });
+    const finish = await request("/api/passkey/register/finish", {
+      method: "POST",
+      body: JSON.stringify({
+        id: credential.id,
+        rawId: uint8ArrayToBase64url(new Uint8Array(credential.rawId)),
+        type: credential.type,
+        response: {
+          attestationObject: uint8ArrayToBase64url(new Uint8Array(credential.response.attestationObject)),
+          clientDataJSON: uint8ArrayToBase64url(new Uint8Array(credential.response.clientDataJSON)),
+        },
+      }),
+    });
+    if (!finish.ok) throw new Error(await finish.text());
+    alert("Passkey registered.");
+  } catch (error) {
+    console.error(error);
+    alert(error.message || "Passkey registration failed.");
+  }
+}
+
+function setLoginError(message, hidden = false) {
+  el("login-error").textContent = message || "Login failed.";
+  el("login-error").hidden = hidden;
+}
+
+function base64urlToUint8Array(value) {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function uint8ArrayToBase64url(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
 async function logout() {
   await fetch("/api/logout", {
     method: "POST",
@@ -174,6 +279,7 @@ function showLogin() {
   el("app").hidden = true;
   el("login").hidden = false;
   el("password").value = "";
+  setLoginError("", true);
 }
 
 function showApp() {
@@ -522,3 +628,4 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 }
+

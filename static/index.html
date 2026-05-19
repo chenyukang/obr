@@ -20,6 +20,7 @@
           <input id="password" name="password" type="password" autocomplete="current-password">
         </label>
         <button type="submit" data-icon="log-in">Log in</button>
+        <button id="passkey-login-button" type="button" data-icon="key">Use passkey</button>
         <p id="login-error" class="error" hidden>Login failed.</p>
       </form>
     </div>
@@ -86,7 +87,10 @@
         </section>
       </main>
 
-      <button id="logout-button" class="logout-fab" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
+      <div class="auth-actions">
+        <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key"></button>
+        <button id="logout-button" class="logout-fab" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
+      </div>
     </div>
 
     <script src="/assets/app.js"></script>

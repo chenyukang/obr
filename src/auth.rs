@@ -155,6 +155,10 @@ mod tests {
             session_days: 21,
             secure_cookies: false,
             auto_git_sync: false,
+            passkey_store_path: PathBuf::from("data/passkeys.json"),
+            webauthn_rp_name: "Obr".to_string(),
+            webauthn_rp_id: None,
+            webauthn_origin: None,
         }
     }
 
