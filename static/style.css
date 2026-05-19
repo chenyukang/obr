@@ -1,0 +1,265 @@
+:root {
+  color-scheme: light;
+  --bg: #f6f7f8;
+  --panel: #ffffff;
+  --text: #1b252b;
+  --muted: #63717a;
+  --line: #d9e0e4;
+  --blue: #2563eb;
+  --green: #198754;
+  --amber: #b7791f;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #9fb0bb;
+}
+
+button[type="submit"],
+#entry-save {
+  background: var(--green);
+  border-color: var(--green);
+  color: #ffffff;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px clamp(16px, 4vw, 36px);
+  background: #eef5f3;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 700;
+  border: 0;
+  background: transparent;
+  padding-left: 0;
+}
+
+nav {
+  display: flex;
+  gap: 8px;
+}
+
+main {
+  width: min(920px, calc(100vw - 28px));
+  margin: 24px auto 56px;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 20px;
+}
+
+#entry-form {
+  display: grid;
+  gap: 12px;
+}
+
+.toolbar,
+.page-actions,
+.search-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.search-bar {
+  margin-bottom: 14px;
+}
+
+.search-bar input {
+  flex: 1;
+}
+
+.file-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.file-button input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.preview {
+  max-width: 260px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.status {
+  margin: 0;
+  color: var(--muted);
+}
+
+.error {
+  color: #b42318;
+}
+
+.login-panel {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: min(360px, 100%);
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 24px;
+}
+
+.login-card h1 {
+  margin: 0 0 4px;
+}
+
+.login-card label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.list-panel ul {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.list-panel li {
+  margin: 8px 0;
+}
+
+a {
+  color: var(--blue);
+}
+
+.page-actions {
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+#page-title {
+  margin-top: 0;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.markdown {
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  line-height: 1.25;
+}
+
+.markdown pre {
+  overflow: auto;
+  border-radius: 6px;
+  background: #172026;
+  color: #f7fafc;
+  padding: 12px;
+}
+
+.markdown code {
+  border-radius: 4px;
+  background: #edf1f3;
+  padding: 2px 4px;
+}
+
+.markdown pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown img {
+  max-width: 100%;
+  border-radius: 6px;
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  nav,
+  .toolbar,
+  .page-actions,
+  .search-bar {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  nav button {
+    flex: 1 1 74px;
+  }
+}

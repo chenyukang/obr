@@ -1,0 +1,22 @@
+[package]
+name = "obr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+argon2 = { version = "0.5", features = ["std"] }
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+mime_guess = "2.0"
+rand = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+subtle = "2.6"
+tokio = { version = "1.48", features = ["full"] }
+toml = "0.9"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-sessions = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2.5"
