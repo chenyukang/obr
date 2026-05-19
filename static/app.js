@@ -12,18 +12,27 @@ const el = (id) => document.getElementById(id);
 
 const ICONS = {
   "arrow-left": '<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>',
-  "book-open": '<path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path>',
-  "calendar-days": '<path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path><path d="M8 14h.01"></path><path d="M12 14h.01"></path><path d="M16 14h.01"></path><path d="M8 18h.01"></path><path d="M12 18h.01"></path><path d="M16 18h.01"></path>',
-  image: '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
-  "list-checks": '<path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>',
-  "log-in": '<path d="m10 17 5-5-5-5"></path><path d="M15 12H3"></path><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>',
-  "log-out": '<path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>',
+  "book-open":
+    '<path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path>',
+  "calendar-days":
+    '<path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path><path d="M8 14h.01"></path><path d="M12 14h.01"></path><path d="M16 14h.01"></path><path d="M8 18h.01"></path><path d="M12 18h.01"></path><path d="M16 18h.01"></path>',
+  image:
+    '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
+  "list-checks":
+    '<path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>',
+  "log-in":
+    '<path d="m10 17 5-5-5-5"></path><path d="M15 12H3"></path><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>',
+  "log-out":
+    '<path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>',
   key: '<path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-2.8-2.8L21 2"></path><path d="m15 5 4 4"></path><path d="m13 7 4 4"></path>',
-  pencil: '<path d="M21.2 6.8a1 1 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8L2 21.4a.5.5 0 0 0 .6.6L7 20.7a2 2 0 0 0 .8-.5z"></path><path d="m15 5 4 4"></path>',
+  pencil:
+    '<path d="M21.2 6.8a1 1 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8L2 21.4a.5.5 0 0 0 .6.6L7 20.7a2 2 0 0 0 .8-.5z"></path><path d="m15 5 4 4"></path>',
   plus: '<path d="M5 12h14"></path><path d="M12 5v14"></path>',
-  "rotate-ccw": '<path d="M3 12a9 9 0 1 0 9-9 9.8 9.8 0 0 0-6.7 2.7L3 8"></path><path d="M3 3v5h5"></path>',
+  "rotate-ccw":
+    '<path d="M3 12a9 9 0 1 0 9-9 9.8 9.8 0 0 0-6.7 2.7L3 8"></path><path d="M3 3v5h5"></path>',
   save: '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"></path><path d="M17 21v-7H7v7"></path><path d="M7 3v5h8"></path>',
-  search: '<circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path>',
+  search:
+    '<circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path>',
   x: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
 };
 
@@ -31,6 +40,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   installIcons();
   bindEvents();
   restoreDraft();
+  updateEntrySaveState();
   const ok = await verify();
   if (ok) {
     showApp();
@@ -60,9 +70,9 @@ function bindEvents() {
   });
 
   el("entry-reset").addEventListener("click", resetEntry);
-  el("entry-text").addEventListener("input", persistDraft);
-  el("entry-page").addEventListener("input", persistDraft);
-  el("entry-links").addEventListener("input", persistDraft);
+  el("entry-text").addEventListener("input", handleEntryInput);
+  el("entry-page").addEventListener("input", handleEntryInput);
+  el("entry-links").addEventListener("input", handleEntryInput);
   el("entry-text").addEventListener("paste", handlePaste);
   el("entry-image-file").addEventListener("change", handleImageFile);
 
@@ -103,7 +113,9 @@ function bindEvents() {
     await loadTodo();
   });
 
-  el("back-button").addEventListener("click", () => showView(state.lastListView));
+  el("back-button").addEventListener("click", () =>
+    showView(state.lastListView),
+  );
   el("edit-button").addEventListener("click", toggleEdit);
 
   el("page-content").addEventListener("click", async (event) => {
@@ -150,7 +162,9 @@ async function verify() {
 
 async function fetchPasskeyAvailability() {
   try {
-    const response = await fetch("/api/passkey/available", { credentials: "same-origin" });
+    const response = await fetch("/api/passkey/available", {
+      credentials: "same-origin",
+    });
     if (!response.ok) return false;
     const status = await response.json();
     return Boolean(status.registered);
@@ -179,10 +193,10 @@ async function login() {
   showView("day");
 }
 
-
 async function passkeyLogin() {
   try {
-    if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys.");
+    if (!window.PublicKeyCredential)
+      throw new Error("This browser does not support passkeys.");
     setLoginError("Touch your passkey to log in.", false);
     const start = await fetch("/api/passkey/login/start", {
       method: "POST",
@@ -190,12 +204,16 @@ async function passkeyLogin() {
     });
     if (!start.ok) throw new Error(await start.text());
     const requestOptions = await start.json();
-    requestOptions.publicKey.challenge = base64urlToUint8Array(requestOptions.publicKey.challenge);
+    requestOptions.publicKey.challenge = base64urlToUint8Array(
+      requestOptions.publicKey.challenge,
+    );
     requestOptions.publicKey.allowCredentials?.forEach((credential) => {
       credential.id = base64urlToUint8Array(credential.id);
     });
 
-    const assertion = await navigator.credentials.get({ publicKey: requestOptions.publicKey });
+    const assertion = await navigator.credentials.get({
+      publicKey: requestOptions.publicKey,
+    });
     const finish = await fetch("/api/passkey/login/finish", {
       method: "POST",
       credentials: "same-origin",
@@ -205,11 +223,19 @@ async function passkeyLogin() {
         rawId: uint8ArrayToBase64url(new Uint8Array(assertion.rawId)),
         type: assertion.type,
         response: {
-          authenticatorData: uint8ArrayToBase64url(new Uint8Array(assertion.response.authenticatorData)),
-          clientDataJSON: uint8ArrayToBase64url(new Uint8Array(assertion.response.clientDataJSON)),
-          signature: uint8ArrayToBase64url(new Uint8Array(assertion.response.signature)),
+          authenticatorData: uint8ArrayToBase64url(
+            new Uint8Array(assertion.response.authenticatorData),
+          ),
+          clientDataJSON: uint8ArrayToBase64url(
+            new Uint8Array(assertion.response.clientDataJSON),
+          ),
+          signature: uint8ArrayToBase64url(
+            new Uint8Array(assertion.response.signature),
+          ),
           userHandle: assertion.response.userHandle
-            ? uint8ArrayToBase64url(new Uint8Array(assertion.response.userHandle))
+            ? uint8ArrayToBase64url(
+                new Uint8Array(assertion.response.userHandle),
+              )
             : null,
         },
       }),
@@ -227,17 +253,26 @@ async function passkeyLogin() {
 
 async function registerPasskey() {
   try {
-    if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys.");
-    const start = await request("/api/passkey/register/start", { method: "POST" });
+    if (!window.PublicKeyCredential)
+      throw new Error("This browser does not support passkeys.");
+    const start = await request("/api/passkey/register/start", {
+      method: "POST",
+    });
     if (!start.ok) throw new Error(await start.text());
     const creationOptions = await start.json();
-    creationOptions.publicKey.challenge = base64urlToUint8Array(creationOptions.publicKey.challenge);
-    creationOptions.publicKey.user.id = base64urlToUint8Array(creationOptions.publicKey.user.id);
+    creationOptions.publicKey.challenge = base64urlToUint8Array(
+      creationOptions.publicKey.challenge,
+    );
+    creationOptions.publicKey.user.id = base64urlToUint8Array(
+      creationOptions.publicKey.user.id,
+    );
     creationOptions.publicKey.excludeCredentials?.forEach((credential) => {
       credential.id = base64urlToUint8Array(credential.id);
     });
 
-    const credential = await navigator.credentials.create({ publicKey: creationOptions.publicKey });
+    const credential = await navigator.credentials.create({
+      publicKey: creationOptions.publicKey,
+    });
     const finish = await request("/api/passkey/register/finish", {
       method: "POST",
       body: JSON.stringify({
@@ -245,8 +280,12 @@ async function registerPasskey() {
         rawId: uint8ArrayToBase64url(new Uint8Array(credential.rawId)),
         type: credential.type,
         response: {
-          attestationObject: uint8ArrayToBase64url(new Uint8Array(credential.response.attestationObject)),
-          clientDataJSON: uint8ArrayToBase64url(new Uint8Array(credential.response.clientDataJSON)),
+          attestationObject: uint8ArrayToBase64url(
+            new Uint8Array(credential.response.attestationObject),
+          ),
+          clientDataJSON: uint8ArrayToBase64url(
+            new Uint8Array(credential.response.clientDataJSON),
+          ),
         },
       }),
     });
@@ -281,7 +320,10 @@ function uint8ArrayToBase64url(bytes) {
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
   }
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 async function logout() {
@@ -295,7 +337,10 @@ async function logout() {
 function showLogin() {
   el("app").hidden = true;
   el("login").hidden = false;
-  el("login-form").classList.toggle("passkey-login-only", state.passkeyRegistered);
+  el("login-form").classList.toggle(
+    "passkey-login-only",
+    state.passkeyRegistered,
+  );
   el("password-login-fields").hidden = state.passkeyRegistered;
   el("passkey-login-button").hidden = !state.passkeyRegistered;
   el("password").value = "";
@@ -345,6 +390,11 @@ async function showView(name) {
 }
 
 async function saveEntry() {
+  if (!hasEntryContent()) {
+    setEntryStatus("Empty post cannot be saved.");
+    updateEntrySaveState();
+    return;
+  }
   setEntryStatus("Saving...");
   try {
     const response = await request("/api/entry", {
@@ -366,6 +416,24 @@ async function saveEntry() {
   }
 }
 
+function hasEntryContent() {
+  return Boolean(
+    el("entry-text").value.trim() ||
+    el("entry-page").value.trim() ||
+    el("entry-links").value.trim() ||
+    state.image,
+  );
+}
+
+function updateEntrySaveState() {
+  el("entry-save").disabled = !hasEntryContent();
+}
+
+function handleEntryInput() {
+  persistDraft();
+  updateEntrySaveState();
+}
+
 function setEntryStatus(message) {
   el("entry-status").textContent = message;
   el("entry-status").hidden = false;
@@ -381,6 +449,7 @@ function resetEntry() {
   localStorage.removeItem("obr.entry.text");
   localStorage.removeItem("obr.entry.page");
   localStorage.removeItem("obr.entry.links");
+  updateEntrySaveState();
 }
 
 function persistDraft() {
@@ -393,6 +462,7 @@ function restoreDraft() {
   el("entry-text").value = localStorage.getItem("obr.entry.text") || "";
   el("entry-page").value = localStorage.getItem("obr.entry.page") || "";
   el("entry-links").value = localStorage.getItem("obr.entry.links") || "";
+  updateEntrySaveState();
 }
 
 function handlePaste(event) {
@@ -417,6 +487,7 @@ function readImage(file) {
     state.image = reader.result;
     el("entry-preview").src = state.image;
     el("entry-preview").hidden = false;
+    updateEntrySaveState();
   };
   reader.readAsDataURL(file);
 }
@@ -424,7 +495,9 @@ function readImage(file) {
 async function search() {
   const keyword = el("search-input").value.trim();
   updateSearchClear();
-  const response = await request(`/api/search?keyword=${encodeURIComponent(keyword)}`);
+  const response = await request(
+    `/api/search?keyword=${encodeURIComponent(keyword)}`,
+  );
   el("search-results").innerHTML = `<ul>${await response.text()}</ul>`;
 }
 
@@ -542,7 +615,8 @@ function installIcons() {
 }
 
 function addIcon(element, iconName) {
-  if (!ICONS[iconName] || element.firstElementChild?.classList.contains("icon")) return;
+  if (!ICONS[iconName] || element.firstElementChild?.classList.contains("icon"))
+    return;
   element.insertAdjacentHTML("afterbegin", iconSvg(iconName));
 }
 
@@ -607,7 +681,9 @@ function renderMarkdown(raw) {
       openList();
       const checked = task[1].toLowerCase() === "x" ? " checked disabled" : "";
       const index = taskIndex++;
-      out.push(`<li><label><input type="checkbox" data-task-index="${index}"${checked}> ${inline(task[2])}</label></li>`);
+      out.push(
+        `<li><label><input type="checkbox" data-task-index="${index}"${checked}> ${inline(task[2])}</label></li>`,
+      );
       continue;
     }
     const bullet = trimmed.match(/^[-*]\s+(.*)$/);
@@ -649,7 +725,10 @@ function inline(value) {
       const text = label || target.split("#")[0] || target;
       return `<a href="#" data-page="${escapeHtml(page)}">${escapeHtml(text)}</a>`;
     })
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
+    )
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 }

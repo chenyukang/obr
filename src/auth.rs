@@ -15,10 +15,7 @@ use axum::http::{HeaderMap, header::HOST};
 use subtle::ConstantTimeEq;
 use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, cookie::SameSite};
 
-use crate::{
-    config::Config,
-    error::{AppError, AppResult},
-};
+use crate::config::Config;
 
 pub(crate) const AUTH_SESSION_KEY: &str = "authenticated";
 const MAX_FAILED_LOGINS: u32 = 5;
@@ -97,14 +94,6 @@ pub(crate) fn print_password_hash_from_stdin() -> Result<()> {
         .to_string();
     println!("{hash}");
     Ok(())
-}
-
-pub(crate) async fn ensure_auth(session: &Session) -> AppResult<()> {
-    if is_authenticated(session).await? {
-        Ok(())
-    } else {
-        Err(AppError::unauthorized())
-    }
 }
 
 pub(crate) async fn is_authenticated(

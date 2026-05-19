@@ -49,6 +49,11 @@ button:hover {
   border-color: #9fb0bb;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .icon {
   width: 16px;
   height: 16px;

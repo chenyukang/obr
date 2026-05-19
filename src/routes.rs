@@ -19,9 +19,7 @@ use webauthn_rs::prelude::{
 
 use crate::{
     app::AppState,
-    auth::{
-        AUTH_SESSION_KEY, allows_local_password_login, ensure_auth, is_authenticated, verify_login,
-    },
+    auth::{AUTH_SESSION_KEY, allows_local_password_login, verify_login},
     error::{AppError, AppResult},
     markdown::{
         ensure_inside, escape_html, escape_html_attr, mark_todo_content, normalize_markdown_rel,
@@ -116,7 +114,6 @@ pub(crate) async fn passkey_register_start(
     State(state): State<Arc<AppState>>,
     session: Session,
 ) -> AppResult<Response> {
-    ensure_auth(&session).await?;
     let _ = session.remove_value(PASSKEY_REGISTRATION_SESSION_KEY).await;
     let exclude_credentials = state.passkey_store.credential_ids();
     let exclude_credentials = if exclude_credentials.is_empty() {
@@ -144,7 +141,6 @@ pub(crate) async fn passkey_register_finish(
     session: Session,
     Json(credential): Json<RegisterPublicKeyCredential>,
 ) -> AppResult<Response> {
-    ensure_auth(&session).await?;
     let registration_state: PasskeyRegistration = session
         .get(PASSKEY_REGISTRATION_SESSION_KEY)
         .await?
@@ -208,11 +204,7 @@ pub(crate) async fn passkey_available(State(state): State<Arc<AppState>>) -> App
     .into_response())
 }
 
-pub(crate) async fn passkey_status(
-    State(state): State<Arc<AppState>>,
-    session: Session,
-) -> AppResult<Response> {
-    ensure_auth(&session).await?;
+pub(crate) async fn passkey_status(State(state): State<Arc<AppState>>) -> AppResult<Response> {
     Ok(Json(PasskeyStatus {
         registered: state.passkey_store.has_credentials(),
     })
@@ -224,21 +216,14 @@ pub(crate) async fn logout(session: Session) -> AppResult<Response> {
     Ok("ok".into_response())
 }
 
-pub(crate) async fn verify(session: Session) -> AppResult<Response> {
-    if is_authenticated(&session).await? {
-        Ok("ok".into_response())
-    } else {
-        Ok((StatusCode::UNAUTHORIZED, "unauthorized").into_response())
-    }
+pub(crate) async fn verify() -> AppResult<Response> {
+    Ok("ok".into_response())
 }
 
 pub(crate) async fn get_page(
     State(state): State<Arc<AppState>>,
-    session: Session,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Response> {
-    ensure_auth(&session).await?;
-
     state.maybe_git_pull();
     let requested = match query.query_type.as_deref() {
         Some("rand") => match random_markdown_file(&state.config.vault_path)? {
@@ -260,10 +245,8 @@ pub(crate) async fn get_page(
 
 pub(crate) async fn post_page(
     State(state): State<Arc<AppState>>,
-    session: Session,
     Json(body): Json<PageUpdate>,
 ) -> AppResult<Response> {
-    ensure_auth(&session).await?;
     let rel = normalize_markdown_rel(&body.file, false)?;
     let path = state.config.vault_path.join(rel);
     ensure_inside(&state.config.vault_path, &path)?;
@@ -277,10 +260,8 @@ pub(crate) async fn post_page(
 
 pub(crate) async fn search(
     State(state): State<Arc<AppState>>,
-    session: Session,
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Response> {
-    ensure_auth(&session).await?;
     state.maybe_git_pull();
 
     let keyword = query.keyword.unwrap_or_default();
@@ -302,11 +283,8 @@ pub(crate) async fn search(
 
 pub(crate) async fn image(
     State(state): State<Arc<AppState>>,
-    session: Session,
     AxumPath(path): AxumPath<String>,
 ) -> AppResult<Response> {
-    ensure_auth(&session).await?;
-
     let rel = normalize_rel_path(&path)?;
     let images_root = state.config.vault_path.join("Pics").canonicalize()?;
     let path = images_root.join(rel);
@@ -330,16 +308,21 @@ pub(crate) async fn image(
 
 pub(crate) async fn post_entry(
     State(state): State<Arc<AppState>>,
-    session: Session,
     Json(body): Json<EntryRequest>,
 ) -> AppResult<Response> {
-    ensure_auth(&session).await?;
-
     let now = Local::now();
     let date = now.format("%Y-%m-%d").to_string();
     let time = now.format("%H:%M").to_string();
 
     let page = body.page.trim();
+    if page.is_empty()
+        && body.links.trim().is_empty()
+        && body.text.trim().is_empty()
+        && body.image.trim().is_empty()
+    {
+        return Ok((StatusCode::BAD_REQUEST, "empty post").into_response());
+    }
+
     let path = if page.is_empty() {
         state
             .config
@@ -405,10 +388,8 @@ pub(crate) async fn post_entry(
 
 pub(crate) async fn mark_todo(
     State(state): State<Arc<AppState>>,
-    session: Session,
     Query(query): Query<MarkQuery>,
 ) -> AppResult<Response> {
-    ensure_auth(&session).await?;
     let Some(index) = query.index else {
         return Ok((StatusCode::BAD_REQUEST, "missing index").into_response());
     };

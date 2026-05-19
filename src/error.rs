@@ -59,14 +59,6 @@ impl AppError {
         }
     }
 
-    pub(crate) fn unauthorized() -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            message: "unauthorized",
-            source: None,
-        }
-    }
-
     pub(crate) fn bad_request(message: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

@@ -12,22 +12,22 @@ use axum::{
     body::Body,
     extract::DefaultBodyLimit,
     http::{
-        HeaderValue, Request,
+        HeaderValue, Request, StatusCode,
         header::{CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS},
     },
     middleware::{self, Next},
-    response::{Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use chrono::Local;
 use tokio::net::TcpListener;
 use tower_http::{services::ServeDir, trace::TraceLayer};
-use tower_sessions::{MemoryStore, SessionManagerLayer};
+use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
 use tracing::{info, warn};
 use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 
 use crate::{
-    auth::{LoginLimiter, print_password_hash_from_stdin, session_layer},
+    auth::{LoginLimiter, is_authenticated, print_password_hash_from_stdin, session_layer},
     config::Config,
     passkeys::PasskeyStore,
     routes,
@@ -179,7 +179,7 @@ fn build_webauthn(config: &Config) -> Result<Arc<Webauthn>> {
 }
 
 fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>) -> Router {
-    Router::new()
+    let public = Router::new()
         .route("/", get(routes::index))
         .route("/obweb", get(routes::index))
         .route("/front", get(routes::index))
@@ -191,14 +191,6 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         )
         .route("/api/login", post(routes::login))
         .route(
-            "/api/passkey/register/start",
-            post(routes::passkey_register_start),
-        )
-        .route(
-            "/api/passkey/register/finish",
-            post(routes::passkey_register_finish),
-        )
-        .route(
             "/api/passkey/login/start",
             post(routes::passkey_login_start),
         )
@@ -207,6 +199,17 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
             post(routes::passkey_login_finish),
         )
         .route("/api/passkey/available", get(routes::passkey_available))
+        .nest_service("/assets", ServeDir::new("static"));
+
+    let protected = Router::new()
+        .route(
+            "/api/passkey/register/start",
+            post(routes::passkey_register_start),
+        )
+        .route(
+            "/api/passkey/register/finish",
+            post(routes::passkey_register_finish),
+        )
         .route("/api/passkey/status", get(routes::passkey_status))
         .route("/api/logout", post(routes::logout))
         .route("/api/verify", get(routes::verify))
@@ -215,12 +218,26 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/entry", post(routes::post_entry))
         .route("/api/mark", post(routes::mark_todo))
         .route("/static/images/{*path}", get(routes::image))
-        .nest_service("/assets", ServeDir::new("static"))
+        .route_layer(middleware::from_fn(require_auth));
+
+    public
+        .merge(protected)
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(security_headers))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(session_layer)
         .with_state(state)
+}
+
+async fn require_auth(session: Session, request: Request<Body>, next: Next) -> Response {
+    match is_authenticated(&session).await {
+        Ok(true) => next.run(request).await,
+        Ok(false) => StatusCode::UNAUTHORIZED.into_response(),
+        Err(err) => {
+            warn!("session auth check failed: {err}");
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+    }
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
