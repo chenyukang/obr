@@ -3,6 +3,7 @@ const state = {
   lastListView: "day",
   currentFile: "",
   currentContent: "",
+  currentHighlightKeyword: "",
   image: "",
   searchTimer: 0,
   passkeyRegistered: false,
@@ -98,7 +99,7 @@ function bindEvents() {
     const link = event.target.closest("a[id]");
     if (!link) return;
     event.preventDefault();
-    await fetchPage(link.id);
+    await fetchPage(link.id, state.view, el("search-input").value.trim());
   });
 
   el("todo-form").addEventListener("submit", async (event) => {
@@ -553,11 +554,16 @@ async function addTodo() {
   }
 }
 
-async function fetchPage(path, sourceView = state.view) {
+async function fetchPage(
+  path,
+  sourceView = state.view,
+  highlightKeyword = "",
+) {
   const response = await request(`/api/page?path=${encodeURIComponent(path)}`);
   const data = await response.json();
   const file = data[0];
   const content = data[1] || "";
+  state.currentHighlightKeyword = highlightKeyword.trim();
   if (file === "NoPage") {
     state.currentFile = path.endsWith(".md") ? path : `${path}.md`;
     state.currentContent = "";
@@ -576,6 +582,7 @@ function showPage(title, html, sourceView) {
   }
   el("page-title").textContent = title;
   el("page-content").innerHTML = html;
+  highlightPageContent(state.currentHighlightKeyword);
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
   setButtonIcon(el("edit-button"), "pencil", "Edit");
@@ -602,9 +609,58 @@ async function toggleEdit() {
   if (response.ok) {
     state.currentContent = editor.value;
     content.innerHTML = renderMarkdown(state.currentContent);
+    highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     content.hidden = false;
     setButtonIcon(el("edit-button"), "pencil", "Edit");
+  }
+}
+
+function highlightPageContent(keyword) {
+  const root = el("page-content");
+  const needle = keyword.trim();
+  if (!needle) return;
+
+  const lowerNeedle = needle.toLowerCase();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      if (
+        parent.closest(
+          "mark.search-highlight, pre, code, script, style, textarea",
+        )
+      ) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return node.nodeValue.toLowerCase().includes(lowerNeedle)
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT;
+    },
+  });
+  const matches = [];
+  while (walker.nextNode()) matches.push(walker.currentNode);
+
+  for (const node of matches) {
+    const text = node.nodeValue;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    let index = text.toLowerCase().indexOf(lowerNeedle);
+    while (index !== -1) {
+      if (index > cursor) {
+        fragment.append(document.createTextNode(text.slice(cursor, index)));
+      }
+      const mark = document.createElement("mark");
+      mark.className = "search-highlight";
+      mark.textContent = text.slice(index, index + needle.length);
+      fragment.append(mark);
+      cursor = index + needle.length;
+      index = text.toLowerCase().indexOf(lowerNeedle, cursor);
+    }
+    if (cursor < text.length) {
+      fragment.append(document.createTextNode(text.slice(cursor)));
+    }
+    node.replaceWith(fragment);
   }
 }
 
@@ -717,7 +773,7 @@ function renderMarkdown(raw) {
 function inline(value) {
   return escapeHtml(value)
     .replace(/!\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, (_match, name) => {
-      return `<img src="/static/images/${encodeURIComponent(name.trim())}" alt="">`;
+      return `<img src="/assets/images/${encodeURIComponent(name.trim())}" alt="">`;
     })
     .replace(/\[\[([^\]]+)\]\]/g, (_match, name) => {
       const [target, label] = name.split("|", 2).map((part) => part.trim());

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -259,6 +260,70 @@ pub(crate) fn save_data_url_image(
     Ok(name)
 }
 
+pub(crate) fn auto_link_note_titles(vault: &Path, text: &str) -> Result<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut titles = HashSet::new();
+    for entry in markdown_entries(vault) {
+        let entry = entry?;
+        if let Some(stem) = entry.path().file_stem().and_then(|stem| stem.to_str()) {
+            let title = stem.trim();
+            if !title.is_empty() {
+                titles.insert(title.to_string());
+            }
+        }
+    }
+
+    let mut titles = titles.into_iter().collect::<Vec<_>>();
+    titles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+
+    let mut linked = trimmed.to_string();
+    for title in titles {
+        linked = link_title_outside_wiki_links(&linked, &title);
+    }
+    Ok(linked)
+}
+
+fn link_title_outside_wiki_links(text: &str, title: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(start) = rest.find("[[") {
+        let before = &rest[..start];
+        output.push_str(&replace_title_in_plain_segment(before, title));
+        if let Some(end) = rest[start + 2..].find("]]") {
+            let wiki_end = start + 2 + end + 2;
+            output.push_str(&rest[start..wiki_end]);
+            rest = &rest[wiki_end..];
+        } else {
+            output.push_str(&rest[start..]);
+            return output;
+        }
+    }
+
+    output.push_str(&replace_title_in_plain_segment(rest, title));
+    output
+}
+
+fn replace_title_in_plain_segment(segment: &str, title: &str) -> String {
+    let mut output = String::with_capacity(segment.len());
+    let mut rest = segment;
+
+    while let Some(index) = rest.find(title) {
+        output.push_str(&rest[..index]);
+        output.push_str("[[");
+        output.push_str(title);
+        output.push_str("]]");
+        rest = &rest[index + title.len()..];
+    }
+
+    output.push_str(rest);
+    output
+}
+
 pub(crate) fn mark_todo_content(content: &str, index: usize) -> Option<String> {
     let mut checkbox_index = 0;
     let mut changed = false;
@@ -357,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_rel_path_allows_safe_static_paths() {
+    fn normalize_rel_path_allows_safe_relative_paths() {
         assert_eq!(
             normalize_rel_path("nested/photo.png").unwrap(),
             PathBuf::from("nested/photo.png")
@@ -365,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_rel_path_rejects_static_path_escape() {
+    fn normalize_rel_path_rejects_relative_path_escape() {
         assert!(normalize_rel_path("../secret.png").is_err());
         assert!(normalize_rel_path("nested/../../secret.png").is_err());
         assert!(normalize_rel_path("nested\0secret.png").is_err());
@@ -420,6 +485,27 @@ mod tests {
 
         assert!(mark_todo_content(content, 1).is_none());
         assert!(mark_todo_content(content, 4).is_none());
+    }
+
+    #[test]
+    fn auto_link_note_titles_links_existing_note_names() {
+        let vault = TestVault::new();
+        vault.write("People/可可.md", "");
+        vault.write("People/可.md", "");
+
+        let linked = auto_link_note_titles(&vault.path, "可可睡觉了").unwrap();
+
+        assert_eq!(linked, "[[可可]]睡觉了");
+    }
+
+    #[test]
+    fn auto_link_note_titles_skips_existing_wiki_links() {
+        let vault = TestVault::new();
+        vault.write("People/可可.md", "");
+
+        let linked = auto_link_note_titles(&vault.path, "[[可可]]睡觉了，可可很乖").unwrap();
+
+        assert_eq!(linked, "[[可可]]睡觉了，[[可可]]很乖");
     }
 
     #[test]

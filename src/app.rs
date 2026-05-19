@@ -199,7 +199,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
             post(routes::passkey_login_finish),
         )
         .route("/api/passkey/available", get(routes::passkey_available))
-        .nest_service("/assets", ServeDir::new("static"));
+        .nest_service("/assets", ServeDir::new("assets"));
 
     let protected = Router::new()
         .route(
@@ -217,7 +217,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/search", get(routes::search))
         .route("/api/entry", post(routes::post_entry))
         .route("/api/mark", post(routes::mark_todo))
-        .route("/static/images/{*path}", get(routes::image))
+        .route("/assets/images/{*path}", get(routes::image))
         .route_layer(middleware::from_fn(require_auth));
 
     public

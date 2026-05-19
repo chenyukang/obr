@@ -381,6 +381,13 @@ a {
   padding: 0;
 }
 
+.search-highlight {
+  border-radius: 3px;
+  background: #ffe08a;
+  color: #1f2933;
+  padding: 0 2px;
+}
+
 .markdown img {
   max-width: 100%;
   border-radius: 6px;

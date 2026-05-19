@@ -22,9 +22,9 @@ use crate::{
     auth::{AUTH_SESSION_KEY, allows_local_password_login, verify_login},
     error::{AppError, AppResult},
     markdown::{
-        ensure_inside, escape_html, escape_html_attr, mark_todo_content, normalize_markdown_rel,
-        normalize_rel_path, random_markdown_file, rel_to_vault, resolve_markdown_request,
-        save_data_url_image, search_markdown,
+        auto_link_note_titles, ensure_inside, escape_html, escape_html_attr, mark_todo_content,
+        normalize_markdown_rel, normalize_rel_path, random_markdown_file, rel_to_vault,
+        resolve_markdown_request, save_data_url_image, search_markdown,
     },
 };
 
@@ -73,7 +73,7 @@ const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
 const PASSKEY_AUTHENTICATION_SESSION_KEY: &str = "passkey_authentication";
 
 pub(crate) async fn index() -> Html<&'static str> {
-    Html(include_str!("../static/index.html"))
+    Html(include_str!("../assets/index.html"))
 }
 
 pub(crate) async fn login(
@@ -363,10 +363,11 @@ pub(crate) async fn post_entry(
         }
     }
 
+    let linked_text = auto_link_note_titles(&state.config.vault_path, body.text.trim())?;
     let text = if page == "todo" {
-        format!("- [ ] {}", body.text.trim())
+        format!("- [ ] {linked_text}")
     } else {
-        body.text.trim().to_string()
+        linked_text
     };
     appended.push('\n');
     appended.push_str(&text);
