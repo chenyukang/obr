@@ -29,6 +29,8 @@ const state = {
   applyingHistory: false,
   updateWorker: null,
   refreshingForUpdate: false,
+  commandItems: [],
+  commandIndex: 0,
 };
 
 const el = (id) => document.getElementById(id);
@@ -115,6 +117,10 @@ function bindEvents() {
   el("outbox-close").addEventListener("click", hideOutboxPanel);
   el("outbox-retry").addEventListener("click", retryOutbox);
   el("outbox-list").addEventListener("click", handleOutboxListClick);
+  el("command-palette").addEventListener("click", handleCommandBackdropClick);
+  el("command-input").addEventListener("input", renderCommandPalette);
+  el("command-input").addEventListener("keydown", handleCommandInputKeydown);
+  el("command-list").addEventListener("click", handleCommandListClick);
   installLongPressCopy(el("page-content"));
   installLongPressCopy(el("search-results"));
 
@@ -1469,7 +1475,7 @@ async function fetchPage(
   options = {},
 ) {
   if (!prepareToLeavePageEditor()) return;
-  const { updateHistory = true } = options;
+  const { updateHistory = true, queryType = "" } = options;
   state.pageController?.abort();
   const requestId = state.pageRequestId + 1;
   state.pageRequestId = requestId;
@@ -1477,7 +1483,13 @@ async function fetchPage(
   state.pageController = controller;
   let data;
   try {
-    const response = await request(`/api/page?path=${encodeURIComponent(path)}`, {
+    const params = new URLSearchParams();
+    if (queryType) {
+      params.set("query_type", queryType);
+    } else {
+      params.set("path", path);
+    }
+    const response = await request(`/api/page?${params}`, {
       signal: controller.signal,
     });
     data = await response.json();
@@ -1843,15 +1855,182 @@ async function goBackToLastList() {
 
 function handleGlobalKeydown(event) {
   if (el("app").hidden) return;
-  if (event.defaultPrevented || isEditableTarget(event.target)) return;
-  const searchShortcut =
-    event.key === "/" ||
-    ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k");
-  if (!searchShortcut || event.altKey) return;
+  if (event.defaultPrevented) return;
+  if (event.key === "Escape" && !el("command-palette").hidden) {
+    event.preventDefault();
+    closeCommandPalette();
+    return;
+  }
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" && !event.altKey) {
+    event.preventDefault();
+    openCommandPalette();
+    return;
+  }
+  if (isEditableTarget(event.target) || event.key !== "/" || event.altKey) return;
   event.preventDefault();
   void showView("find", { restoreScroll: false }).then(() =>
     focusSearchInput({ select: true }),
   );
+}
+
+function openCommandPalette() {
+  state.commandIndex = 0;
+  el("command-input").value = "";
+  el("command-palette").hidden = false;
+  renderCommandPalette();
+  window.requestAnimationFrame(() => el("command-input").focus());
+}
+
+function closeCommandPalette() {
+  el("command-palette").hidden = true;
+}
+
+function handleCommandBackdropClick(event) {
+  if (event.target === el("command-palette")) closeCommandPalette();
+}
+
+function handleCommandInputKeydown(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeCommandPalette();
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveCommandSelection(1);
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveCommandSelection(-1);
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const command = state.commandItems[state.commandIndex];
+    if (command) void runCommand(command.id);
+  }
+}
+
+function handleCommandListClick(event) {
+  const button = event.target.closest("button[data-command-id]");
+  if (!button) return;
+  void runCommand(button.dataset.commandId);
+}
+
+function renderCommandPalette() {
+  const query = el("command-input").value.trim().toLowerCase();
+  const commands = buildCommandItems();
+  state.commandItems = commands.filter((command) => {
+    const haystack = `${command.label} ${command.hint || ""}`.toLowerCase();
+    return !query || haystack.includes(query);
+  });
+  state.commandIndex = Math.min(
+    state.commandIndex,
+    Math.max(0, state.commandItems.length - 1),
+  );
+  if (!state.commandItems.length) {
+    el("command-list").innerHTML = '<p class="empty">No commands.</p>';
+    return;
+  }
+  el("command-list").innerHTML = state.commandItems
+    .map((command, index) => commandItemHtml(command, index))
+    .join("");
+}
+
+function commandItemHtml(command, index) {
+  return `
+    <button class="command-item" type="button" role="option" data-command-id="${escapeHtmlAttr(command.id)}" aria-selected="${index === state.commandIndex}">
+      <span>${escapeHtml(command.label)}</span>
+      <small>${escapeHtml(command.hint || "")}</small>
+    </button>
+  `;
+}
+
+function moveCommandSelection(delta) {
+  if (!state.commandItems.length) return;
+  const length = state.commandItems.length;
+  state.commandIndex = (state.commandIndex + delta + length) % length;
+  renderCommandPalette();
+  const selected = el("command-list").querySelector('[aria-selected="true"]');
+  selected?.scrollIntoView({ block: "nearest" });
+}
+
+function buildCommandItems() {
+  const commands = [
+    {
+      id: "new-memo",
+      label: "New memo",
+      hint: "Day",
+      run: async () => {
+        await showView("day", { restoreScroll: false });
+        window.requestAnimationFrame(() => el("entry-text").focus());
+      },
+    },
+    {
+      id: "find",
+      label: "Find",
+      hint: "/",
+      run: async () => {
+        await showView("find", { restoreScroll: false });
+        focusSearchInput({ select: true });
+      },
+    },
+    {
+      id: "todo",
+      label: "Todo",
+      hint: "Open todo",
+      run: () => showView("todo", { restoreScroll: false }),
+    },
+    {
+      id: "random",
+      label: "Random page",
+      hint: "Open a random note",
+      run: () => fetchPage("", state.lastListView, "", { queryType: "rand" }),
+    },
+  ];
+  if (state.currentFile && state.currentFile !== "NoPage") {
+    commands.push({
+      id: "copy-current-page",
+      label: "Copy current page link",
+      hint: pageLinkText(state.currentFile),
+      run: copyCurrentPageLink,
+    });
+  }
+  for (const page of readRecentPages().slice(0, 6)) {
+    commands.push({
+      id: `recent:${page.file}`,
+      label: page.file,
+      hint: "Recent page",
+      run: () => fetchPage(page.file, "find"),
+    });
+  }
+  return commands;
+}
+
+async function runCommand(id) {
+  const command = state.commandItems.find((item) => item.id === id);
+  if (!command) return;
+  closeCommandPalette();
+  await command.run();
+}
+
+async function copyCurrentPageLink() {
+  if (!state.currentFile || state.currentFile === "NoPage") {
+    showToast("No page open.");
+    return;
+  }
+  try {
+    await copyText(pageLinkText(state.currentFile));
+    showToast("Page link copied.");
+  } catch (error) {
+    console.error(error);
+    showToast("Copy failed.");
+  }
+}
+
+function pageLinkText(file) {
+  return `[[${String(file).replace(/\.md$/, "")}]]`;
 }
 
 function isEditableTarget(target) {

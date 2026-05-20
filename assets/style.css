@@ -302,6 +302,82 @@ nav {
   padding: 5px 9px;
 }
 
+.command-palette {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  background: rgb(23 32 38 / 24%);
+  padding: max(72px, 12vh) 14px 24px;
+}
+
+.command-dialog {
+  width: min(560px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgb(27 37 43 / 24%);
+}
+
+.command-dialog h2 {
+  margin: 0;
+  padding: 14px 16px 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-transform: uppercase;
+}
+
+#command-input {
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 14px 16px;
+  font-size: 18px;
+  outline: none;
+}
+
+.command-list {
+  max-height: min(420px, 55vh);
+  overflow: auto;
+  padding: 8px;
+}
+
+.command-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 10px;
+  text-align: left;
+}
+
+.command-item[aria-selected="true"],
+.command-item:hover {
+  background: #edf1f3;
+}
+
+.command-item span,
+.command-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-item span {
+  font-weight: 800;
+}
+
+.command-item small {
+  color: var(--muted);
+}
+
 .auth-actions button {
   width: 34px;
   height: 34px;
