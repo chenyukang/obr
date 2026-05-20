@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-sw-update">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-outbox-panel">
   </head>
   <body>
     <div id="login" class="login-panel" hidden>
@@ -43,6 +43,7 @@
               <span class="connection-dot" aria-hidden="true"></span>
               <span id="connection-label" class="connection-label">Offline</span>
             </div>
+            <button id="outbox-button" class="outbox-button" type="button" data-icon="list-checks" aria-label="Show pending sync items" title="Pending sync items" hidden>0</button>
             <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key" hidden></button>
             <button id="logout-button" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
           </div>
@@ -51,6 +52,19 @@
       <button id="update-banner" class="update-banner" type="button" data-icon="rotate-ccw" hidden>
         New version ready
       </button>
+      <section id="outbox-panel" class="outbox-panel" aria-label="Pending sync items" hidden>
+        <div class="outbox-header">
+          <div>
+            <h2>Pending sync</h2>
+            <p id="outbox-count">0 pending</p>
+          </div>
+          <div class="outbox-actions">
+            <button id="outbox-retry" type="button" data-icon="rotate-ccw">Retry</button>
+            <button id="outbox-close" type="button" aria-label="Close pending sync items" title="Close" data-icon="x"></button>
+          </div>
+        </div>
+        <div id="outbox-list" class="outbox-list"></div>
+      </section>
 
       <main>
         <section id="day-view" class="view">
@@ -118,6 +132,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-sw-update"></script>
+    <script src="/assets/app.js?v=20260520-outbox-panel"></script>
   </body>
 </html>

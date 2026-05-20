@@ -111,6 +111,10 @@ function bindEvents() {
   window.addEventListener("scroll", handleWindowScroll, { passive: true });
   document.addEventListener("keydown", handleGlobalKeydown);
   el("update-banner").addEventListener("click", applyServiceWorkerUpdate);
+  el("outbox-button").addEventListener("click", toggleOutboxPanel);
+  el("outbox-close").addEventListener("click", hideOutboxPanel);
+  el("outbox-retry").addEventListener("click", retryOutbox);
+  el("outbox-list").addEventListener("click", handleOutboxListClick);
   installLongPressCopy(el("page-content"));
   installLongPressCopy(el("search-results"));
 
@@ -434,6 +438,8 @@ function updateConnectionStatusLabel() {
   label.textContent = text;
   status.title = text;
   status.setAttribute("aria-label", text);
+  updateOutboxButton(pending);
+  if (!el("outbox-panel").hidden) renderOutboxPanel();
 }
 
 function canUseOfflineApp() {
@@ -572,7 +578,7 @@ function writeOutbox(items) {
 function queueOfflineMutation(type, payload) {
   const items = readOutbox();
   const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const item = { id, type, payload, createdAt: Date.now() };
+  const item = { id, type, payload, createdAt: Date.now(), error: "" };
   if (type === "page") {
     const filtered = items.filter(
       (existing) =>
@@ -605,7 +611,10 @@ async function syncOutbox() {
         await syncOutboxItem(item);
       } catch (error) {
         console.error(error);
-        remaining.push(item, ...items.slice(items.indexOf(item) + 1));
+        remaining.push(
+          { ...item, error: errorMessage(error) },
+          ...items.slice(items.indexOf(item) + 1),
+        );
         break;
       }
     }
@@ -613,6 +622,103 @@ async function syncOutbox() {
     state.syncingOutbox = false;
     writeOutbox(remaining);
   }
+}
+
+function updateOutboxButton(pending = readOutbox().length) {
+  const button = el("outbox-button");
+  if (!button) return;
+  button.hidden = pending === 0;
+  setButtonIcon(button, "list-checks", String(pending));
+  const label = `${pending} pending sync ${pending === 1 ? "item" : "items"}`;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+}
+
+function toggleOutboxPanel() {
+  const panel = el("outbox-panel");
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) renderOutboxPanel();
+}
+
+function hideOutboxPanel() {
+  el("outbox-panel").hidden = true;
+}
+
+async function retryOutbox() {
+  renderOutboxPanel();
+  if (!readOutbox().length) return;
+  showToast("Retrying sync.");
+  const online = await checkConnectivity({ sync: true, allowHidden: true });
+  if (!online) showToast("Still offline.");
+  renderOutboxPanel();
+}
+
+function handleOutboxListClick(event) {
+  const button = event.target.closest("button[data-outbox-delete]");
+  if (!button) return;
+  const id = button.dataset.outboxDelete;
+  writeOutbox(readOutbox().filter((item) => item.id !== id));
+  renderOutboxPanel();
+  showToast("Removed pending item.");
+}
+
+function renderOutboxPanel() {
+  const items = readOutbox();
+  el("outbox-count").textContent = `${items.length} pending`;
+  el("outbox-retry").disabled = !items.length || state.syncingOutbox;
+  if (!items.length) {
+    el("outbox-list").innerHTML = '<p class="empty">Nothing waiting to sync.</p>';
+    return;
+  }
+  el("outbox-list").innerHTML = items.map(outboxItemHtml).join("");
+}
+
+function outboxItemHtml(item) {
+  const title = item.type === "page" ? "Page edit" : "Memo";
+  const detail = outboxItemDetail(item);
+  const error = item.error
+    ? `<p class="outbox-item-error">${escapeHtml(item.error)}</p>`
+    : "";
+  return `
+    <article class="outbox-item">
+      <div class="outbox-item-title">
+        <span>${escapeHtml(title)}</span>
+        <span>${escapeHtml(formatTime(item.createdAt))}</span>
+      </div>
+      <p class="outbox-item-detail">${escapeHtml(detail)}</p>
+      ${error}
+      <button type="button" data-outbox-delete="${escapeHtmlAttr(item.id)}">${iconSvg("x")}<span>Delete</span></button>
+    </article>
+  `;
+}
+
+function outboxItemDetail(item) {
+  if (item.type === "page") {
+    return item.payload?.file || "Untitled page";
+  }
+  const page = item.payload?.page?.trim() || "Daily";
+  const text = firstLine(item.payload?.text || "");
+  const image = item.payload?.image ? " + image" : "";
+  return text ? `${page}: ${text}${image}` : `${page}${image}`;
+}
+
+function firstLine(value) {
+  return String(value).trim().split(/\r?\n/, 1)[0].slice(0, 120);
+}
+
+function formatTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function errorMessage(error) {
+  return error?.message || String(error || "Sync failed.");
 }
 
 async function syncOutboxItem(item) {
