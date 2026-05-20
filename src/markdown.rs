@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    fmt::Write as FmtWrite,
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
@@ -8,8 +9,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Local;
+use pulldown_cmark::{Event, Options, Parser, html};
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
+use yaml_serde::Value as YamlValue;
 
 #[derive(Debug)]
 struct SearchHit {
@@ -275,6 +278,367 @@ pub(crate) fn save_data_url_image(
         }
     }
     bail!("could not allocate unique image filename")
+}
+
+pub(crate) fn render_markdown_html(raw: &str) -> String {
+    let (frontmatter, body) = split_frontmatter(raw)
+        .map(|(frontmatter, body)| (Some(frontmatter), body))
+        .unwrap_or((None, raw));
+    let preprocessed = preprocess_obsidian_refs(body);
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_FOOTNOTES);
+
+    let parser = Parser::new_ext(&preprocessed, options);
+    let mut events = Vec::new();
+    let mut task_index = 0usize;
+
+    for event in parser.map(Event::into_static) {
+        match event {
+            Event::TaskListMarker(checked) => {
+                let checked_attr = if checked { " checked disabled" } else { "" };
+                events.push(Event::Html(
+                    format!(
+                        r#"<input type="checkbox" data-task-index="{task_index}"{checked_attr}>"#
+                    )
+                    .into(),
+                ));
+                task_index += 1;
+            }
+            other => events.push(other),
+        }
+    }
+
+    let mut rendered = String::new();
+    html::push_html(&mut rendered, events.into_iter());
+    let mut output = String::new();
+    if let Some(frontmatter) = frontmatter {
+        output.push_str(&render_frontmatter_panel(frontmatter));
+    }
+    output.push_str(&sanitize_rendered_html(&rendered));
+    output
+}
+
+fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
+    let mut offset = 0usize;
+    let first_line = raw.split_inclusive('\n').next()?;
+    let (first_body, _) = split_line_ending(first_line);
+    if first_body.trim() != "---" {
+        return None;
+    }
+
+    offset += first_line.len();
+    let frontmatter_start = offset;
+    for line in raw[offset..].split_inclusive('\n') {
+        let (body, _) = split_line_ending(line);
+        let marker = body.trim_end();
+        if marker == "---" || marker == "..." {
+            let frontmatter = &raw[frontmatter_start..offset];
+            let content = &raw[offset + line.len()..];
+            return Some((frontmatter, content));
+        }
+        offset += line.len();
+    }
+
+    None
+}
+
+fn render_frontmatter_panel(frontmatter: &str) -> String {
+    match yaml_serde::from_str::<YamlValue>(frontmatter) {
+        Ok(YamlValue::Mapping(mapping)) => render_frontmatter_mapping(&mapping),
+        _ => render_raw_frontmatter(frontmatter),
+    }
+}
+
+fn render_frontmatter_mapping(mapping: &yaml_serde::Mapping) -> String {
+    if mapping.is_empty() {
+        return String::new();
+    }
+
+    let mut html = String::new();
+    let _ = write!(
+        html,
+        r#"<details class="metadata-panel"><summary><span>Properties</span><span class="metadata-count">{} {}</span></summary><dl class="metadata-list">"#,
+        mapping.len(),
+        if mapping.len() == 1 { "item" } else { "items" }
+    );
+    for (key, value) in mapping {
+        let key = yaml_value_plain_text(key);
+        let _ = write!(
+            html,
+            r#"<dt class="metadata-key">{}</dt><dd class="metadata-value">{}</dd>"#,
+            escape_html(&key),
+            render_property_value(value)
+        );
+    }
+    html.push_str("</dl></details>");
+    html
+}
+
+fn render_raw_frontmatter(frontmatter: &str) -> String {
+    format!(
+        r#"<details class="metadata-panel"><summary><span>Properties</span><span class="metadata-count">raw</span></summary><pre class="metadata-raw"><code>{}</code></pre></details>"#,
+        escape_html(frontmatter.trim())
+    )
+}
+
+fn render_property_value(value: &YamlValue) -> String {
+    match value {
+        YamlValue::Null => r#"<span class="metadata-empty">empty</span>"#.to_string(),
+        YamlValue::Bool(value) => escape_html(&value.to_string()),
+        YamlValue::Number(value) => escape_html(&value.to_string()),
+        YamlValue::String(value) => render_property_scalar(value),
+        YamlValue::Sequence(values) => render_property_sequence(values),
+        YamlValue::Mapping(_) => render_property_code(value),
+        YamlValue::Tagged(tagged) => render_property_value(&tagged.value),
+    }
+}
+
+fn render_property_scalar(value: &str) -> String {
+    if value.trim().is_empty() {
+        return r#"<span class="metadata-empty">empty</span>"#.to_string();
+    }
+    if is_http_url(value) {
+        return format!(
+            r#"<a href="{}" target="_blank" rel="noreferrer">{}</a>"#,
+            escape_html_attr(value),
+            escape_html(value)
+        );
+    }
+    escape_html(value)
+}
+
+fn render_property_sequence(values: &[YamlValue]) -> String {
+    if values.is_empty() {
+        return r#"<span class="metadata-empty">empty</span>"#.to_string();
+    }
+    if values.iter().all(is_scalar_yaml_value) {
+        let mut html = String::from(r#"<span class="metadata-chips">"#);
+        for value in values {
+            let text = yaml_value_plain_text(value);
+            let _ = write!(
+                html,
+                r#"<span class="metadata-chip">{}</span>"#,
+                escape_html(&text)
+            );
+        }
+        html.push_str("</span>");
+        return html;
+    }
+    render_property_code(&YamlValue::Sequence(values.to_vec()))
+}
+
+fn render_property_code(value: &YamlValue) -> String {
+    let serialized = yaml_serde::to_string(value)
+        .unwrap_or_else(|_| yaml_value_plain_text(value))
+        .trim()
+        .trim_start_matches("---\n")
+        .trim()
+        .to_string();
+    format!(
+        r#"<pre class="metadata-raw"><code>{}</code></pre>"#,
+        escape_html(&serialized)
+    )
+}
+
+fn is_scalar_yaml_value(value: &YamlValue) -> bool {
+    matches!(
+        value,
+        YamlValue::Null | YamlValue::Bool(_) | YamlValue::Number(_) | YamlValue::String(_)
+    )
+}
+
+fn yaml_value_plain_text(value: &YamlValue) -> String {
+    match value {
+        YamlValue::Null => String::new(),
+        YamlValue::Bool(value) => value.to_string(),
+        YamlValue::Number(value) => value.to_string(),
+        YamlValue::String(value) => value.clone(),
+        YamlValue::Sequence(values) => values
+            .iter()
+            .map(yaml_value_plain_text)
+            .collect::<Vec<_>>()
+            .join(", "),
+        YamlValue::Mapping(_) => yaml_serde::to_string(value).unwrap_or_default(),
+        YamlValue::Tagged(tagged) => yaml_value_plain_text(&tagged.value),
+    }
+}
+
+fn is_http_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
+}
+
+fn preprocess_obsidian_refs(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut in_fenced_code = false;
+
+    for line in raw.split_inclusive('\n') {
+        let (body, ending) = split_line_ending(line);
+        if body.trim_start().starts_with("```") {
+            output.push_str(body);
+            output.push_str(ending);
+            in_fenced_code = !in_fenced_code;
+        } else if in_fenced_code {
+            output.push_str(line);
+        } else {
+            output.push_str(&replace_obsidian_refs_in_line(body));
+            output.push_str(ending);
+        }
+    }
+
+    output
+}
+
+fn obsidian_link_html(raw: &str) -> String {
+    let (target, label) = split_obsidian_target(raw);
+    if target.is_empty() {
+        return escape_html(raw);
+    }
+    let text = label
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| target.split('#').next().unwrap_or(target).trim());
+    format!(
+        r##"<a href="#" data-page="{}">{}</a>"##,
+        escape_html_attr(target),
+        escape_html(text)
+    )
+}
+
+fn obsidian_embed_html(raw: &str) -> String {
+    let (target, size) = split_obsidian_target(raw);
+    if target.is_empty() {
+        return escape_html(raw);
+    }
+
+    let src = format!("/assets/images/{}", percent_encode_path(target));
+    let mut attrs = String::new();
+    if let Some(size) = size {
+        let (width, height) = split_embed_size(size);
+        if let Some(width) = width {
+            let _ = write!(attrs, r#" width="{width}""#);
+        }
+        if let Some(height) = height {
+            let _ = write!(attrs, r#" height="{height}""#);
+        }
+    }
+
+    format!(
+        r#"<img src="{}" alt="{}" loading="lazy"{}>"#,
+        escape_html_attr(&src),
+        escape_html_attr(target),
+        attrs
+    )
+}
+
+fn split_obsidian_target(raw: &str) -> (&str, Option<&str>) {
+    let mut parts = raw.splitn(2, '|');
+    let target = parts.next().unwrap_or_default().trim();
+    let label = parts.next().map(str::trim);
+    (target, label)
+}
+
+fn split_embed_size(size: &str) -> (Option<u32>, Option<u32>) {
+    let mut parts = size.split(['x', 'X']);
+    let width = parts.next().and_then(parse_dimension);
+    let height = parts.next().and_then(parse_dimension);
+    (width, height)
+}
+
+fn parse_dimension(value: &str) -> Option<u32> {
+    let value = value.trim();
+    (!value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
+}
+
+fn percent_encode_path(path: &str) -> String {
+    path.split('/')
+        .map(percent_encode_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn percent_encode_segment(segment: &str) -> String {
+    let mut encoded = String::new();
+    for byte in segment.bytes() {
+        if matches!(
+            byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'
+        ) {
+            encoded.push(byte as char);
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn sanitize_rendered_html(rendered: &str) -> String {
+    let mut cleaner = ammonia::Builder::new();
+    cleaner
+        .add_tags(&["input"])
+        .add_tag_attributes("a", &["data-page", "target"])
+        .add_tag_attributes("img", &["loading"])
+        .add_tag_attributes("input", &["type", "checked", "disabled", "data-task-index"]);
+    cleaner.clean(rendered).to_string()
+}
+
+fn split_line_ending(line: &str) -> (&str, &str) {
+    if let Some(body) = line.strip_suffix("\r\n") {
+        (body, "\r\n")
+    } else if let Some(body) = line.strip_suffix('\n') {
+        (body, "\n")
+    } else {
+        (line, "")
+    }
+}
+
+fn replace_obsidian_refs_in_line(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut index = 0;
+
+    while index < line.len() {
+        let rest = &line[index..];
+        if rest.starts_with('`') {
+            let end = inline_code_span_end(rest);
+            output.push_str(&rest[..end]);
+            index += end;
+        } else if rest.starts_with("![[") || rest.starts_with("[[") {
+            let is_embed = rest.starts_with("![[");
+            let body_start = if is_embed { 3 } else { 2 };
+            if let Some(close) = rest[body_start..].find("]]") {
+                let body_end = body_start + close;
+                let body = &rest[body_start..body_end];
+                output.push_str(&if is_embed {
+                    obsidian_embed_html(body)
+                } else {
+                    obsidian_link_html(body)
+                });
+                index += body_end + 2;
+            } else {
+                output.push_str(rest);
+                break;
+            }
+        } else if let Some(ch) = rest.chars().next() {
+            output.push(ch);
+            index += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    output
+}
+
+fn inline_code_span_end(rest: &str) -> usize {
+    let delimiter_len = rest.bytes().take_while(|byte| *byte == b'`').count();
+    let delimiter = &rest[..delimiter_len];
+    rest[delimiter_len..]
+        .find(delimiter)
+        .map(|end| delimiter_len + end + delimiter_len)
+        .unwrap_or(delimiter_len)
 }
 
 pub(crate) fn auto_link_note_titles(vault: &Path, text: &str) -> Result<String> {
@@ -584,5 +948,78 @@ mod tests {
             escape_html_attr("<tag a='b' \"c\">"),
             "&lt;tag a=&#39;b&#39; &quot;c&quot;&gt;"
         );
+    }
+
+    #[test]
+    fn render_markdown_html_handles_obsidian_links_and_embeds() {
+        let rendered = render_markdown_html("[[People/可可|可可]]\n\n![[hello world.jpg|250]]");
+
+        assert!(rendered.contains(r##"href="#"##));
+        assert!(rendered.contains(r#"data-page="People/可可""#));
+        assert!(rendered.contains(">可可</a>"));
+        assert!(rendered.contains(r#"<img src="/assets/images/hello%20world.jpg""#));
+        assert!(rendered.contains(r#"width="250""#));
+    }
+
+    #[test]
+    fn render_markdown_html_folds_yaml_frontmatter() {
+        let rendered = render_markdown_html(
+            "---\ndoc_type: hypothesis-highlights\nurl: https://news.ycombinator.com/item?id=1\ntags:\n  - Words\nhighlight_count: 1\n---\n\n# Body",
+        );
+
+        assert!(rendered.contains(r#"<details class="metadata-panel">"#));
+        assert!(rendered.contains(r#"<span class="metadata-count">4 items</span>"#));
+        assert!(rendered.contains(r#"<dt class="metadata-key">doc_type</dt>"#));
+        assert!(rendered.contains(r#"<a href="https://news.ycombinator.com/item?id=1""#));
+        assert!(rendered.contains(r#"<span class="metadata-chip">Words</span>"#));
+        assert!(rendered.contains("<h1>Body</h1>"));
+        assert!(!rendered.contains("doc_type: hypothesis-highlights"));
+    }
+
+    #[test]
+    fn render_markdown_html_keeps_invalid_frontmatter_collapsed() {
+        let rendered = render_markdown_html("---\nfoo: [bar\n---\n\nBody");
+
+        assert!(rendered.contains(r#"<details class="metadata-panel">"#));
+        assert!(rendered.contains(r#"<span class="metadata-count">raw</span>"#));
+        assert!(rendered.contains(r#"<pre class="metadata-raw"><code>"#));
+        assert!(rendered.contains("<p>Body</p>"));
+    }
+
+    #[test]
+    fn render_markdown_html_keeps_plain_horizontal_rule_without_frontmatter_close() {
+        let rendered = render_markdown_html("---\n\nBody");
+
+        assert!(!rendered.contains("metadata-panel"));
+        assert!(rendered.contains("<hr"));
+        assert!(rendered.contains("<p>Body</p>"));
+    }
+
+    #[test]
+    fn render_markdown_html_adds_clickable_task_indexes() {
+        let rendered = render_markdown_html("- [ ] first\n- [x] second");
+
+        assert!(rendered.contains(r#"data-task-index="0""#));
+        assert!(rendered.contains(r#"data-task-index="1""#));
+        assert!(rendered.contains("checked"));
+        assert!(rendered.contains("disabled"));
+    }
+
+    #[test]
+    fn render_markdown_html_does_not_link_inside_code() {
+        let rendered = render_markdown_html("`[[Note]]`\n\n```\n[[Block]]\n```");
+
+        assert!(rendered.contains("<code>[[Note]]</code>"));
+        assert!(rendered.contains("[[Block]]"));
+        assert!(!rendered.contains("data-page"));
+    }
+
+    #[test]
+    fn render_markdown_html_sanitizes_unsafe_html() {
+        let rendered =
+            render_markdown_html("<script>alert(1)</script>\n\n<img src=\"x\" onerror=\"bad()\">");
+
+        assert!(!rendered.contains("<script"));
+        assert!(!rendered.contains("onerror"));
     }
 }

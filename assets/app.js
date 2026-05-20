@@ -3,6 +3,7 @@ const state = {
   lastListView: "day",
   currentFile: "",
   currentContent: "",
+  currentContentLoaded: false,
   currentHighlightKeyword: "",
   image: "",
   searchTimer: 0,
@@ -671,9 +672,9 @@ function focusSearchInput() {
 async function loadTodo() {
   const response = await request("/api/page?path=Zero%2Ftodo");
   const data = await response.json();
-  const content = data[0] === "NoPage" ? "" : data[1] || "";
-  el("todo-list").innerHTML = content.trim()
-    ? renderMarkdown(content)
+  const html = data.file === "NoPage" ? "" : data.html || "";
+  el("todo-list").innerHTML = html.trim()
+    ? html
     : '<p class="empty">No todos.</p>';
 }
 
@@ -711,18 +712,20 @@ async function fetchPage(
   if (!prepareToLeavePageEditor()) return;
   const response = await request(`/api/page?path=${encodeURIComponent(path)}`);
   const data = await response.json();
-  const file = data[0];
-  const content = data[1] || "";
+  const file = data.file;
+  const html = data.html || "";
   state.currentHighlightKeyword = highlightKeyword.trim();
   if (file === "NoPage") {
     state.currentFile = path.endsWith(".md") ? path : `${path}.md`;
     state.currentContent = "";
+    state.currentContentLoaded = true;
     showPage("NoPage", "No page yet.", sourceView);
     return;
   }
   state.currentFile = file;
-  state.currentContent = content;
-  showPage(file, renderMarkdown(content), sourceView);
+  state.currentContent = "";
+  state.currentContentLoaded = false;
+  showPage(file, html, sourceView);
 }
 
 function showPage(title, html, sourceView) {
@@ -745,6 +748,20 @@ async function toggleEdit() {
   const content = el("page-content");
   const button = el("edit-button");
   if (editor.hidden) {
+    setPageEditorStatus("Loading source...");
+    button.disabled = true;
+    try {
+      await loadCurrentPageSource();
+    } catch (error) {
+      console.error(error);
+      const message = error.message
+        ? `Could not load source: ${error.message}`
+        : "Could not load source.";
+      setPageEditorStatus(message);
+      button.disabled = false;
+      return;
+    }
+    button.disabled = false;
     const draft = loadPageDraft(state.currentFile);
     editor.value = draft ?? state.currentContent;
     editor.hidden = false;
@@ -765,9 +782,12 @@ async function toggleEdit() {
       }),
     });
     if (!response.ok) throw new Error(await response.text());
+    const data = await response.json();
     state.currentContent = editor.value;
+    state.currentContentLoaded = true;
+    state.currentFile = data.file || state.currentFile;
     clearPageDraft(state.currentFile);
-    content.innerHTML = renderMarkdown(state.currentContent);
+    content.innerHTML = data.html || "";
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     content.hidden = false;
@@ -781,6 +801,23 @@ async function toggleEdit() {
   } finally {
     button.disabled = false;
   }
+}
+
+async function loadCurrentPageSource() {
+  if (state.currentContentLoaded) return;
+  const response = await request(
+    `/api/page/source?path=${encodeURIComponent(state.currentFile)}`,
+  );
+  if (!response.ok) throw new Error(await response.text());
+  const data = await response.json();
+  if (data.file === "NoPage") {
+    state.currentContent = "";
+    state.currentContentLoaded = true;
+    return;
+  }
+  state.currentFile = data.file;
+  state.currentContent = data.content || "";
+  state.currentContentLoaded = true;
 }
 
 function handlePageEditorInput() {
@@ -923,103 +960,6 @@ async function markTodo(index) {
     method: "POST",
     body: JSON.stringify({}),
   });
-}
-
-function renderMarkdown(raw) {
-  let inCode = false;
-  let inList = false;
-  let taskIndex = 0;
-  const out = [];
-
-  for (const line of raw.split(/\r?\n/)) {
-    if (line.trim().startsWith("```")) {
-      if (inCode) {
-        out.push("</code></pre>");
-      } else {
-        closeList();
-        out.push("<pre><code>");
-      }
-      inCode = !inCode;
-      continue;
-    }
-    if (inCode) {
-      out.push(escapeHtml(line) + "\n");
-      continue;
-    }
-
-    const trimmed = line.trim();
-    if (!trimmed) {
-      closeList();
-      out.push("");
-      continue;
-    }
-    if (trimmed === "---") {
-      closeList();
-      out.push("<hr>");
-      continue;
-    }
-    const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
-    if (heading) {
-      closeList();
-      const level = Math.min(6, heading[1].length + 1);
-      out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
-      continue;
-    }
-    const task = trimmed.match(/^[-*]\s+\[([ xX])\]\s+(.*)$/);
-    if (task) {
-      openList();
-      const checked = task[1].toLowerCase() === "x" ? " checked disabled" : "";
-      const index = taskIndex++;
-      out.push(
-        `<li><label><input type="checkbox" data-task-index="${index}"${checked}> ${inline(task[2])}</label></li>`,
-      );
-      continue;
-    }
-    const bullet = trimmed.match(/^[-*]\s+(.*)$/);
-    if (bullet) {
-      openList();
-      out.push(`<li>${inline(bullet[1])}</li>`);
-      continue;
-    }
-    closeList();
-    out.push(`<p>${inline(line)}</p>`);
-  }
-  closeList();
-  if (inCode) out.push("</code></pre>");
-  return out.join("\n");
-
-  function openList() {
-    if (!inList) {
-      out.push("<ul>");
-      inList = true;
-    }
-  }
-
-  function closeList() {
-    if (inList) {
-      out.push("</ul>");
-      inList = false;
-    }
-  }
-}
-
-function inline(value) {
-  return escapeHtml(value)
-    .replace(/!\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, (_match, name) => {
-      return `<img src="/assets/images/${encodeURIComponent(name.trim())}" alt="">`;
-    })
-    .replace(/\[\[([^\]]+)\]\]/g, (_match, name) => {
-      const [target, label] = name.split("|", 2).map((part) => part.trim());
-      const page = target || label || "";
-      const text = label || target.split("#")[0] || target;
-      return `<a href="#" data-page="${escapeHtml(page)}">${escapeHtml(text)}</a>`;
-    })
-    .replace(
-      /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
-      '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
-    )
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 }
 
 function escapeHtml(value) {

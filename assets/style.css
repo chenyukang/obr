@@ -405,6 +405,107 @@ a {
   border-radius: 6px;
 }
 
+.metadata-panel {
+  margin: 0 0 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8faf9;
+}
+
+.metadata-panel summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  color: var(--ink);
+  font-weight: 700;
+  list-style: none;
+}
+
+.metadata-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.metadata-panel summary::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.metadata-panel[open] summary::before {
+  transform: rotate(45deg);
+}
+
+.metadata-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.metadata-list {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  padding: 12px;
+}
+
+.metadata-key {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.metadata-value {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.metadata-value a {
+  overflow-wrap: anywhere;
+}
+
+.metadata-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.metadata-chip {
+  border-radius: 999px;
+  background: #e9f2ee;
+  color: #22543d;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.metadata-empty {
+  color: var(--muted);
+}
+
+.metadata-raw {
+  margin: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 8px 8px;
+  background: #172026;
+  color: #f7fafc;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 640px) {
   .topbar {
     display: grid;
@@ -455,5 +556,22 @@ a {
     grid-column: 2;
     grid-row: 1;
     justify-self: end;
+  }
+
+  .metadata-panel {
+    margin-bottom: 14px;
+  }
+
+  .metadata-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .metadata-key {
+    font-size: 12px;
+  }
+
+  .metadata-value {
+    margin-bottom: 8px;
   }
 }

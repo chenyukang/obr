@@ -24,7 +24,7 @@ use crate::{
     markdown::{
         auto_link_note_titles, ensure_inside, escape_html, escape_html_attr, mark_todo_content,
         normalize_markdown_rel, normalize_rel_path, random_markdown_file, rel_to_vault,
-        resolve_markdown_request, save_data_url_image, search_markdown,
+        render_markdown_html, resolve_markdown_request, save_data_url_image, search_markdown,
     },
 };
 
@@ -73,6 +73,18 @@ struct PasskeyStatus {
 struct AuthOptions {
     passkey_registered: bool,
     password_login_allowed: bool,
+}
+
+#[derive(Serialize)]
+struct PageResponse {
+    file: String,
+    html: String,
+}
+
+#[derive(Serialize)]
+struct PageSourceResponse {
+    file: String,
+    content: String,
 }
 
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
@@ -242,23 +254,32 @@ pub(crate) async fn get_page(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Response> {
-    state.maybe_git_pull();
-    let requested = match query.query_type.as_deref() {
-        Some("rand") => match random_markdown_file(&state.config.vault_path)? {
-            Some(path) => path,
-            None => return Ok(Json(vec!["NoPage".to_string(), String::new()]).into_response()),
-        },
-        _ => resolve_markdown_request(&state.config.vault_path, &query.path.unwrap_or_default())?,
+    let Some((rel, content)) = read_page_content(&state, query)? else {
+        return Ok(Json(PageResponse {
+            file: "NoPage".to_string(),
+            html: String::new(),
+        })
+        .into_response());
     };
+    Ok(Json(PageResponse {
+        file: rel,
+        html: render_markdown_html(&content),
+    })
+    .into_response())
+}
 
-    if !requested.exists() {
-        return Ok(Json(vec!["NoPage".to_string(), String::new()]).into_response());
-    }
-    ensure_inside(&state.config.vault_path, &requested)?;
-    let content = fs::read_to_string(&requested)
-        .with_context(|| format!("read page {}", requested.display()))?;
-    let rel = rel_to_vault(&state.config.vault_path, &requested)?;
-    Ok(Json(vec![rel, content]).into_response())
+pub(crate) async fn get_page_source(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PageQuery>,
+) -> AppResult<Response> {
+    let Some((rel, content)) = read_page_content(&state, query)? else {
+        return Ok(Json(PageSourceResponse {
+            file: "NoPage".to_string(),
+            content: String::new(),
+        })
+        .into_response());
+    };
+    Ok(Json(PageSourceResponse { file: rel, content }).into_response())
 }
 
 pub(crate) async fn post_page(
@@ -271,9 +292,34 @@ pub(crate) async fn post_page(
     if !path.exists() {
         return Ok((StatusCode::NOT_FOUND, "NoPage").into_response());
     }
-    fs::write(&path, body.content).with_context(|| format!("write {}", path.display()))?;
+    fs::write(&path, &body.content).with_context(|| format!("write {}", path.display()))?;
     state.maybe_git_sync();
-    Ok("ok".into_response())
+    let rel = rel_to_vault(&state.config.vault_path, &path)?;
+    Ok(Json(PageResponse {
+        file: rel,
+        html: render_markdown_html(&body.content),
+    })
+    .into_response())
+}
+
+fn read_page_content(state: &AppState, query: PageQuery) -> AppResult<Option<(String, String)>> {
+    state.maybe_git_pull();
+    let requested = match query.query_type.as_deref() {
+        Some("rand") => match random_markdown_file(&state.config.vault_path)? {
+            Some(path) => path,
+            None => return Ok(None),
+        },
+        _ => resolve_markdown_request(&state.config.vault_path, &query.path.unwrap_or_default())?,
+    };
+
+    if !requested.exists() {
+        return Ok(None);
+    }
+    ensure_inside(&state.config.vault_path, &requested)?;
+    let content = fs::read_to_string(&requested)
+        .with_context(|| format!("read page {}", requested.display()))?;
+    let rel = rel_to_vault(&state.config.vault_path, &requested)?;
+    Ok(Some((rel, content)))
 }
 
 pub(crate) async fn search(
