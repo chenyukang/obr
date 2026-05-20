@@ -126,6 +126,24 @@ fn log_filter(config: &Config) -> String {
     }
 }
 
+fn classify_user_agent(user_agent: &str) -> &'static str {
+    if user_agent.contains("Codex/") {
+        "codex-in-app-browser"
+    } else if user_agent.contains("Mobile") && user_agent.contains("Chrome/") {
+        "mobile-chrome"
+    } else if user_agent.contains("Chrome/") {
+        "chrome"
+    } else if user_agent.contains("Mobile") && user_agent.contains("Safari/") {
+        "mobile-safari"
+    } else if user_agent.contains("curl/") {
+        "curl"
+    } else if user_agent == "-" {
+        "unknown"
+    } else {
+        "browser-or-client"
+    }
+}
+
 fn start_daemon() -> Result<()> {
     let config = Config::load()?;
     if let Some(parent) = config.log_path.parent()
@@ -259,6 +277,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
                         .get(USER_AGENT)
                         .and_then(|value| value.to_str().ok())
                         .unwrap_or("-");
+                    let client = classify_user_agent(user_agent);
 
                     tracing::info_span!(
                         "request",
@@ -266,6 +285,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
                         uri = %request.uri(),
                         version = ?request.version(),
                         remote_addr = %remote_addr,
+                        client = %client,
                         user_agent = %user_agent,
                     )
                 })
