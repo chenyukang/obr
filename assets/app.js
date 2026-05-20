@@ -7,6 +7,10 @@ const state = {
   currentHighlightKeyword: "",
   image: "",
   searchTimer: 0,
+  searchController: null,
+  searchRequestId: 0,
+  pageController: null,
+  pageRequestId: 0,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
   connectionOnline: navigator.onLine,
@@ -711,7 +715,7 @@ async function request(path, options = {}) {
     });
     setConnectionStatus(response.headers.get("x-obr-offline-cache") !== "1");
   } catch (error) {
-    setConnectionStatus(false);
+    if (error?.name !== "AbortError") setConnectionStatus(false);
     throw error;
   }
   if (response.status === 401) {
@@ -1244,18 +1248,29 @@ function setEntrySaving(saving) {
 async function search() {
   const keyword = el("search-input").value.trim();
   updateSearchClear();
+  state.searchController?.abort();
+  const requestId = state.searchRequestId + 1;
+  state.searchRequestId = requestId;
+  const controller = new AbortController();
+  state.searchController = controller;
   try {
     const response = await request(
       `/api/search?keyword=${encodeURIComponent(keyword)}`,
+      { signal: controller.signal },
     );
-    el("search-results").innerHTML = `<ul>${await response.text()}</ul>`;
+    const html = await response.text();
+    if (requestId !== state.searchRequestId) return;
+    el("search-results").innerHTML = `<ul>${html}</ul>`;
   } catch (error) {
+    if (error?.name === "AbortError" || requestId !== state.searchRequestId) return;
     console.error(error);
     if (shouldQueueOffline(error)) {
       renderCachedSearchResults(keyword);
       return;
     }
     el("search-results").innerHTML = '<p class="empty">Search failed.</p>';
+  } finally {
+    if (state.searchController === controller) state.searchController = null;
   }
 }
 
@@ -1349,15 +1364,24 @@ async function fetchPage(
 ) {
   if (!prepareToLeavePageEditor()) return;
   const { updateHistory = true } = options;
+  state.pageController?.abort();
+  const requestId = state.pageRequestId + 1;
+  state.pageRequestId = requestId;
+  const controller = new AbortController();
+  state.pageController = controller;
   let data;
   try {
-    const response = await request(`/api/page?path=${encodeURIComponent(path)}`);
+    const response = await request(`/api/page?path=${encodeURIComponent(path)}`, {
+      signal: controller.signal,
+    });
     data = await response.json();
+    if (requestId !== state.pageRequestId) return;
     if (data.file !== "NoPage") {
       rememberPage(data, path);
       void warmPageSource(data.file);
     }
   } catch (error) {
+    if (error?.name === "AbortError" || requestId !== state.pageRequestId) return;
     console.error(error);
     const cached = findCachedPage(path);
     if (!cached) {
@@ -1366,7 +1390,10 @@ async function fetchPage(
     }
     data = cached;
     showToast("Offline copy.");
+  } finally {
+    if (state.pageController === controller) state.pageController = null;
   }
+  if (requestId !== state.pageRequestId) return;
   const file = data.file;
   state.currentHighlightKeyword = highlightKeyword.trim();
   if (file === "NoPage") {
