@@ -11,6 +11,7 @@ const state = {
   searchRequestId: 0,
   pageController: null,
   pageRequestId: 0,
+  todoRequestId: 0,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
   connectionOnline: navigator.onLine,
@@ -194,7 +195,7 @@ function bindEvents() {
     const task = event.target.closest("input[data-task-index]");
     if (!task || !task.checked) return;
     await markTodo(task.dataset.taskIndex);
-    await loadTodo();
+    await loadTodo({ renderCache: false });
   });
 
   el("back-button").addEventListener("click", goBackToLastList);
@@ -559,6 +560,11 @@ function cachedPageSource(file) {
   return findCachedPage(file)?.source || "";
 }
 
+function cachedPageHtml(page) {
+  if (!page) return "";
+  return page.html || (page.source ? offlineSourcePreview(page.source) : "");
+}
+
 function pageAliases(file, ...extra) {
   const aliases = [file, ...extra].filter(Boolean);
   if (file.endsWith(".md")) aliases.push(file.slice(0, -3));
@@ -754,7 +760,7 @@ async function syncOutboxItem(item) {
     if (text !== "ok") throw new Error(text);
     showToast("Offline entry synced.");
     if (item.payload.page === "todo" && state.view === "todo") {
-      await loadTodo();
+      await loadTodo({ renderCache: false });
     }
     return;
   }
@@ -1476,28 +1482,38 @@ function focusSearchInput(options = {}) {
   });
 }
 
-async function loadTodo() {
+async function loadTodo(options = {}) {
+  const { renderCache = true } = options;
+  const requestId = state.todoRequestId + 1;
+  state.todoRequestId = requestId;
+  const cached = findCachedPage("Zero/todo");
+  const cachedHtml = cachedPageHtml(cached);
+  if (renderCache && cached) renderTodoHtml(cachedHtml, "No cached todos.");
+
   try {
     const response = await request("/api/page?path=Zero%2Ftodo");
     const data = await response.json();
+    if (requestId !== state.todoRequestId) return;
     if (data.file !== "NoPage") {
       rememberPage(data, "Zero/todo");
       void warmPageSource(data.file);
     }
     const html = data.file === "NoPage" ? "" : data.html || "";
-    el("todo-list").innerHTML = html.trim()
-      ? html
-      : '<p class="empty">No todos.</p>';
-    enhanceMarkdownImages(el("todo-list"));
+    if (!renderCache || !cached || html !== cachedHtml) {
+      renderTodoHtml(html, "No todos.");
+    }
   } catch (error) {
+    if (requestId !== state.todoRequestId) return;
     console.error(error);
-    const cached = findCachedPage("Zero/todo");
-    const html = cached?.html || "";
-    el("todo-list").innerHTML = html.trim()
-      ? html
-      : '<p class="empty">No offline todo cache.</p>';
-    enhanceMarkdownImages(el("todo-list"));
+    if (!renderCache || !cached) renderTodoHtml("", "No offline todo cache.");
   }
+}
+
+function renderTodoHtml(html, emptyMessage) {
+  el("todo-list").innerHTML = html.trim()
+    ? html
+    : `<p class="empty">${escapeHtml(emptyMessage)}</p>`;
+  enhanceMarkdownImages(el("todo-list"));
 }
 
 async function addTodo() {
@@ -1521,7 +1537,7 @@ async function addTodo() {
     el("todo-input").value = "";
     el("todo-status").textContent = "Synced to file.";
     showToast("Todo synced to file.");
-    await loadTodo();
+    await loadTodo({ renderCache: false });
   } catch (error) {
     console.error(error);
     if (shouldQueueOffline(error)) {
@@ -1552,6 +1568,17 @@ async function fetchPage(
   state.pageRequestId = requestId;
   const controller = new AbortController();
   state.pageController = controller;
+  let renderedCachedPage = false;
+  let cachedPage = null;
+  if (!queryType) {
+    cachedPage = findCachedPage(path);
+    if (cachedPage) {
+      displayPageData(cachedPage, path, sourceView, highlightKeyword, {
+        updateHistory,
+      });
+      renderedCachedPage = true;
+    }
+  }
   let data;
   try {
     const params = new URLSearchParams();
@@ -1572,36 +1599,63 @@ async function fetchPage(
   } catch (error) {
     if (error?.name === "AbortError" || requestId !== state.pageRequestId) return;
     console.error(error);
-    const cached = findCachedPage(path);
-    if (!cached) {
+    if (!renderedCachedPage) {
       showToast("No offline copy.");
-      return;
+    } else {
+      showToast("Offline copy.");
     }
-    data = cached;
-    showToast("Offline copy.");
+    return;
   } finally {
     if (state.pageController === controller) state.pageController = null;
   }
   if (requestId !== state.pageRequestId) return;
+  if (
+    renderedCachedPage &&
+    data.file === cachedPage?.file &&
+    (data.html || "") === cachedPageHtml(cachedPage)
+  ) {
+    return;
+  }
+  displayPageData(data, path, sourceView, highlightKeyword, {
+    updateHistory: updateHistory && !renderedCachedPage,
+    saveScroll: !renderedCachedPage,
+    restoreReading: !renderedCachedPage,
+  });
+}
+
+function displayPageData(
+  data,
+  requestedPath,
+  sourceView,
+  highlightKeyword = "",
+  options = {},
+) {
   const file = data.file;
   state.currentHighlightKeyword = highlightKeyword.trim();
   if (file === "NoPage") {
-    state.currentFile = path.endsWith(".md") ? path : `${path}.md`;
+    state.currentFile = requestedPath.endsWith(".md")
+      ? requestedPath
+      : `${requestedPath}.md`;
     state.currentContent = "";
     state.currentContentLoaded = true;
-    showPage("NoPage", "No page yet.", sourceView, { updateHistory });
+    showPage("NoPage", "No page yet.", sourceView, options);
     return;
   }
   state.currentFile = file;
-  state.currentContent = pendingPageContent(file) ?? data.source ?? "";
+  state.currentContent =
+    pendingPageContent(file) ?? data.source ?? cachedPageSource(file) ?? "";
   state.currentContentLoaded = Boolean(state.currentContent);
   const html = data.html || offlineSourcePreview(state.currentContent);
-  showPage(file, html, sourceView, { updateHistory });
+  showPage(file, html, sourceView, options);
 }
 
 function showPage(title, html, sourceView, options = {}) {
-  const { updateHistory = true } = options;
-  saveCurrentScrollPosition();
+  const {
+    updateHistory = true,
+    saveScroll = true,
+    restoreReading = true,
+  } = options;
+  if (saveScroll) saveCurrentScrollPosition();
   if (sourceView === "todo" || sourceView === "find") {
     state.lastListView = sourceView;
   } else if (state.lastListView !== "todo") {
@@ -1622,7 +1676,7 @@ function showPage(title, html, sourceView, options = {}) {
   el("page-view").hidden = false;
   if (title === "NoPage") {
     window.scrollTo(0, 0);
-  } else {
+  } else if (restoreReading) {
     restoreReadingPosition(state.currentFile);
   }
   if (updateHistory) {
