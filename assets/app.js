@@ -59,6 +59,8 @@ const ICONS = {
     '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"></path><circle cx="12" cy="13" r="3"></circle>',
   image:
     '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
+  command:
+    '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0 0-6"></path>',
   "list-checks":
     '<path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>',
   "log-in":
@@ -112,6 +114,7 @@ function bindEvents() {
   window.addEventListener("popstate", handleAppPopState);
   window.addEventListener("scroll", handleWindowScroll, { passive: true });
   document.addEventListener("keydown", handleGlobalKeydown);
+  el("command-button").addEventListener("click", openCommandPalette);
   el("update-banner").addEventListener("click", applyServiceWorkerUpdate);
   el("outbox-button").addEventListener("click", toggleOutboxPanel);
   el("outbox-close").addEventListener("click", hideOutboxPanel);

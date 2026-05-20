@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-command-palette">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-command-button">
   </head>
   <body>
     <div id="login" class="login-panel" hidden>
@@ -43,6 +43,7 @@
               <span class="connection-dot" aria-hidden="true"></span>
               <span id="connection-label" class="connection-label">Offline</span>
             </div>
+            <button id="command-button" type="button" aria-label="Open command palette" title="Command" data-icon="command"></button>
             <button id="outbox-button" class="outbox-button" type="button" data-icon="list-checks" aria-label="Show pending sync items" title="Pending sync items" hidden>0</button>
             <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key" hidden></button>
             <button id="logout-button" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
@@ -140,6 +141,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-command-palette"></script>
+    <script src="/assets/app.js?v=20260520-command-button"></script>
   </body>
 </html>
