@@ -37,6 +37,7 @@ const state = {
   imageLightboxY: 0,
   imageLightboxDrag: null,
   imageLightboxLastTap: null,
+  imageLightboxSuppressZoomUntil: 0,
 };
 
 const el = (id) => document.getElementById(id);
@@ -2389,6 +2390,7 @@ function installImageLightboxTrigger(img) {
   img.title = "Double tap to preview";
   img.addEventListener("dblclick", (event) => {
     event.preventDefault();
+    event.stopPropagation();
     openImageLightbox(img);
   });
   img.addEventListener("pointerup", handleImageTriggerPointerUp);
@@ -2424,6 +2426,8 @@ function openImageLightbox(sourceImg) {
   state.imageLightboxX = 0;
   state.imageLightboxY = 0;
   state.imageLightboxDrag = null;
+  state.imageLightboxLastTap = null;
+  state.imageLightboxSuppressZoomUntil = Date.now() + IMAGE_DOUBLE_TAP_MS;
   applyImageLightboxTransform();
   el("image-lightbox").hidden = false;
   document.body.classList.add("lightbox-open");
@@ -2454,6 +2458,7 @@ function handleImageLightboxWheel(event) {
 
 function handleImageLightboxPointerUp(event) {
   if (event.pointerType === "mouse" || !event.isPrimary || state.imageLightboxDrag) return;
+  if (Date.now() < state.imageLightboxSuppressZoomUntil) return;
   const now = Date.now();
   const last = state.imageLightboxLastTap;
   if (last?.target === event.currentTarget && now - last.time <= IMAGE_DOUBLE_TAP_MS) {
@@ -2466,6 +2471,7 @@ function handleImageLightboxPointerUp(event) {
 }
 
 function toggleImageLightboxZoom() {
+  if (Date.now() < state.imageLightboxSuppressZoomUntil) return;
   if (state.imageLightboxScale <= 1.05) {
     setImageLightboxScale(2);
   } else {
