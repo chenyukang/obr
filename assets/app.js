@@ -141,6 +141,7 @@ function bindEvents() {
   el("entry-text").addEventListener("input", handleEntryInput);
   el("entry-page").addEventListener("input", handleEntryInput);
   el("entry-links").addEventListener("input", handleEntryInput);
+  el("entry-meta").addEventListener("toggle", updateEntryMetaSummary);
   el("entry-text").addEventListener("paste", handlePaste);
   el("entry-image-file").addEventListener("change", handleImageFile);
   el("entry-camera-file").addEventListener("change", handleImageFile);
@@ -1221,6 +1222,7 @@ function updateEntrySaveState() {
 function handleEntryInput() {
   persistDraft();
   updateEntrySaveState();
+  updateEntryMetaSummary();
 }
 
 function setEntryStatus(message) {
@@ -1239,6 +1241,8 @@ function resetEntry() {
   localStorage.removeItem("obr.entry.text");
   localStorage.removeItem("obr.entry.page");
   localStorage.removeItem("obr.entry.links");
+  el("entry-meta").open = false;
+  updateEntryMetaSummary();
   updateEntrySaveState();
 }
 
@@ -1252,7 +1256,16 @@ function restoreDraft() {
   el("entry-text").value = localStorage.getItem("obr.entry.text") || "";
   el("entry-page").value = localStorage.getItem("obr.entry.page") || "";
   el("entry-links").value = localStorage.getItem("obr.entry.links") || "";
+  updateEntryMetaSummary();
   updateEntrySaveState();
+}
+
+function updateEntryMetaSummary() {
+  const fields = [el("entry-page"), el("entry-links")];
+  const filled = fields.filter((input) => input.value.trim()).length;
+  const count = el("entry-meta-count");
+  count.textContent = `${filled} filled`;
+  count.hidden = filled === 0 || el("entry-meta").open;
 }
 
 function handlePaste(event) {

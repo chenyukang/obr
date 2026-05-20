@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-image-placeholder">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-fold-entry-meta">
   </head>
   <body>
     <div id="login" class="login-panel" hidden>
@@ -80,10 +80,18 @@
           <form id="entry-form" class="panel">
             <label class="sr-only" for="entry-text">Memo</label>
             <textarea id="entry-text" rows="12" placeholder="Write a memo..." aria-describedby="entry-status"></textarea>
-            <label class="sr-only" for="entry-page">Link page</label>
-            <input id="entry-page" placeholder="Link page, optional" aria-describedby="entry-status">
-            <label class="sr-only" for="entry-links">Tags and links</label>
-            <input id="entry-links" placeholder="Tags / links, comma separated" aria-describedby="entry-status">
+            <details id="entry-meta" class="entry-meta">
+              <summary>
+                <span>Links & tags</span>
+                <span id="entry-meta-count" class="entry-meta-count" hidden>0 filled</span>
+              </summary>
+              <div class="entry-meta-fields">
+                <label class="sr-only" for="entry-page">Link page</label>
+                <input id="entry-page" placeholder="Link page, optional" aria-describedby="entry-status">
+                <label class="sr-only" for="entry-links">Tags and links</label>
+                <input id="entry-links" placeholder="Tags / links, comma separated" aria-describedby="entry-status">
+              </div>
+            </details>
             <div class="toolbar">
               <label class="file-button" data-icon="image">
                 Choose
@@ -141,6 +149,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-image-placeholder"></script>
+    <script src="/assets/app.js?v=20260520-fold-entry-meta"></script>
   </body>
 </html>

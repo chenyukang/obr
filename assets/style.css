@@ -423,6 +423,58 @@ main {
   padding: 0;
 }
 
+.entry-meta {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.entry-meta summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+}
+
+.entry-meta summary::-webkit-details-marker {
+  display: none;
+}
+
+.entry-meta summary::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.entry-meta[open] summary::before {
+  transform: rotate(45deg);
+}
+
+.entry-meta-count {
+  margin-left: auto;
+  border-radius: 999px;
+  background: #edf1f3;
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.entry-meta-fields {
+  display: grid;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
 .toolbar,
 .page-actions,
 .search-bar,
