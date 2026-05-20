@@ -1,14 +1,19 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write as FmtWrite,
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
+    sync::{Arc, RwLock},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Local;
+use notify::{
+    Config as NotifyConfig, Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use pulldown_cmark::{Event, Options, Parser, html};
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
@@ -19,6 +24,324 @@ struct SearchHit {
     rank: u8,
     modified: u64,
     path: PathBuf,
+}
+
+const RECENT_SEARCH_LIMIT: usize = 20;
+const SEARCH_PAGE_SIZE: usize = 50;
+
+#[derive(Clone, Debug)]
+struct CachedMarkdown {
+    content: String,
+    content_lower: String,
+    display_rel_lower: String,
+    modified: u128,
+    len: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct MarkdownIndexStats {
+    pub(crate) files: usize,
+    pub(crate) content_bytes: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct MarkdownSearchResults {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) total_matches: usize,
+    pub(crate) offset: usize,
+    pub(crate) limit: usize,
+}
+
+pub(crate) struct MarkdownIndex {
+    vault: PathBuf,
+    entries: Arc<RwLock<HashMap<PathBuf, CachedMarkdown>>>,
+    _watcher: RecommendedWatcher,
+}
+
+impl MarkdownIndex {
+    pub(crate) fn load(vault: PathBuf) -> Result<Self> {
+        let vault = vault
+            .canonicalize()
+            .with_context(|| format!("resolve markdown vault {}", vault.display()))?;
+        let entries = Arc::new(RwLock::new(HashMap::new()));
+        load_all_markdown(&vault, &entries)?;
+        let watcher = watch_markdown_vault(vault.clone(), Arc::clone(&entries))?;
+        Ok(Self {
+            vault,
+            entries,
+            _watcher: watcher,
+        })
+    }
+
+    pub(crate) fn stats(&self) -> MarkdownIndexStats {
+        let entries = self.entries.read().expect("markdown index poisoned");
+        MarkdownIndexStats {
+            files: entries.len(),
+            content_bytes: entries.values().map(|entry| entry.content.len()).sum(),
+        }
+    }
+
+    pub(crate) fn search_page(&self, keyword: &str, page: usize) -> Result<MarkdownSearchResults> {
+        let keyword = keyword.trim();
+        let needle = keyword.to_lowercase();
+        let entries = self.entries.read().expect("markdown index poisoned");
+        let mut hits = Vec::new();
+
+        for (path, entry) in entries.iter() {
+            let path_matches = entry.display_rel_lower.contains(&needle);
+            let content_matches = !keyword.is_empty() && entry.content_lower.contains(&needle);
+
+            if keyword.is_empty() || path_matches || content_matches {
+                hits.push(SearchHit {
+                    rank: if !keyword.is_empty() && path_matches {
+                        0
+                    } else {
+                        1
+                    },
+                    modified: (entry.modified / 1_000_000_000) as u64,
+                    path: path.clone(),
+                });
+            }
+        }
+
+        sort_search_hits(&mut hits);
+        let total_matches = hits.len();
+        let (offset, limit) = search_page_window(keyword, page);
+        Ok(MarkdownSearchResults {
+            paths: hits
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|hit| hit.path)
+                .collect(),
+            total_matches,
+            offset,
+            limit,
+        })
+    }
+
+    pub(crate) fn random_file(&self) -> Result<Option<PathBuf>> {
+        let entries = self.entries.read().expect("markdown index poisoned");
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let mut paths = entries.keys().cloned().collect::<Vec<_>>();
+        paths.sort_by_key(|path| rel_to_vault(&self.vault, path).unwrap_or_default());
+        let nanos = Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+            .unsigned_abs() as usize;
+        Ok(paths.get(nanos % paths.len()).cloned())
+    }
+
+    pub(crate) fn resolve_request(&self, input: &str) -> Result<PathBuf> {
+        let rel = normalize_markdown_rel(input, true)?;
+        let requested = self.vault.join(&rel);
+        if self
+            .entries
+            .read()
+            .expect("markdown index poisoned")
+            .contains_key(&requested)
+        {
+            return Ok(requested);
+        }
+        if requested.exists() {
+            return requested
+                .canonicalize()
+                .with_context(|| format!("resolve markdown path {}", requested.display()));
+        }
+
+        if rel.components().count() == 1 {
+            let file_name = rel
+                .file_name()
+                .ok_or_else(|| anyhow!("path has no file name"))?;
+            let entries = self.entries.read().expect("markdown index poisoned");
+            let mut matches = entries
+                .keys()
+                .filter(|path| path.file_name() == Some(file_name))
+                .cloned()
+                .collect::<Vec<_>>();
+            matches.sort_by_key(|path| rel_to_vault(&self.vault, path).unwrap_or_default());
+            if let Some(path) = matches.into_iter().next() {
+                return Ok(path);
+            }
+        }
+
+        Ok(requested)
+    }
+
+    pub(crate) fn read_path(&self, path: &Path) -> Result<Option<String>> {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        Ok(self
+            .entries
+            .read()
+            .expect("markdown index poisoned")
+            .get(&path)
+            .map(|entry| entry.content.clone()))
+    }
+
+    pub(crate) fn update_path(&self, path: &Path, content: String) -> Result<()> {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let metadata = fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+        if !metadata.is_file() || !is_indexable_markdown_path(&path) {
+            return Ok(());
+        }
+        self.entries
+            .write()
+            .expect("markdown index poisoned")
+            .insert(
+                path.clone(),
+                cached_markdown(&self.vault, &path, &metadata, content)?,
+            );
+        Ok(())
+    }
+}
+
+fn load_all_markdown(
+    vault: &Path,
+    entries: &Arc<RwLock<HashMap<PathBuf, CachedMarkdown>>>,
+) -> Result<()> {
+    let mut loaded = HashMap::new();
+    for entry in markdown_entries(vault) {
+        let entry = entry?;
+        let path = entry.path().to_path_buf();
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("stat {}", path.display()))?;
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("read markdown index entry {}", path.display()))?;
+        loaded.insert(
+            path.clone(),
+            cached_markdown(vault, &path, &metadata, content)?,
+        );
+    }
+    *entries.write().expect("markdown index poisoned") = loaded;
+    Ok(())
+}
+
+fn watch_markdown_vault(
+    vault: PathBuf,
+    entries: Arc<RwLock<HashMap<PathBuf, CachedMarkdown>>>,
+) -> Result<RecommendedWatcher> {
+    let callback_vault = vault.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<NotifyEvent>| match event {
+            Ok(event) => update_index_from_event(&callback_vault, &entries, event),
+            Err(err) => tracing::warn!("markdown index watcher error: {err}"),
+        },
+        NotifyConfig::default(),
+    )
+    .context("create markdown index watcher")?;
+    watcher
+        .watch(&vault, RecursiveMode::Recursive)
+        .with_context(|| format!("watch markdown vault {}", vault.display()))?;
+    Ok(watcher)
+}
+
+fn update_index_from_event(
+    vault: &Path,
+    entries: &Arc<RwLock<HashMap<PathBuf, CachedMarkdown>>>,
+    event: NotifyEvent,
+) {
+    for path in event.paths {
+        if !path.starts_with(vault) || path_has_hidden_component(vault, &path) {
+            continue;
+        }
+        if let Err(err) = refresh_event_path(vault, entries, &path) {
+            tracing::warn!(path = %path.display(), "refresh markdown index from watcher failed: {err}");
+        }
+    }
+}
+
+fn refresh_event_path(
+    vault: &Path,
+    entries: &Arc<RwLock<HashMap<PathBuf, CachedMarkdown>>>,
+    path: &Path,
+) -> Result<()> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            remove_path_or_children(entries, path);
+            return Ok(());
+        }
+        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+    };
+
+    if metadata.is_dir() {
+        return Ok(());
+    }
+    if !metadata.is_file() || !is_indexable_markdown_path(path) {
+        remove_path_or_children(entries, path);
+        return Ok(());
+    }
+
+    let modified = metadata_modified_nanos(&metadata);
+    let len = metadata.len();
+    let stale = entries
+        .read()
+        .expect("markdown index poisoned")
+        .get(path)
+        .map(|entry| entry.modified != modified || entry.len != len)
+        .unwrap_or(true);
+    if stale {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("read markdown index entry {}", path.display()))?;
+        entries.write().expect("markdown index poisoned").insert(
+            path.to_path_buf(),
+            cached_markdown(vault, path, &metadata, content)?,
+        );
+    }
+    Ok(())
+}
+
+fn cached_markdown(
+    vault: &Path,
+    path: &Path,
+    metadata: &fs::Metadata,
+    content: String,
+) -> Result<CachedMarkdown> {
+    let rel = rel_to_vault(vault, path)?;
+    let display_rel = rel.strip_suffix(".md").unwrap_or(&rel).to_string();
+    Ok(CachedMarkdown {
+        content_lower: content.to_lowercase(),
+        display_rel_lower: display_rel.to_lowercase(),
+        content,
+        modified: metadata_modified_nanos(metadata),
+        len: metadata.len(),
+    })
+}
+
+fn remove_path_or_children(entries: &Arc<RwLock<HashMap<PathBuf, CachedMarkdown>>>, path: &Path) {
+    entries
+        .write()
+        .expect("markdown index poisoned")
+        .retain(|entry_path, _| entry_path != path && !entry_path.starts_with(path));
+}
+
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("md")
+}
+
+fn is_indexable_markdown_path(path: &Path) -> bool {
+    is_markdown_path(path) && !path.components().any(|component| {
+        matches!(component, Component::Normal(part) if part.to_str().map(|name| name.starts_with('.')).unwrap_or(false))
+    })
+}
+
+fn path_has_hidden_component(vault: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(vault).unwrap_or(path);
+    rel.components().any(|component| {
+        matches!(component, Component::Normal(part) if part.to_str().map(|name| name.starts_with('.')).unwrap_or(false))
+    })
+}
+
+fn metadata_modified_nanos(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
 }
 
 pub(crate) fn markdown_entries(
@@ -46,6 +369,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 pub(crate) fn search_markdown(vault: &Path, keyword: &str) -> Result<Vec<PathBuf>> {
     let keyword = keyword.trim();
     let needle = keyword.to_lowercase();
@@ -76,39 +400,43 @@ pub(crate) fn search_markdown(vault: &Path, keyword: &str) -> Result<Vec<PathBuf
         }
     }
 
-    hits.sort_by(|a, b| {
-        a.rank
-            .cmp(&b.rank)
-            .then_with(|| b.modified.cmp(&a.modified))
-    });
-    let limit = if keyword.is_empty() { 20 } else { hits.len() };
+    sort_search_hits(&mut hits);
+    let (_, limit) = search_page_window(keyword, 0);
     Ok(hits.into_iter().take(limit).map(|hit| hit.path).collect())
 }
 
+fn search_page_window(keyword: &str, page: usize) -> (usize, usize) {
+    if keyword.trim().is_empty() {
+        (
+            page.saturating_mul(RECENT_SEARCH_LIMIT),
+            RECENT_SEARCH_LIMIT,
+        )
+    } else {
+        (page.saturating_mul(SEARCH_PAGE_SIZE), SEARCH_PAGE_SIZE)
+    }
+}
+
+#[cfg(test)]
 fn modified_secs(entry: &DirEntry) -> u64 {
     entry
         .metadata()
         .ok()
         .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or_default()
 }
 
-pub(crate) fn random_markdown_file(vault: &Path) -> Result<Option<PathBuf>> {
-    let files = markdown_entries(vault)
-        .filter_map(|entry| entry.ok().map(|entry| entry.path().to_path_buf()))
-        .collect::<Vec<_>>();
-    if files.is_empty() {
-        return Ok(None);
-    }
-    let nanos = Local::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_default()
-        .unsigned_abs() as usize;
-    Ok(files.get(nanos % files.len()).cloned())
+fn sort_search_hits(hits: &mut [SearchHit]) {
+    hits.sort_by(|a, b| {
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| b.modified.cmp(&a.modified))
+            .then_with(|| a.path.cmp(&b.path))
+    });
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_markdown_request(vault: &Path, input: &str) -> Result<PathBuf> {
     let rel = normalize_markdown_rel(input, true)?;
     let requested = vault.join(&rel);
@@ -746,6 +1074,7 @@ mod tests {
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, Instant},
     };
 
     use super::*;
@@ -771,7 +1100,9 @@ mod tests {
         }
 
         fn rel(&self, path: &Path) -> String {
-            rel_to_vault(&self.path, path).unwrap()
+            let vault = self.path.canonicalize().unwrap();
+            let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            rel_to_vault(&vault, &path).unwrap()
         }
     }
 
@@ -779,6 +1110,17 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    fn wait_until(mut predicate: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if predicate() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(predicate(), "condition was not met before timeout");
     }
 
     #[test]
@@ -851,6 +1193,117 @@ mod tests {
         let hits = search_markdown(&vault.path, "").unwrap();
 
         assert_eq!(hits.len(), 20);
+    }
+
+    #[test]
+    fn search_markdown_non_empty_keyword_caps_broad_results() {
+        let vault = TestVault::new();
+        for i in 0..(SEARCH_PAGE_SIZE + 5) {
+            vault.write(&format!("notes/{i:03}.md"), "common body");
+        }
+
+        let hits = search_markdown(&vault.path, "common").unwrap();
+
+        assert_eq!(hits.len(), SEARCH_PAGE_SIZE);
+    }
+
+    #[test]
+    fn markdown_index_search_uses_cached_content_and_watcher_updates_external_changes() {
+        let vault = TestVault::new();
+        vault.write("Alpha.md", "first version");
+        let index = MarkdownIndex::load(vault.path.clone()).unwrap();
+
+        assert_eq!(index.stats().files, 1);
+        let hits = index.search_page("first", 0).unwrap().paths;
+        assert_eq!(
+            hits.iter().map(|path| vault.rel(path)).collect::<Vec<_>>(),
+            vec!["Alpha.md"]
+        );
+
+        vault.write("Alpha.md", "second external version");
+        wait_until(|| index.search_page("second", 0).unwrap().paths.len() == 1);
+        let hits = index.search_page("second", 0).unwrap().paths;
+
+        assert_eq!(
+            hits.iter().map(|path| vault.rel(path)).collect::<Vec<_>>(),
+            vec!["Alpha.md"]
+        );
+    }
+
+    #[test]
+    fn markdown_index_update_path_refreshes_written_content() {
+        let vault = TestVault::new();
+        vault.write("Note.md", "old content");
+        let index = MarkdownIndex::load(vault.path.clone()).unwrap();
+        let path = vault.path.join("Note.md");
+
+        fs::write(&path, "new content").unwrap();
+        index.update_path(&path, "new content".to_string()).unwrap();
+
+        assert_eq!(
+            index.read_path(&path).unwrap().as_deref(),
+            Some("new content")
+        );
+        assert_eq!(index.search_page("new", 0).unwrap().paths.len(), 1);
+    }
+
+    #[test]
+    fn markdown_index_search_reports_total_matches_when_limited() {
+        let vault = TestVault::new();
+        for i in 0..(SEARCH_PAGE_SIZE + 3) {
+            vault.write(&format!("notes/{i:03}.md"), "shared needle");
+        }
+        let index = MarkdownIndex::load(vault.path.clone()).unwrap();
+
+        let results = index.search_page("needle", 0).unwrap();
+
+        assert_eq!(results.paths.len(), SEARCH_PAGE_SIZE);
+        assert_eq!(results.total_matches, SEARCH_PAGE_SIZE + 3);
+        assert_eq!(results.offset, 0);
+        assert_eq!(results.limit, SEARCH_PAGE_SIZE);
+    }
+
+    #[test]
+    fn markdown_index_search_can_page_broad_results() {
+        let vault = TestVault::new();
+        for i in 0..(SEARCH_PAGE_SIZE + 3) {
+            vault.write(&format!("notes/{i:03}.md"), "shared needle");
+        }
+        let index = MarkdownIndex::load(vault.path.clone()).unwrap();
+
+        let results = index.search_page("needle", 1).unwrap();
+
+        assert_eq!(results.paths.len(), 3);
+        assert_eq!(results.total_matches, SEARCH_PAGE_SIZE + 3);
+        assert_eq!(results.offset, SEARCH_PAGE_SIZE);
+        assert_eq!(results.limit, SEARCH_PAGE_SIZE);
+    }
+
+    #[test]
+    fn markdown_index_empty_search_can_page_recent_results() {
+        let vault = TestVault::new();
+        for i in 0..(RECENT_SEARCH_LIMIT + 3) {
+            vault.write(&format!("notes/{i:03}.md"), "recent note");
+        }
+        let index = MarkdownIndex::load(vault.path.clone()).unwrap();
+
+        let first_page = index.search_page("", 0).unwrap();
+        let second_page = index.search_page("", 1).unwrap();
+
+        assert_eq!(first_page.paths.len(), RECENT_SEARCH_LIMIT);
+        assert_eq!(first_page.total_matches, RECENT_SEARCH_LIMIT + 3);
+        assert_eq!(first_page.offset, 0);
+        assert_eq!(first_page.limit, RECENT_SEARCH_LIMIT);
+        assert_eq!(second_page.paths.len(), 3);
+        assert_eq!(second_page.total_matches, RECENT_SEARCH_LIMIT + 3);
+        assert_eq!(second_page.offset, RECENT_SEARCH_LIMIT);
+        assert_eq!(second_page.limit, RECENT_SEARCH_LIMIT);
+        assert!(
+            first_page
+                .paths
+                .iter()
+                .all(|path| !second_page.paths.contains(path))
+        );
     }
 
     #[test]

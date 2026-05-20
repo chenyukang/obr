@@ -1,9 +1,9 @@
-const CACHE_VERSION = "obr-offline-20260520-17";
+const CACHE_VERSION = "obr-offline-20260520-30";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = `${CACHE_VERSION}:images`;
 const PAGE_CACHE_LIMIT = 40;
-const IMAGE_CACHE_LIMIT = 80;
+const IMAGE_CACHE_LIMIT = 300;
 const NAVIGATION_FALLBACK_TIMEOUT_MS = 800;
 const PAGE_API_FALLBACK_TIMEOUT_MS = 1500;
 
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260520-lightbox-open-fit",
-  "/assets/app.js?v=20260520-lightbox-open-fit",
+  "/assets/style.css?v=20260520-edit-border",
+  "/assets/app.js?v=20260520-edit-scroll",
 ];
 
 self.addEventListener("install", (event) => {
@@ -52,6 +52,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== location.origin) return;
   if (url.pathname === "/api/ping") return;
+  if (request.cache === "no-store") return;
 
   if (request.mode === "navigate") {
     event.respondWith(

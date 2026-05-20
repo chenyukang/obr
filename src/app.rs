@@ -33,6 +33,7 @@ use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 use crate::{
     auth::{LoginLimiter, is_authenticated, print_password_hash_from_stdin, session_layer},
     config::Config,
+    markdown::MarkdownIndex,
     passkeys::PasskeyStore,
     routes,
 };
@@ -42,6 +43,7 @@ pub(crate) struct AppState {
     pub(crate) login_limiter: LoginLimiter,
     pub(crate) webauthn: Arc<Webauthn>,
     pub(crate) passkey_store: Arc<PasskeyStore>,
+    pub(crate) markdown_index: Arc<MarkdownIndex>,
 }
 
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -82,6 +84,13 @@ async fn serve() -> Result<()> {
     let config = Config::load()?;
     init_logging(&config)?;
     prepare_vault(&config)?;
+    let markdown_index = MarkdownIndex::load(config.vault_path.clone())?;
+    let index_stats = markdown_index.stats();
+    info!(
+        files = index_stats.files,
+        content_bytes = index_stats.content_bytes,
+        "loaded markdown index"
+    );
     let webauthn = build_webauthn(&config)?;
     let passkey_store = PasskeyStore::load(config.passkey_store_path.clone())?;
 
@@ -92,6 +101,7 @@ async fn serve() -> Result<()> {
         login_limiter: LoginLimiter::default(),
         webauthn,
         passkey_store: Arc::new(passkey_store),
+        markdown_index: Arc::new(markdown_index),
     });
     let app = router(Arc::clone(&state), session_layer);
 

@@ -9,13 +9,15 @@ const state = {
   searchTimer: 0,
   searchController: null,
   searchRequestId: 0,
+  searchPage: 0,
   pageController: null,
   pageRequestId: 0,
   todoRequestId: 0,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
-  connectionOnline: navigator.onLine,
+  connectionOnline: true,
   connectionPingController: null,
+  connectionRetryTimer: 0,
   connectionWindowFocused: true,
   entrySaving: false,
   entryImagePreparing: false,
@@ -38,6 +40,9 @@ const state = {
   imageLightboxDrag: null,
   imageLightboxLastTap: null,
   imageLightboxSuppressZoomUntil: 0,
+  imageObserver: null,
+  imageQueue: [],
+  imageActiveLoads: 0,
 };
 
 const el = (id) => document.getElementById(id);
@@ -51,12 +56,15 @@ const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
 const TOAST_MS = 1800;
 const PING_TIMEOUT_MS = 3000;
+const CONNECTION_RETRY_MS = 5000;
 const STARTUP_VERIFY_TIMEOUT_MS = 1200;
 const AUTH_OPTIONS_TIMEOUT_MS = 1200;
 const IMAGE_DOUBLE_TAP_MS = 340;
 const IMAGE_LIGHTBOX_MIN_SCALE = 1;
 const IMAGE_LIGHTBOX_MAX_SCALE = 4;
 const IMAGE_LIGHTBOX_ZOOM_STEP = 1.35;
+const MARKDOWN_IMAGE_MAX_ACTIVE_LOADS = 2;
+const MARKDOWN_IMAGE_ROOT_MARGIN = "900px 0px";
 const RECENT_PAGE_LIMIT = 20;
 const RECENT_PAGES_KEY = "obr.offline.recent-pages";
 const OUTBOX_KEY = "obr.offline.outbox";
@@ -76,6 +84,8 @@ const ICONS = {
     '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0 0-6"></path>',
   "list-checks":
     '<path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>',
+  loader:
+    '<path d="M12 2v4"></path><path d="m16.2 7.8 2.9-2.9"></path><path d="M18 12h4"></path><path d="m16.2 16.2 2.9 2.9"></path><path d="M12 18v4"></path><path d="m4.9 19.1 2.9-2.9"></path><path d="M2 12h4"></path><path d="m4.9 4.9 2.9 2.9"></path>',
   "log-in":
     '<path d="m10 17 5-5-5-5"></path><path d="M15 12H3"></path><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>',
   "log-out":
@@ -181,6 +191,14 @@ function bindEvents() {
   el("search-clear").addEventListener("click", clearSearch);
 
   el("search-results").addEventListener("click", async (event) => {
+    const more = event.target.closest("[data-search-page]");
+    if (more) {
+      event.preventDefault();
+      more.disabled = true;
+      await search({ page: Number(more.dataset.searchPage || 0), append: true });
+      return;
+    }
+
     const link = event.target.closest("a[id]");
     if (!link) return;
     event.preventDefault();
@@ -332,11 +350,13 @@ async function handleAppPopState(event) {
 
 function startConnectionMonitor() {
   state.connectionWindowFocused = document.hasFocus?.() ?? true;
-  setConnectionStatus(navigator.onLine);
+  setConnectionStatus(true);
   window.addEventListener("online", () => resumeConnectionMonitor());
   window.addEventListener("offline", () => {
-    pauseConnectionMonitor();
-    setConnectionStatus(false);
+    // Mobile browsers/WebViews can briefly report offline after subresource failures
+    // such as missing or aborted images. Do not trust navigator.onLine by itself;
+    // immediately probe the real backend and keep retrying while visible.
+    scheduleConnectivityRetry(0);
   });
   window.addEventListener("focus", () => {
     state.connectionWindowFocused = true;
@@ -381,6 +401,15 @@ function pauseConnectionMonitor() {
   abortConnectivityCheck();
 }
 
+function scheduleConnectivityRetry(delay = CONNECTION_RETRY_MS) {
+  window.clearTimeout(state.connectionRetryTimer);
+  state.connectionRetryTimer = window.setTimeout(async () => {
+    state.connectionRetryTimer = 0;
+    const online = await checkConnectivity({ sync: true, allowHidden: true });
+    if (!online && !document.hidden) scheduleConnectivityRetry();
+  }, delay);
+}
+
 function abortConnectivityCheck() {
   state.connectionPingController?.abort();
   state.connectionPingController = null;
@@ -390,11 +419,6 @@ async function checkConnectivity(options = {}) {
   if (!isForegroundPage() && !options.allowHidden) {
     return state.connectionOnline;
   }
-  if (!navigator.onLine) {
-    setConnectionStatus(false);
-    return false;
-  }
-
   const controller = new AbortController();
   state.connectionPingController = controller;
   const timeout = window.setTimeout(() => controller.abort(), PING_TIMEOUT_MS);
@@ -409,7 +433,10 @@ async function checkConnectivity(options = {}) {
     if (online && options.sync) void syncOutbox();
     return online;
   } catch {
-    if (!document.hidden) setConnectionStatus(false);
+    if (!document.hidden) {
+      setConnectionStatus(false);
+      scheduleConnectivityRetry();
+    }
     return false;
   } finally {
     window.clearTimeout(timeout);
@@ -781,8 +808,7 @@ async function syncOutboxItem(item) {
         clearPageDraft(data.file);
       }
       if (el("page-editor").hidden) {
-        el("page-content").innerHTML = data.html || "";
-        enhanceMarkdownImages(el("page-content"));
+        setDeferredMarkdownHtml(el("page-content"), data.html || "");
         highlightPageContent(state.currentHighlightKeyword);
       }
       setPageEditorStatus("");
@@ -916,9 +942,10 @@ async function fetchAuthOptions() {
     console.error(error);
     if (error?.name === "AbortError" || error instanceof TypeError) {
       setConnectionStatus(false);
+      const local = isLocalBrowserHost();
       return {
-        passkeyRegistered: false,
-        passwordLoginAllowed: true,
+        passkeyRegistered: !local,
+        passwordLoginAllowed: local,
       };
     }
     const passkeyRegistered = await fetchLegacyPasskeyAvailability();
@@ -990,8 +1017,16 @@ async function login() {
     setLoginError("Offline. Recent pages are still available on this device.");
     return;
   }
+  if (response.status === 403) {
+    await refreshAuthOptions();
+    showLogin();
+    setLoginError(
+      "Password login is disabled here. Use passkey, or open localhost to use username/password.",
+    );
+    return;
+  }
   if (!response.ok) {
-    el("login-error").hidden = false;
+    setLoginError("Login failed.");
     return;
   }
   el("password").value = "";
@@ -1239,7 +1274,7 @@ async function saveEntry() {
     const text = await response.text();
     if (text !== "ok") throw new Error(text);
     resetEntry();
-    setEntryStatus("Synced to file.");
+    setEntryStatus("");
     showToast("Synced to file.");
   } catch (error) {
     console.error(error);
@@ -1247,7 +1282,7 @@ async function saveEntry() {
       try {
         queueOfflineMutation("entry", payload);
         resetEntry();
-        setEntryStatus("Local copy saved. Waiting to sync.");
+        setEntryStatus("");
         showToast("Waiting to sync.");
         return;
       } catch (queueError) {
@@ -1286,7 +1321,7 @@ function handleEntryInput() {
 
 function setEntryStatus(message) {
   el("entry-status").textContent = message;
-  el("entry-status").hidden = false;
+  el("entry-status").hidden = !message;
 }
 
 function resetEntry() {
@@ -1433,22 +1468,26 @@ function setEntrySaving(saving) {
   updateEntrySaveState();
 }
 
-async function search() {
+async function search(options = {}) {
   const keyword = el("search-input").value.trim();
+  const page = Number(options.page || 0);
+  const append = Boolean(options.append);
   updateSearchClear();
   state.searchController?.abort();
   const requestId = state.searchRequestId + 1;
   state.searchRequestId = requestId;
   const controller = new AbortController();
   state.searchController = controller;
+  setSearchLoading(true);
   try {
     const response = await request(
-      `/api/search?keyword=${encodeURIComponent(keyword)}`,
+      `/api/search?keyword=${encodeURIComponent(keyword)}&page=${page}`,
       { signal: controller.signal },
     );
     const html = await response.text();
     if (requestId !== state.searchRequestId) return;
-    el("search-results").innerHTML = `<ul>${html}</ul>`;
+    renderSearchResults(html, { append });
+    state.searchPage = page;
   } catch (error) {
     if (error?.name === "AbortError" || requestId !== state.searchRequestId) return;
     console.error(error);
@@ -1458,8 +1497,32 @@ async function search() {
     }
     el("search-results").innerHTML = '<p class="empty">Search failed.</p>';
   } finally {
-    if (state.searchController === controller) state.searchController = null;
+    if (state.searchController === controller) {
+      state.searchController = null;
+      setSearchLoading(false);
+    }
   }
+}
+
+function setSearchLoading(loading) {
+  const button = el("search-submit");
+  button.disabled = loading;
+  button.classList.toggle("is-loading", loading);
+  button.setAttribute("aria-busy", loading ? "true" : "false");
+  setButtonIcon(button, loading ? "loader" : "search", loading ? "Searching..." : "Search");
+}
+
+function renderSearchResults(html, options = {}) {
+  const results = el("search-results");
+  if (options.append) {
+    const list = results.querySelector("ul");
+    if (list) {
+      list.querySelector(".search-more-row")?.remove();
+      list.insertAdjacentHTML("beforeend", html);
+      return;
+    }
+  }
+  results.innerHTML = `<ul>${html}</ul>`;
 }
 
 async function clearSearch() {
@@ -1511,10 +1574,10 @@ async function loadTodo(options = {}) {
 }
 
 function renderTodoHtml(html, emptyMessage) {
-  el("todo-list").innerHTML = html.trim()
-    ? html
-    : `<p class="empty">${escapeHtml(emptyMessage)}</p>`;
-  enhanceMarkdownImages(el("todo-list"));
+  setDeferredMarkdownHtml(
+    el("todo-list"),
+    html.trim() ? html : `<p class="empty">${escapeHtml(emptyMessage)}</p>`,
+  );
 }
 
 async function addTodo() {
@@ -1536,7 +1599,8 @@ async function addTodo() {
     const result = await response.text();
     if (result !== "ok") throw new Error(result);
     el("todo-input").value = "";
-    el("todo-status").textContent = "Synced to file.";
+    el("todo-status").textContent = "";
+    el("todo-status").hidden = true;
     showToast("Todo synced to file.");
     await loadTodo({ renderCache: false });
   } catch (error) {
@@ -1545,7 +1609,8 @@ async function addTodo() {
       try {
         queueOfflineMutation("entry", payload);
         el("todo-input").value = "";
-        el("todo-status").textContent = "Local copy saved. Waiting to sync.";
+        el("todo-status").textContent = "";
+        el("todo-status").hidden = true;
         showToast("Todo waiting to sync.");
         return;
       } catch (queueError) {
@@ -1667,8 +1732,7 @@ function showPage(title, html, sourceView, options = {}) {
     view.hidden = true;
   }
   el("page-title").textContent = title;
-  el("page-content").innerHTML = html;
-  enhanceMarkdownImages(el("page-content"));
+  setDeferredMarkdownHtml(el("page-content"), html);
   highlightPageContent(state.currentHighlightKeyword);
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
@@ -1695,10 +1759,11 @@ async function toggleEdit() {
   const content = el("page-content");
   const button = el("edit-button");
   if (editor.hidden) {
+    saveReadingPosition(state.currentFile);
     setPageEditorStatus("Loading source...");
     button.disabled = true;
     try {
-      await loadCurrentPageSource();
+      await loadCurrentPageSource({ forceNetwork: true });
     } catch (error) {
       console.error(error);
       const message = error.message
@@ -1724,6 +1789,8 @@ async function toggleEdit() {
     file: state.currentFile,
     content: editor.value,
   };
+  const restoreFile = state.currentFile;
+  const restoreY = readReadingPosition(restoreFile);
   try {
     const response = await request("/api/page", {
       method: "POST",
@@ -1734,14 +1801,15 @@ async function toggleEdit() {
     state.currentContent = editor.value;
     state.currentContentLoaded = true;
     state.currentFile = data.file || state.currentFile;
+    rememberPageSource(state.currentFile, state.currentContent);
     replaceAppHistory(currentAppHistoryEntry());
     clearPageDraft(state.currentFile);
-    content.innerHTML = data.html || "";
-    enhanceMarkdownImages(content);
+    setDeferredMarkdownHtml(content, data.html || "");
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     content.hidden = false;
-    setPageEditorStatus("Synced to file.");
+    restoreReadingPositionAfterEdit(restoreFile, restoreY);
+    setPageEditorStatus("");
     showToast("Page synced to file.");
     setButtonIcon(button, "pencil", "Edit");
   } catch (error) {
@@ -1757,7 +1825,8 @@ async function toggleEdit() {
         content.innerHTML = offlineSourcePreview(payload.content);
         editor.hidden = true;
         content.hidden = false;
-        setPageEditorStatus("Local copy saved. Waiting to sync.");
+        restoreReadingPositionAfterEdit(restoreFile, restoreY);
+        setPageEditorStatus("");
         showToast("Page waiting to sync.");
         setButtonIcon(button, "pencil", "Edit");
         return;
@@ -1776,23 +1845,28 @@ async function toggleEdit() {
   }
 }
 
-async function loadCurrentPageSource() {
-  if (state.currentContentLoaded) return;
+async function loadCurrentPageSource(options = {}) {
+  const { forceNetwork = false } = options;
   const pending = pendingPageContent(state.currentFile);
   if (pending !== null) {
     state.currentContent = pending;
     state.currentContentLoaded = true;
     return;
   }
-  const cached = cachedPageSource(state.currentFile);
-  if (cached) {
-    state.currentContent = cached;
-    state.currentContentLoaded = true;
-    return;
+  if (!forceNetwork && state.currentContentLoaded) return;
+  if (!forceNetwork) {
+    const cached = cachedPageSource(state.currentFile);
+    if (cached) {
+      state.currentContent = cached;
+      state.currentContentLoaded = true;
+      return;
+    }
   }
-  const response = await request(
-    `/api/page/source?path=${encodeURIComponent(state.currentFile)}`,
-  );
+  const params = new URLSearchParams({ path: state.currentFile });
+  if (forceNetwork) params.set("fresh", String(Date.now()));
+  const response = await request(`/api/page/source?${params}`, {
+    cache: "no-store",
+  });
   if (!response.ok) throw new Error(await response.text());
   const data = await response.json();
   if (data.file === "NoPage") {
@@ -1950,6 +2024,19 @@ function restoreReadingPosition(file) {
   const y = readReadingPosition(file);
   restorePageScroll(y);
   window.setTimeout(() => restorePageScroll(y), 250);
+}
+
+function restoreReadingPositionAfterEdit(file, y) {
+  if (file) {
+    try {
+      localStorage.setItem(readingPositionKey(file), JSON.stringify({ y }));
+    } catch {
+      // Best effort only.
+    }
+  }
+  restorePageScroll(y);
+  window.setTimeout(() => restorePageScroll(y), 250);
+  window.setTimeout(() => restorePageScroll(y), 800);
 }
 
 function restorePageScroll(y) {
@@ -2304,6 +2391,75 @@ function showToast(message) {
   }, TOAST_MS);
 }
 
+function setDeferredMarkdownHtml(root, html) {
+  if (!root) return;
+  const template = document.createElement("template");
+  template.innerHTML = html || "";
+  for (const img of template.content.querySelectorAll("img[src]")) {
+    const src = img.getAttribute("src");
+    if (!src || src.startsWith("data:")) continue;
+    img.dataset.src = src;
+    img.removeAttribute("src");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.fetchPriority = "low";
+  }
+  root.replaceChildren(template.content);
+  enhanceMarkdownImages(root);
+}
+
+function markdownImageObserver() {
+  if (state.imageObserver || !("IntersectionObserver" in window)) return state.imageObserver;
+  state.imageObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        state.imageObserver.unobserve(entry.target);
+        enqueueMarkdownImage(entry.target);
+      }
+    },
+    { rootMargin: MARKDOWN_IMAGE_ROOT_MARGIN },
+  );
+  return state.imageObserver;
+}
+
+function observeDeferredMarkdownImage(img) {
+  const observer = markdownImageObserver();
+  if (observer) {
+    observer.observe(img);
+  } else {
+    enqueueMarkdownImage(img);
+  }
+}
+
+function enqueueMarkdownImage(img) {
+  if (!img?.dataset?.src || img.dataset.loadQueued === "1") return;
+  img.dataset.loadQueued = "1";
+  state.imageQueue.push(img);
+  pumpMarkdownImageQueue();
+}
+
+function pumpMarkdownImageQueue() {
+  while (
+    state.imageActiveLoads < MARKDOWN_IMAGE_MAX_ACTIVE_LOADS &&
+    state.imageQueue.length
+  ) {
+    const img = state.imageQueue.shift();
+    if (!img?.dataset?.src || img.src) continue;
+    state.imageActiveLoads += 1;
+    img.dataset.loadingActive = "1";
+    img.src = img.dataset.src;
+  }
+}
+
+function finishMarkdownImageLoad(img) {
+  if (img?.dataset?.loadingActive === "1") {
+    delete img.dataset.loadingActive;
+    state.imageActiveLoads = Math.max(0, state.imageActiveLoads - 1);
+    pumpMarkdownImageQueue();
+  }
+}
+
 function enhanceMarkdownImages(root) {
   if (!root) return;
   for (const img of root.querySelectorAll("img")) {
@@ -2333,20 +2489,25 @@ function enhanceMarkdownImages(root) {
     installImageLightboxTrigger(img);
 
     const finish = () => {
+      finishMarkdownImageLoad(img);
       frame.classList.remove("image-loading", "image-error");
       frame.classList.add("image-loaded");
       frame.removeAttribute("aria-busy");
     };
     const fail = () => {
+      finishMarkdownImageLoad(img);
       frame.classList.remove("image-loading", "image-loaded");
       frame.classList.add("image-error");
       frame.removeAttribute("aria-busy");
       placeholder.textContent = "Image unavailable";
+      scheduleConnectivityRetry(0);
     };
 
     img.addEventListener("load", finish, { once: true });
     img.addEventListener("error", fail, { once: true });
-    if (img.complete) {
+    if (img.dataset.src && !img.src) {
+      observeDeferredMarkdownImage(img);
+    } else if (img.complete) {
       if (img.naturalWidth > 0 || img.naturalHeight > 0) {
         finish();
       } else {

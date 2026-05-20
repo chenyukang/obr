@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-lightbox-open-fit">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-edit-border">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -117,11 +117,11 @@
         <section id="find-view" class="view" hidden>
           <form id="search-form" class="search-bar">
             <div class="search-field">
-              <label class="sr-only" for="search-input">Search markdown</label>
-              <input id="search-input" type="search" placeholder="Search markdown" autocomplete="off">
+              <label class="sr-only" for="search-input">Search keyword</label>
+              <input id="search-input" type="search" placeholder="Keyword" autocomplete="off">
               <button id="search-clear" class="input-clear" type="button" aria-label="Clear search" title="Clear search" data-icon="x" hidden></button>
             </div>
-            <button type="submit" data-icon="search">Search</button>
+            <button id="search-submit" type="submit" data-icon="search">Search</button>
           </form>
           <div id="search-results" class="panel list-panel" aria-live="polite"></div>
         </section>
@@ -166,6 +166,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-lightbox-open-fit"></script>
+    <script src="/assets/app.js?v=20260520-edit-scroll"></script>
   </body>
 </html>

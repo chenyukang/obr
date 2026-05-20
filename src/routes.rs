@@ -1,4 +1,8 @@
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    sync::Arc,
+    time::{Instant, UNIX_EPOCH},
+};
 
 use anyhow::Context;
 use axum::{
@@ -6,13 +10,14 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{
         HeaderMap, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue},
+        header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, HeaderValue, IF_NONE_MATCH},
     },
     response::{Html, IntoResponse, Response},
 };
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
+use tracing::info;
 use webauthn_rs::prelude::{
     PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
 };
@@ -23,8 +28,8 @@ use crate::{
     error::{AppError, AppResult},
     markdown::{
         auto_link_note_titles, ensure_inside, escape_html, escape_html_attr, mark_todo_content,
-        normalize_markdown_rel, normalize_rel_path, random_markdown_file, rel_to_vault,
-        render_markdown_html, resolve_markdown_request, save_data_url_image, search_markdown,
+        normalize_markdown_rel, normalize_rel_path, rel_to_vault, render_markdown_html,
+        save_data_url_image,
     },
 };
 
@@ -43,6 +48,7 @@ pub(crate) struct PageQuery {
 #[derive(Deserialize)]
 pub(crate) struct SearchQuery {
     keyword: Option<String>,
+    page: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -299,31 +305,72 @@ pub(crate) async fn get_page(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Response> {
+    let started = Instant::now();
+    let requested_path = query.path.clone().unwrap_or_default();
+    let query_type = query.query_type.clone().unwrap_or_default();
     let Some((rel, content)) = read_page_content(&state, query)? else {
+        info!(
+            api = "page",
+            path = %requested_path,
+            query_type = %query_type,
+            found = false,
+            elapsed_ms = started.elapsed().as_millis(),
+            "api timing"
+        );
         return Ok(Json(PageResponse {
             file: "NoPage".to_string(),
             html: String::new(),
         })
         .into_response());
     };
-    Ok(Json(PageResponse {
-        file: rel,
-        html: render_markdown_html(&content),
-    })
-    .into_response())
+    let render_started = Instant::now();
+    let html = render_markdown_html(&content);
+    info!(
+        api = "page",
+        path = %requested_path,
+        query_type = %query_type,
+        file = %rel,
+        found = true,
+        bytes = content.len(),
+        render_ms = render_started.elapsed().as_millis(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "api timing"
+    );
+    Ok(Json(PageResponse { file: rel, html }).into_response())
 }
 
 pub(crate) async fn get_page_source(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Response> {
+    let started = Instant::now();
+    let requested_path = query.path.clone().unwrap_or_default();
+    let query_type = query.query_type.clone().unwrap_or_default();
     let Some((rel, content)) = read_page_content(&state, query)? else {
+        info!(
+            api = "page_source",
+            path = %requested_path,
+            query_type = %query_type,
+            found = false,
+            elapsed_ms = started.elapsed().as_millis(),
+            "api timing"
+        );
         return Ok(Json(PageSourceResponse {
             file: "NoPage".to_string(),
             content: String::new(),
         })
         .into_response());
     };
+    info!(
+        api = "page_source",
+        path = %requested_path,
+        query_type = %query_type,
+        file = %rel,
+        found = true,
+        bytes = content.len(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "api timing"
+    );
     Ok(Json(PageSourceResponse { file: rel, content }).into_response())
 }
 
@@ -338,6 +385,9 @@ pub(crate) async fn post_page(
         return Ok((StatusCode::NOT_FOUND, "NoPage").into_response());
     }
     fs::write(&path, &body.content).with_context(|| format!("write {}", path.display()))?;
+    state
+        .markdown_index
+        .update_path(&path, body.content.clone())?;
     state.maybe_git_sync();
     let rel = rel_to_vault(&state.config.vault_path, &path)?;
     Ok(Json(PageResponse {
@@ -350,19 +400,22 @@ pub(crate) async fn post_page(
 fn read_page_content(state: &AppState, query: PageQuery) -> AppResult<Option<(String, String)>> {
     state.maybe_git_pull();
     let requested = match query.query_type.as_deref() {
-        Some("rand") => match random_markdown_file(&state.config.vault_path)? {
+        Some("rand") => match state.markdown_index.random_file()? {
             Some(path) => path,
             None => return Ok(None),
         },
-        _ => resolve_markdown_request(&state.config.vault_path, &query.path.unwrap_or_default())?,
+        _ => state
+            .markdown_index
+            .resolve_request(&query.path.unwrap_or_default())?,
     };
 
     if !requested.exists() {
         return Ok(None);
     }
     ensure_inside(&state.config.vault_path, &requested)?;
-    let content = fs::read_to_string(&requested)
-        .with_context(|| format!("read page {}", requested.display()))?;
+    let Some(content) = state.markdown_index.read_path(&requested)? else {
+        return Ok(None);
+    };
     let rel = rel_to_vault(&state.config.vault_path, &requested)?;
     Ok(Some((rel, content)))
 }
@@ -371,12 +424,22 @@ pub(crate) async fn search(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Response> {
+    let started = Instant::now();
     state.maybe_git_pull();
+    let after_sync = Instant::now();
 
     let keyword = query.keyword.unwrap_or_default();
-    let hits = search_markdown(&state.config.vault_path, &keyword)?;
+    let search_started = Instant::now();
+    let page = query.page.unwrap_or_default();
+    let results = state.markdown_index.search_page(&keyword, page)?;
+    let search_ms = search_started.elapsed().as_millis();
+    let total_matches = results.total_matches;
+    let offset = results.offset;
+    let limit = results.limit;
+    let returned_hits = results.paths.len();
+    let render_started = Instant::now();
     let mut body = String::new();
-    for path in hits {
+    for path in results.paths {
         let mut rel = rel_to_vault(&state.config.vault_path, &path)?;
         if let Some(stripped) = rel.strip_suffix(".md") {
             rel = stripped.to_string();
@@ -387,11 +450,33 @@ pub(crate) async fn search(
             escape_html(&rel)
         ));
     }
+    let shown = offset.saturating_add(returned_hits);
+    if shown < total_matches {
+        body.push_str(&format!(
+            "<li class=\"search-more-row\"><button class=\"search-more\" type=\"button\" data-search-page=\"{}\">More <span>{} / {}</span></button></li>",
+            page.saturating_add(1), shown, total_matches
+        ));
+    }
+    info!(
+        api = "search",
+        keyword = %keyword,
+        page,
+        offset,
+        limit,
+        hits = returned_hits,
+        total_matches,
+        sync_ms = after_sync.duration_since(started).as_millis(),
+        search_ms,
+        render_ms = render_started.elapsed().as_millis(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "api timing"
+    );
     Ok(Html(body).into_response())
 }
 
 pub(crate) async fn image(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     AxumPath(path): AxumPath<String>,
 ) -> AppResult<Response> {
     let rel = normalize_rel_path(&path)?;
@@ -402,16 +487,38 @@ pub(crate) async fn image(
         return Ok((StatusCode::NOT_FOUND, "not found").into_response());
     }
 
+    let metadata = fs::metadata(&path).with_context(|| format!("stat image {}", path.display()))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let etag_value = format!(r#""{}-{}""#, metadata.len(), modified);
+    let cache_control = HeaderValue::from_static("private, max-age=604800");
+    if headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag_value))
+    {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response.headers_mut().insert(CACHE_CONTROL, cache_control);
+        response
+            .headers_mut()
+            .insert(ETAG, HeaderValue::from_str(&etag_value)?);
+        return Ok(response);
+    }
+
     let bytes = fs::read(&path).with_context(|| format!("read image {}", path.display()))?;
     let content_type = mime_guess::from_path(&path).first_or_octet_stream();
     let mut response = bytes.into_response();
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_str(content_type.as_ref())?);
-    response.headers_mut().insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("private, max-age=3600"),
-    );
+    response.headers_mut().insert(CACHE_CONTROL, cache_control);
+    response
+        .headers_mut()
+        .insert(ETAG, HeaderValue::from_str(&etag_value)?);
     Ok(response)
 }
 
@@ -491,7 +598,8 @@ pub(crate) async fn post_entry(
     } else {
         format!("{existing}\n{appended}")
     };
-    fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+    fs::write(&path, &content).with_context(|| format!("write {}", path.display()))?;
+    state.markdown_index.update_path(&path, content)?;
     state.maybe_git_sync();
     Ok("ok".into_response())
 }
@@ -508,7 +616,8 @@ pub(crate) async fn mark_todo(
     let content = fs::read_to_string(&path).unwrap_or_default();
 
     if let Some(updated) = mark_todo_content(&content, index) {
-        fs::write(&path, updated)?;
+        fs::write(&path, &updated)?;
+        state.markdown_index.update_path(&path, updated)?;
         state.maybe_git_sync();
         Ok("done".into_response())
     } else {

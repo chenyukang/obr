@@ -8,6 +8,11 @@
   --blue: #2563eb;
   --green: #198754;
   --amber: #b7791f;
+  --quote-bg: #fff7df;
+  --quote-border: #d49b1f;
+  --quote-text: #533f16;
+  --soft-panel: #f8faf9;
+  --soft-blue: #eef5ff;
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -68,6 +73,20 @@ button:hover {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+button.is-loading {
+  opacity: 0.8;
+}
+
+button.is-loading .icon {
+  animation: obr-spin 850ms linear infinite;
+}
+
+@keyframes obr-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .icon {
@@ -418,6 +437,20 @@ main {
   padding: 20px;
 }
 
+#page-view > .panel {
+  border-color: #dfe7e4;
+  border-radius: 14px;
+  box-shadow: 0 14px 40px rgb(27 37 43 / 7%);
+}
+
+#page-view > .panel:has(#page-editor:not([hidden])) {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
 #entry-form {
   display: grid;
   gap: 12px;
@@ -500,11 +533,15 @@ main {
 
 .search-field {
   position: relative;
-  min-width: 180px;
+  min-width: 0;
 }
 
 .search-field input {
   padding-right: 42px;
+}
+
+#search-submit {
+  min-width: 118px;
 }
 
 .input-clear {
@@ -639,6 +676,22 @@ main {
   margin: 8px 0;
 }
 
+.list-panel .search-more-row {
+  margin-top: 12px;
+  list-style: none;
+}
+
+.search-more {
+  min-height: 36px;
+  padding: 7px 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.search-more span {
+  color: var(--muted);
+}
+
 .todo-list ul {
   margin: 0;
   padding-left: 22px;
@@ -717,14 +770,37 @@ a {
 }
 
 #page-title {
-  margin-top: 0;
+  margin: 0 0 18px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
   color: var(--muted);
-  font-size: 16px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
 }
 
 .markdown {
   line-height: 1.7;
   word-break: break-word;
+}
+
+#page-content.markdown {
+  color: #1f2f37;
+  font-size: 16px;
+}
+
+#page-content.markdown > :first-child {
+  margin-top: 0;
+}
+
+#page-content.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol {
+  margin: 0.75em 0;
 }
 
 .markdown h1,
@@ -733,23 +809,116 @@ a {
   line-height: 1.25;
 }
 
+.markdown h1,
+.markdown h2 {
+  margin: 1.1em 0 0.5em;
+  letter-spacing: -0.02em;
+}
+
+.markdown h1 {
+  font-size: 1.32em;
+}
+
+.markdown h2 {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.22em;
+  font-size: 1.16em;
+}
+
+.markdown h3 {
+  margin: 1em 0 0.4em;
+  color: #2c3f47;
+  font-size: 1.02em;
+}
+
+.markdown hr {
+  height: 1px;
+  margin: 28px 0;
+  border: 0;
+  background: linear-gradient(90deg, transparent, var(--line), transparent);
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.45em;
+}
+
+.markdown li + li {
+  margin-top: 0.28em;
+}
+
+.markdown li::marker {
+  color: #6f8b95;
+}
+
+.markdown blockquote {
+  margin: 18px 0;
+  border-left: 4px solid var(--quote-border);
+  border-radius: 0 8px 8px 0;
+  background: var(--quote-bg);
+  color: var(--quote-text);
+  padding: 10px 14px;
+}
+
+.markdown blockquote > :first-child {
+  margin-top: 0;
+}
+
+.markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
 .markdown pre {
   overflow: auto;
-  border-radius: 6px;
+  border: 1px solid #22313a;
+  border-radius: 10px;
   background: #172026;
   color: #f7fafc;
-  padding: 12px;
+  padding: 14px 16px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
 }
 
 .markdown code {
-  border-radius: 4px;
-  background: #edf1f3;
-  padding: 2px 4px;
+  border: 1px solid #dfe7e4;
+  border-radius: 5px;
+  background: var(--soft-panel);
+  color: #284b63;
+  padding: 1px 5px;
+  font-size: 0.92em;
 }
 
 .markdown pre code {
+  border: 0;
   background: transparent;
+  color: inherit;
   padding: 0;
+  font-size: 0.86em;
+  line-height: 1.55;
+}
+
+.markdown table {
+  display: block;
+  width: 100%;
+  margin: 18px 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.markdown th {
+  background: var(--soft-panel);
+  color: #2c3f47;
+  font-weight: 800;
+}
+
+.markdown tr:nth-child(even) td {
+  background: #fbfcfc;
 }
 
 .offline-source-preview {
@@ -766,18 +935,19 @@ a {
 
 .markdown img {
   max-width: 100%;
-  border-radius: 6px;
+  border-radius: 10px;
 }
 
 .markdown .image-frame {
   position: relative;
   display: inline-flex;
   max-width: 100%;
-  margin: 6px 0;
+  margin: 10px 0;
   overflow: hidden;
   vertical-align: top;
-  border-radius: 6px;
+  border-radius: 10px;
   background: #eef3f1;
+  box-shadow: 0 10px 28px rgb(27 37 43 / 9%);
 }
 
 .markdown .image-frame.image-loaded .image-openable {
