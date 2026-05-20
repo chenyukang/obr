@@ -69,6 +69,12 @@ struct PasskeyStatus {
     registered: bool,
 }
 
+#[derive(Serialize)]
+struct AuthOptions {
+    passkey_registered: bool,
+    password_login_allowed: bool,
+}
+
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
 const PASSKEY_AUTHENTICATION_SESSION_KEY: &str = "passkey_authentication";
 
@@ -108,6 +114,18 @@ pub(crate) async fn login(
     session.cycle_id().await?;
     session.insert(AUTH_SESSION_KEY, true).await?;
     Ok("ok".into_response())
+}
+
+pub(crate) async fn auth_options(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    let passkey_registered = state.passkey_store.has_credentials();
+    Ok(Json(AuthOptions {
+        passkey_registered,
+        password_login_allowed: !passkey_registered || allows_local_password_login(&headers),
+    })
+    .into_response())
 }
 
 pub(crate) async fn passkey_register_start(

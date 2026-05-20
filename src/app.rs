@@ -190,6 +190,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
             get(|| async { Redirect::permanent("/") }),
         )
         .route("/api/login", post(routes::login))
+        .route("/api/auth/options", get(routes::auth_options))
         .route(
             "/api/passkey/login/start",
             post(routes::passkey_login_start),

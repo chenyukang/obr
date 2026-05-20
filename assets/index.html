@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Obr</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/style.css?v=20260519-search-highlight">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-mobile-toolbar">
   </head>
   <body>
     <div id="login" class="login-panel" hidden>
@@ -23,7 +23,7 @@
           <button id="password-login-button" type="submit" data-icon="log-in">Log in</button>
         </div>
         <button id="passkey-login-button" type="button" data-icon="key" hidden>Log in with passkey</button>
-        <p id="login-error" class="error" hidden>Login failed.</p>
+        <p id="login-error" class="error" role="alert" hidden>Login failed.</p>
       </form>
     </div>
 
@@ -46,40 +46,49 @@
       <main>
         <section id="day-view" class="view">
           <form id="entry-form" class="panel">
-            <textarea id="entry-text" rows="12" placeholder="Write a memo..."></textarea>
-            <input id="entry-page" placeholder="Link page, optional">
-            <input id="entry-links" placeholder="Tags / links, comma separated">
+            <label class="sr-only" for="entry-text">Memo</label>
+            <textarea id="entry-text" rows="12" placeholder="Write a memo..." aria-describedby="entry-status"></textarea>
+            <label class="sr-only" for="entry-page">Link page</label>
+            <input id="entry-page" placeholder="Link page, optional" aria-describedby="entry-status">
+            <label class="sr-only" for="entry-links">Tags and links</label>
+            <input id="entry-links" placeholder="Tags / links, comma separated" aria-describedby="entry-status">
             <div class="toolbar">
               <label class="file-button" data-icon="image">
-                Photo
+                Choose
                 <input id="entry-image-file" type="file" accept="image/*">
+              </label>
+              <label class="file-button" data-icon="camera">
+                Camera
+                <input id="entry-camera-file" type="file" accept="image/*" capture="environment">
               </label>
               <button id="entry-reset" type="button" data-icon="rotate-ccw">Reset</button>
               <button id="entry-save" type="submit" data-icon="save">Save</button>
             </div>
             <img id="entry-preview" class="preview" hidden>
-            <p id="entry-status" class="status" hidden></p>
+            <p id="entry-status" class="status" role="status" aria-live="polite" hidden></p>
           </form>
         </section>
 
         <section id="find-view" class="view" hidden>
           <form id="search-form" class="search-bar">
             <div class="search-field">
+              <label class="sr-only" for="search-input">Search markdown</label>
               <input id="search-input" type="search" placeholder="Search markdown" autocomplete="off">
               <button id="search-clear" class="input-clear" type="button" aria-label="Clear search" title="Clear search" data-icon="x" hidden></button>
             </div>
             <button type="submit" data-icon="search">Search</button>
           </form>
-          <div id="search-results" class="panel list-panel"></div>
+          <div id="search-results" class="panel list-panel" aria-live="polite"></div>
         </section>
 
         <section id="todo-view" class="view" hidden>
           <form id="todo-form" class="todo-form">
-            <input id="todo-input" placeholder="New todo">
+            <label class="sr-only" for="todo-input">New todo</label>
+            <input id="todo-input" placeholder="New todo" aria-describedby="todo-status">
             <button type="submit" data-icon="plus">Add</button>
           </form>
           <div id="todo-list" class="panel markdown todo-list"></div>
-          <p id="todo-status" class="status" hidden></p>
+          <p id="todo-status" class="status" role="status" aria-live="polite" hidden></p>
         </section>
 
         <section id="page-view" class="view" hidden>
@@ -90,13 +99,15 @@
           <article class="panel">
             <h2 id="page-title"></h2>
             <div id="page-content" class="markdown"></div>
-            <textarea id="page-editor" rows="22" hidden></textarea>
+            <label class="sr-only" for="page-editor">Page editor</label>
+            <textarea id="page-editor" rows="22" aria-describedby="page-editor-status" hidden></textarea>
+            <p id="page-editor-status" class="status" role="status" aria-live="polite" hidden></p>
           </article>
         </section>
       </main>
 
     </div>
 
-    <script src="/assets/app.js?v=20260519-search-highlight"></script>
+    <script src="/assets/app.js?v=20260520-mobile-toolbar"></script>
   </body>
 </html>

@@ -1,12 +1,14 @@
 use std::{
     collections::HashSet,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Local;
+use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Debug)]
@@ -252,12 +254,27 @@ pub(crate) fn save_data_url_image(
         other => bail!("unsupported image type: {other}"),
     };
     let bytes = STANDARD.decode(data)?;
-    let name = format!("obr-{}.{}", now.format("%Y-%m-%d-%H-%M-%S"), ext);
-    let path = vault.join("Pics").join(&name);
-    ensure_inside(vault, &path)?;
     fs::create_dir_all(vault.join("Pics"))?;
-    fs::write(&path, bytes)?;
-    Ok(name)
+    for _ in 0..16 {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!(
+            "obr-{}-{}.{}",
+            now.format("%Y-%m-%d-%H-%M-%S"),
+            &suffix[..4],
+            ext
+        );
+        let path = vault.join("Pics").join(&name);
+        ensure_inside(vault, &path)?;
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(&bytes)?;
+                return Ok(name);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err).with_context(|| format!("write {}", path.display())),
+        }
+    }
+    bail!("could not allocate unique image filename")
 }
 
 pub(crate) fn auto_link_note_titles(vault: &Path, text: &str) -> Result<String> {

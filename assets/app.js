@@ -7,9 +7,17 @@ const state = {
   image: "",
   searchTimer: 0,
   passkeyRegistered: false,
+  passwordLoginAllowed: true,
+  entrySaving: false,
+  entryImagePreparing: false,
 };
 
 const el = (id) => document.getElementById(id);
+const PAGE_EDITOR_LEAVE_MESSAGE =
+  "You have unsaved page edits. Leave this page?";
+const MAX_IMAGE_DATA_URL_BYTES = 6 * 1024 * 1024;
+const MAX_IMAGE_DIMENSIONS = [1920, 1440, 1080];
+const IMAGE_JPEG_QUALITIES = [0.82, 0.72, 0.62];
 
 const ICONS = {
   "arrow-left": '<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>',
@@ -17,6 +25,8 @@ const ICONS = {
     '<path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path>',
   "calendar-days":
     '<path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path><path d="M8 14h.01"></path><path d="M12 14h.01"></path><path d="M16 14h.01"></path><path d="M8 18h.01"></path><path d="M12 18h.01"></path><path d="M16 18h.01"></path>',
+  camera:
+    '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"></path><circle cx="12" cy="13" r="3"></circle>',
   image:
     '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
   "list-checks":
@@ -47,18 +57,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     showApp();
     showView("day");
   } else {
-    state.passkeyRegistered = await fetchPasskeyAvailability();
+    await refreshAuthOptions();
     showLogin();
   }
 });
 
 function bindEvents() {
   document.querySelectorAll("[data-view]").forEach((button) => {
-    button.addEventListener("click", () => showView(button.dataset.view));
+    button.addEventListener("click", async () => {
+      await showView(button.dataset.view);
+    });
   });
   el("logout-button").addEventListener("click", logout);
   el("passkey-login-button").addEventListener("click", passkeyLogin);
   el("passkey-register-button").addEventListener("click", registerPasskey);
+  window.addEventListener("beforeunload", handleBeforeUnload);
 
   el("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -76,6 +89,8 @@ function bindEvents() {
   el("entry-links").addEventListener("input", handleEntryInput);
   el("entry-text").addEventListener("paste", handlePaste);
   el("entry-image-file").addEventListener("change", handleImageFile);
+  el("entry-camera-file").addEventListener("change", handleImageFile);
+  el("page-editor").addEventListener("input", handlePageEditorInput);
 
   el("search-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -114,9 +129,9 @@ function bindEvents() {
     await loadTodo();
   });
 
-  el("back-button").addEventListener("click", () =>
-    showView(state.lastListView),
-  );
+  el("back-button").addEventListener("click", async () => {
+    await showView(state.lastListView);
+  });
   el("edit-button").addEventListener("click", toggleEdit);
 
   el("page-content").addEventListener("click", async (event) => {
@@ -145,7 +160,7 @@ async function request(path, options = {}) {
     },
   });
   if (response.status === 401) {
-    state.passkeyRegistered = await fetchPasskeyAvailability();
+    await refreshAuthOptions();
     showLogin();
     throw new Error("unauthorized");
   }
@@ -163,6 +178,42 @@ async function verify() {
 
 async function fetchPasskeyAvailability() {
   try {
+    const options = await fetchAuthOptions();
+    return options.passkeyRegistered;
+  } catch {
+    return false;
+  }
+}
+
+async function refreshAuthOptions() {
+  const options = await fetchAuthOptions();
+  state.passkeyRegistered = options.passkeyRegistered;
+  state.passwordLoginAllowed = options.passwordLoginAllowed;
+}
+
+async function fetchAuthOptions() {
+  try {
+    const response = await fetch("/api/auth/options", {
+      credentials: "same-origin",
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const options = await response.json();
+    return {
+      passkeyRegistered: Boolean(options.passkey_registered),
+      passwordLoginAllowed: Boolean(options.password_login_allowed),
+    };
+  } catch (error) {
+    console.error(error);
+    const passkeyRegistered = await fetchLegacyPasskeyAvailability();
+    return {
+      passkeyRegistered,
+      passwordLoginAllowed: !passkeyRegistered || isLocalBrowserHost(),
+    };
+  }
+}
+
+async function fetchLegacyPasskeyAvailability() {
+  try {
     const response = await fetch("/api/passkey/available", {
       credentials: "same-origin",
     });
@@ -172,6 +223,15 @@ async function fetchPasskeyAvailability() {
   } catch {
     return false;
   }
+}
+
+function isLocalBrowserHost() {
+  return (
+    location.hostname === "localhost" ||
+    location.hostname === "127.0.0.1" ||
+    location.hostname === "[::1]" ||
+    location.hostname === "::1"
+  );
 }
 
 async function login() {
@@ -328,6 +388,7 @@ function uint8ArrayToBase64url(bytes) {
 }
 
 async function logout() {
+  if (!prepareToLeavePageEditor()) return;
   await fetch("/api/logout", {
     method: "POST",
     credentials: "same-origin",
@@ -336,13 +397,14 @@ async function logout() {
 }
 
 function showLogin() {
+  const showPasswordLogin = !state.passkeyRegistered || state.passwordLoginAllowed;
   el("app").hidden = true;
   el("login").hidden = false;
   el("login-form").classList.toggle(
     "passkey-login-only",
-    state.passkeyRegistered,
+    state.passkeyRegistered && !showPasswordLogin,
   );
-  el("password-login-fields").hidden = state.passkeyRegistered;
+  el("password-login-fields").hidden = !showPasswordLogin;
   el("passkey-login-button").hidden = !state.passkeyRegistered;
   el("password").value = "";
   setLoginError("", true);
@@ -367,6 +429,7 @@ async function refreshPasskeyRegisterButton() {
 }
 
 async function showView(name) {
+  if (!prepareToLeavePageEditor()) return;
   state.view = name;
   for (const view of document.querySelectorAll(".view")) {
     view.hidden = true;
@@ -396,6 +459,7 @@ async function saveEntry() {
     updateEntrySaveState();
     return;
   }
+  setEntrySaving(true);
   setEntryStatus("Saving...");
   try {
     const response = await request("/api/entry", {
@@ -413,7 +477,10 @@ async function saveEntry() {
     setEntryStatus("Saved.");
   } catch (error) {
     console.error(error);
-    setEntryStatus("Save failed.");
+    const message = error.message ? `Save failed: ${error.message}` : "Save failed.";
+    setEntryStatus(message);
+  } finally {
+    setEntrySaving(false);
   }
 }
 
@@ -427,7 +494,9 @@ function hasEntryContent() {
 }
 
 function updateEntrySaveState() {
-  el("entry-save").disabled = !hasEntryContent();
+  el("entry-save").disabled =
+    state.entrySaving || state.entryImagePreparing || !hasEntryContent();
+  setButtonIcon(el("entry-save"), "save", state.entrySaving ? "Saving..." : "Save");
 }
 
 function handleEntryInput() {
@@ -445,6 +514,7 @@ function resetEntry() {
   el("entry-page").value = "";
   el("entry-links").value = "";
   el("entry-image-file").value = "";
+  el("entry-camera-file").value = "";
   state.image = "";
   el("entry-preview").hidden = true;
   localStorage.removeItem("obr.entry.text");
@@ -470,7 +540,7 @@ function handlePaste(event) {
   const items = event.clipboardData?.items || [];
   for (const item of items) {
     if (item.type.startsWith("image/")) {
-      readImage(item.getAsFile());
+      void readImage(item.getAsFile());
       break;
     }
   }
@@ -478,19 +548,98 @@ function handlePaste(event) {
 
 function handleImageFile(event) {
   const file = event.target.files[0];
-  if (file) readImage(file);
+  if (file) void readImage(file);
 }
 
-function readImage(file) {
+async function readImage(file) {
   if (!file || !file.type.startsWith("image/")) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    state.image = reader.result;
+  state.image = "";
+  state.entryImagePreparing = true;
+  el("entry-preview").hidden = true;
+  updateEntrySaveState();
+  setEntryStatus("Preparing image...");
+  try {
+    state.image = await prepareImage(file);
     el("entry-preview").src = state.image;
     el("entry-preview").hidden = false;
     updateEntrySaveState();
+    setEntryStatus("Image ready.");
+  } catch (error) {
+    console.error(error);
+    state.image = "";
+    el("entry-preview").hidden = true;
+    updateEntrySaveState();
+    setEntryStatus(error.message || "Could not prepare image.");
+  } finally {
+    state.entryImagePreparing = false;
+    updateEntrySaveState();
+  }
+}
+
+async function prepareImage(file) {
+  const dataUrl = await readFileAsDataUrl(file);
+  if (file.type === "image/gif") {
+    if (dataUrl.length > MAX_IMAGE_DATA_URL_BYTES) {
+      throw new Error("GIF is too large to upload.");
+    }
+    return dataUrl;
+  }
+
+  const image = await loadImage(dataUrl);
+  for (const maxDimension of MAX_IMAGE_DIMENSIONS) {
+    const { width, height } = scaledDimensions(
+      image.naturalWidth,
+      image.naturalHeight,
+      maxDimension,
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Could not process image.");
+    context.drawImage(image, 0, 0, width, height);
+
+    for (const quality of IMAGE_JPEG_QUALITIES) {
+      const compressed = canvas.toDataURL("image/jpeg", quality);
+      if (compressed.length <= MAX_IMAGE_DATA_URL_BYTES) {
+        return compressed;
+      }
+    }
+  }
+
+  throw new Error("Image is too large after compression.");
+}
+
+function scaledDimensions(width, height, maxDimension) {
+  const scale = Math.min(1, maxDimension / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
   };
-  reader.readAsDataURL(file);
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read image."));
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () =>
+      reject(new Error("This image format cannot be processed."));
+    image.src = dataUrl;
+  });
+}
+
+function setEntrySaving(saving) {
+  state.entrySaving = saving;
+  updateEntrySaveState();
 }
 
 async function search() {
@@ -559,6 +708,7 @@ async function fetchPage(
   sourceView = state.view,
   highlightKeyword = "",
 ) {
+  if (!prepareToLeavePageEditor()) return;
   const response = await request(`/api/page?path=${encodeURIComponent(path)}`);
   const data = await response.json();
   const file = data[0];
@@ -585,6 +735,7 @@ function showPage(title, html, sourceView) {
   highlightPageContent(state.currentHighlightKeyword);
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
+  setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
 }
@@ -592,28 +743,110 @@ function showPage(title, html, sourceView) {
 async function toggleEdit() {
   const editor = el("page-editor");
   const content = el("page-content");
+  const button = el("edit-button");
   if (editor.hidden) {
-    editor.value = state.currentContent;
+    const draft = loadPageDraft(state.currentFile);
+    editor.value = draft ?? state.currentContent;
     editor.hidden = false;
     content.hidden = true;
-    setButtonIcon(el("edit-button"), "save", "Save");
+    setPageEditorStatus(draft === null ? "" : "Draft restored.");
+    setButtonIcon(button, "save", "Save");
     return;
   }
-  const response = await request("/api/page", {
-    method: "POST",
-    body: JSON.stringify({
-      file: state.currentFile,
-      content: editor.value,
-    }),
-  });
-  if (response.ok) {
+  setPageEditorStatus("Saving...");
+  button.disabled = true;
+  setButtonIcon(button, "save", "Saving...");
+  try {
+    const response = await request("/api/page", {
+      method: "POST",
+      body: JSON.stringify({
+        file: state.currentFile,
+        content: editor.value,
+      }),
+    });
+    if (!response.ok) throw new Error(await response.text());
     state.currentContent = editor.value;
+    clearPageDraft(state.currentFile);
     content.innerHTML = renderMarkdown(state.currentContent);
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     content.hidden = false;
-    setButtonIcon(el("edit-button"), "pencil", "Edit");
+    setPageEditorStatus("Saved.");
+    setButtonIcon(button, "pencil", "Edit");
+  } catch (error) {
+    console.error(error);
+    const message = error.message ? `Save failed: ${error.message}` : "Save failed.";
+    setPageEditorStatus(message);
+    setButtonIcon(button, "save", "Save");
+  } finally {
+    button.disabled = false;
   }
+}
+
+function handlePageEditorInput() {
+  persistPageDraft();
+  setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
+}
+
+function handleBeforeUnload(event) {
+  if (!hasUnsavedPageEdit()) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+function prepareToLeavePageEditor() {
+  if (!confirmDiscardUnsavedPageEdit()) return false;
+  closePageEditor();
+  return true;
+}
+
+function confirmDiscardUnsavedPageEdit() {
+  return !hasUnsavedPageEdit() || window.confirm(PAGE_EDITOR_LEAVE_MESSAGE);
+}
+
+function hasUnsavedPageEdit() {
+  const editor = el("page-editor");
+  return !editor.hidden && editor.value !== state.currentContent;
+}
+
+function closePageEditor() {
+  const editor = el("page-editor");
+  if (editor.hidden) return;
+  editor.hidden = true;
+  el("page-content").hidden = false;
+  setButtonIcon(el("edit-button"), "pencil", "Edit");
+  setPageEditorStatus("");
+}
+
+function persistPageDraft() {
+  if (!state.currentFile) return;
+  const editor = el("page-editor");
+  if (editor.value === state.currentContent) {
+    clearPageDraft(state.currentFile);
+    return;
+  }
+  localStorage.setItem(pageDraftKey(state.currentFile), editor.value);
+}
+
+function loadPageDraft(file) {
+  if (!file) return null;
+  const draft = localStorage.getItem(pageDraftKey(file));
+  if (draft === null || draft === state.currentContent) return null;
+  return draft;
+}
+
+function clearPageDraft(file) {
+  if (!file) return;
+  localStorage.removeItem(pageDraftKey(file));
+}
+
+function pageDraftKey(file) {
+  return `obr.page-draft.${encodeURIComponent(file)}`;
+}
+
+function setPageEditorStatus(message) {
+  el("page-editor-status").textContent = message;
+  el("page-editor-status").hidden = !message;
 }
 
 function highlightPageContent(keyword) {
