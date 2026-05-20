@@ -21,9 +21,13 @@ use axum::{
 };
 use chrono::Local;
 use tokio::net::TcpListener;
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    services::ServeDir,
+    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+};
 use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
-use tracing::{info, warn};
+use tracing::{Level, info, warn};
+use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
 use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 
 use crate::{
@@ -75,11 +79,8 @@ pub fn run() -> Result<()> {
 }
 
 async fn serve() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(log_filter())
-        .init();
-
     let config = Config::load()?;
+    init_logging(&config)?;
     prepare_vault(&config)?;
     let webauthn = build_webauthn(&config)?;
     let passkey_store = PasskeyStore::load(config.passkey_store_path.clone())?;
@@ -100,11 +101,25 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
-fn log_filter() -> String {
-    std::env::var("RUST_LOG")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "obr=info,tower_http=info".to_string())
+fn init_logging(config: &Config) -> Result<()> {
+    let filter = log_filter(config);
+    let env_filter =
+        EnvFilter::try_new(&filter).with_context(|| format!("invalid log filter `{filter}`"))?;
+    tracing_subscriber::fmt()
+        .with_timer(LocalTime::rfc_3339())
+        .with_env_filter(env_filter)
+        .try_init()
+        .map_err(|err| anyhow::anyhow!("initialize tracing subscriber: {err}"))?;
+    Ok(())
+}
+
+fn log_filter(config: &Config) -> String {
+    let configured = config.log_level.trim();
+    if configured.contains('=') || configured.contains(',') {
+        configured.to_string()
+    } else {
+        format!("obr={configured},tower_http={configured}")
+    }
 }
 
 fn start_daemon() -> Result<()> {
@@ -227,7 +242,12 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
 
     public
         .merge(protected)
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .layer(middleware::from_fn(security_headers))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(session_layer)

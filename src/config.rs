@@ -19,6 +19,8 @@ pub(crate) struct Config {
     pub(crate) vault_path: PathBuf,
     #[serde(default = "default_log_path")]
     pub(crate) log_path: PathBuf,
+    #[serde(default = "default_log_level")]
+    pub(crate) log_level: String,
     pub(crate) username: String,
     #[serde(default)]
     pub(crate) password_hash: Option<String>,
@@ -48,6 +50,10 @@ fn default_session_days() -> u64 {
 
 fn default_log_path() -> PathBuf {
     PathBuf::from("logs/obr.log")
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
 }
 
 fn default_passkey_store_path() -> PathBuf {
@@ -98,6 +104,9 @@ impl Config {
         }
         if self.log_path.as_os_str().is_empty() {
             bail!("log_path cannot be empty");
+        }
+        if self.log_level.trim().is_empty() {
+            bail!("log_level cannot be empty");
         }
         if self.passkey_store_path.as_os_str().is_empty() {
             bail!("passkey_store_path cannot be empty");
@@ -183,6 +192,7 @@ mod tests {
             listen: "127.0.0.1:8010".to_string(),
             vault_path: PathBuf::from("."),
             log_path: PathBuf::from("logs/obr.log"),
+            log_level: "info".to_string(),
             username: "admin".to_string(),
             password_hash: None,
             password: Some("secret".to_string()),

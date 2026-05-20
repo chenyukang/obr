@@ -22,7 +22,7 @@ toml = "0.9"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tower-sessions = "0.15"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
 url = "2.5.8"
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
 walkdir = "2.5"
