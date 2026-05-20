@@ -687,6 +687,89 @@ a {
   border-radius: 6px;
 }
 
+.markdown .image-frame {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+  margin: 6px 0;
+  overflow: hidden;
+  vertical-align: top;
+  border-radius: 6px;
+  background: #eef3f1;
+}
+
+.markdown .image-frame.image-loading,
+.markdown .image-frame.image-error {
+  width: min(100%, var(--image-placeholder-width, 520px));
+  min-height: var(--image-placeholder-height, 160px);
+}
+
+.markdown .image-frame img {
+  display: block;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.markdown .image-frame.image-loaded {
+  background: transparent;
+}
+
+.markdown .image-frame.image-loaded img {
+  opacity: 1;
+}
+
+.markdown .image-frame.image-error {
+  border: 1px solid var(--line);
+}
+
+.markdown .image-frame.image-error img {
+  display: none;
+}
+
+.markdown .image-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background: linear-gradient(100deg, #f2f6f4 0%, #e6eeea 45%, #f2f6f4 90%);
+  background-size: 200% 100%;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  animation: image-placeholder-shimmer 1.2s ease-in-out infinite;
+}
+
+.markdown .image-frame.image-loaded .image-placeholder {
+  display: none;
+}
+
+.markdown .image-frame.image-error .image-placeholder {
+  background: #f8faf9;
+  animation: none;
+}
+
+@keyframes image-placeholder-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .markdown .image-frame img {
+    transition: none;
+  }
+
+  .markdown .image-placeholder {
+    animation: none;
+  }
+}
+
 .metadata-panel {
   margin: 0 0 18px;
   border: 1px solid var(--line);

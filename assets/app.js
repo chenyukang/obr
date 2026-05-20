@@ -761,6 +761,7 @@ async function syncOutboxItem(item) {
       }
       if (el("page-editor").hidden) {
         el("page-content").innerHTML = data.html || "";
+        enhanceMarkdownImages(el("page-content"));
         highlightPageContent(state.currentHighlightKeyword);
       }
       setPageEditorStatus("");
@@ -1422,6 +1423,7 @@ async function loadTodo() {
     el("todo-list").innerHTML = html.trim()
       ? html
       : '<p class="empty">No todos.</p>';
+    enhanceMarkdownImages(el("todo-list"));
   } catch (error) {
     console.error(error);
     const cached = findCachedPage("Zero/todo");
@@ -1429,6 +1431,7 @@ async function loadTodo() {
     el("todo-list").innerHTML = html.trim()
       ? html
       : '<p class="empty">No offline todo cache.</p>';
+    enhanceMarkdownImages(el("todo-list"));
   }
 }
 
@@ -1545,6 +1548,7 @@ function showPage(title, html, sourceView, options = {}) {
   }
   el("page-title").textContent = title;
   el("page-content").innerHTML = html;
+  enhanceMarkdownImages(el("page-content"));
   highlightPageContent(state.currentHighlightKeyword);
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
@@ -1613,6 +1617,7 @@ async function toggleEdit() {
     replaceAppHistory(currentAppHistoryEntry());
     clearPageDraft(state.currentFile);
     content.innerHTML = data.html || "";
+    enhanceMarkdownImages(content);
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     content.hidden = false;
@@ -2155,6 +2160,62 @@ function showToast(message) {
       if (!toast.classList.contains("show")) toast.hidden = true;
     }, 160);
   }, TOAST_MS);
+}
+
+function enhanceMarkdownImages(root) {
+  if (!root) return;
+  for (const img of root.querySelectorAll("img")) {
+    if (img.closest(".image-frame")) continue;
+    const frame = document.createElement("span");
+    frame.className = "image-frame image-loading";
+    frame.setAttribute("aria-busy", "true");
+    const width = parseImageDimension(img.getAttribute("width"));
+    const height = parseImageDimension(img.getAttribute("height"));
+    if (width) {
+      frame.style.setProperty("--image-placeholder-width", `${width}px`);
+    }
+    if (height) {
+      frame.style.setProperty("--image-placeholder-height", `${height}px`);
+    } else if (width) {
+      const estimatedHeight = Math.max(120, Math.min(Math.round(width * 0.62), 360));
+      frame.style.setProperty("--image-placeholder-height", `${estimatedHeight}px`);
+    }
+
+    const placeholder = document.createElement("span");
+    placeholder.className = "image-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    placeholder.textContent = "Loading image";
+
+    img.parentNode.insertBefore(frame, img);
+    frame.append(placeholder, img);
+
+    const finish = () => {
+      frame.classList.remove("image-loading", "image-error");
+      frame.classList.add("image-loaded");
+      frame.removeAttribute("aria-busy");
+    };
+    const fail = () => {
+      frame.classList.remove("image-loading", "image-loaded");
+      frame.classList.add("image-error");
+      frame.removeAttribute("aria-busy");
+      placeholder.textContent = "Image unavailable";
+    };
+
+    img.addEventListener("load", finish, { once: true });
+    img.addEventListener("error", fail, { once: true });
+    if (img.complete) {
+      if (img.naturalWidth > 0 || img.naturalHeight > 0) {
+        finish();
+      } else {
+        fail();
+      }
+    }
+  }
+}
+
+function parseImageDimension(value) {
+  const parsed = Number.parseInt(value || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function highlightPageContent(keyword) {
