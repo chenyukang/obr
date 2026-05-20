@@ -396,17 +396,34 @@ a {
 }
 
 .page-actions {
+  position: fixed;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  left: 50%;
+  z-index: 50;
   justify-content: space-between;
-  width: 100%;
-  margin: 0 0 12px;
+  width: min(920px, calc(100vw - 28px));
+  margin: 0;
+  pointer-events: none;
+  transform: translateX(-50%);
 }
 
 .page-actions button {
-  min-height: 40px;
+  min-width: 84px;
+  min-height: 38px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 94%);
+  box-shadow: 0 8px 24px rgb(27 37 43 / 16%);
+  padding: 7px 12px;
+  pointer-events: auto;
+  backdrop-filter: blur(10px);
 }
 
 #edit-button {
   margin-left: auto;
+}
+
+#page-view {
+  padding-bottom: calc(64px + env(safe-area-inset-bottom));
 }
 
 #page-title {
@@ -566,7 +583,7 @@ a {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: max(18px, env(safe-area-inset-bottom));
+  bottom: calc(max(18px, env(safe-area-inset-bottom)) + 52px);
   z-index: 100;
   max-width: min(360px, calc(100vw - 32px));
   border-radius: 999px;
@@ -612,17 +629,10 @@ a {
     flex-wrap: wrap;
   }
 
-  .page-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 10px;
-    margin-top: -4px;
-  }
-
   .page-actions button {
-    width: 100%;
-    min-width: 0;
-    min-height: 44px;
+    min-width: 78px;
+    min-height: 40px;
+    padding: 7px 11px;
   }
 
   #edit-button {
