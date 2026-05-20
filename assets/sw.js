@@ -1,16 +1,18 @@
-const CACHE_VERSION = "obr-offline-20260520-13";
+const CACHE_VERSION = "obr-offline-20260520-14";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = `${CACHE_VERSION}:images`;
 const PAGE_CACHE_LIMIT = 40;
 const IMAGE_CACHE_LIMIT = 80;
+const NAVIGATION_FALLBACK_TIMEOUT_MS = 800;
+const PAGE_API_FALLBACK_TIMEOUT_MS = 1500;
 
 const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260520-fold-entry-meta",
-  "/assets/app.js?v=20260520-fold-entry-meta",
+  "/assets/style.css?v=20260520-fast-start",
+  "/assets/app.js?v=20260520-fast-start",
 ];
 
 self.addEventListener("install", (event) => {
@@ -51,8 +53,22 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== location.origin) return;
   if (url.pathname === "/api/ping") return;
 
+  if (request.mode === "navigate") {
+    event.respondWith(
+      networkFirst(request, SHELL_CACHE, 0, {
+        timeoutMs: NAVIGATION_FALLBACK_TIMEOUT_MS,
+        fallbackRequest: "/",
+      }),
+    );
+    return;
+  }
+
   if (isPageApi(url)) {
-    event.respondWith(networkFirst(request, PAGE_CACHE, PAGE_CACHE_LIMIT));
+    event.respondWith(
+      networkFirst(request, PAGE_CACHE, PAGE_CACHE_LIMIT, {
+        timeoutMs: PAGE_API_FALLBACK_TIMEOUT_MS,
+      }),
+    );
     return;
   }
 
@@ -64,10 +80,6 @@ self.addEventListener("fetch", (event) => {
   if (isShellAsset(url)) {
     event.respondWith(cacheFirst(request, SHELL_CACHE));
     return;
-  }
-
-  if (request.mode === "navigate") {
-    event.respondWith(networkFirst(request, SHELL_CACHE));
   }
 });
 
@@ -87,20 +99,54 @@ function isShellAsset(url) {
   );
 }
 
-async function networkFirst(request, cacheName, limit = 0) {
+async function networkFirst(request, cacheName, limit = 0, options = {}) {
   const cache = await caches.open(cacheName);
-  try {
-    const response = await fetch(request);
+  const network = fetch(request).then(async (response) => {
     if (response.ok) {
       await cache.put(request, response.clone());
       if (limit) await trimCache(cache, limit);
     }
     return response;
+  });
+
+  if (options.timeoutMs) {
+    const timeout = new Promise((resolve) => {
+      setTimeout(async () => {
+        resolve(await cachedFallback(cache, request, options.fallbackRequest));
+      }, options.timeoutMs);
+    });
+    const winner = await Promise.race([
+      network
+        .then((response) => ({ type: "network", response }))
+        .catch((error) => ({ type: "error", error })),
+      timeout.then((response) => ({ type: "timeout", response })),
+    ]);
+
+    if (winner.type === "network") return winner.response;
+    if (winner.type === "timeout" && winner.response) {
+      network.catch(() => {});
+      return winner.response;
+    }
+    if (winner.type === "error") {
+      const cached = await cachedFallback(cache, request, options.fallbackRequest);
+      if (cached) return cached;
+      throw winner.error;
+    }
+  }
+
+  try {
+    return await network;
   } catch (error) {
-    const cached = await cache.match(request);
-    if (cached) return offlineResponse(cached);
+    const cached = await cachedFallback(cache, request, options.fallbackRequest);
+    if (cached) return cached;
     throw error;
   }
+}
+
+async function cachedFallback(cache, request, fallbackRequest) {
+  const cached =
+    (await cache.match(request)) || (fallbackRequest && (await cache.match(fallbackRequest)));
+  return cached ? offlineResponse(cached) : null;
 }
 
 async function cacheFirst(request, cacheName, limit = 0) {

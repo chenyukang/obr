@@ -7,9 +7,14 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-fold-entry-meta">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-fast-start">
   </head>
   <body>
+    <div id="boot" class="boot-screen" role="status" aria-live="polite">
+      <span class="boot-mark" aria-hidden="true"></span>
+      <span>Opening Obr...</span>
+    </div>
+
     <div id="login" class="login-panel" hidden>
       <form id="login-form" class="login-card">
         <h1>Obr</h1>
@@ -149,6 +154,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-fold-entry-meta"></script>
+    <script src="/assets/app.js?v=20260520-fast-start"></script>
   </body>
 </html>

@@ -44,6 +44,8 @@ const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
 const TOAST_MS = 1800;
 const PING_TIMEOUT_MS = 3000;
+const STARTUP_VERIFY_TIMEOUT_MS = 1200;
+const AUTH_OPTIONS_TIMEOUT_MS = 1200;
 const RECENT_PAGE_LIMIT = 20;
 const RECENT_PAGES_KEY = "obr.offline.recent-pages";
 const OUTBOX_KEY = "obr.offline.outbox";
@@ -845,10 +847,14 @@ async function request(path, options = {}) {
 
 async function verify() {
   try {
-    const response = await fetch("/api/verify", {
-      cache: "no-store",
-      credentials: "same-origin",
-    });
+    const response = await fetchWithTimeout(
+      "/api/verify",
+      {
+        cache: "no-store",
+        credentials: "same-origin",
+      },
+      STARTUP_VERIFY_TIMEOUT_MS,
+    );
     setConnectionStatus(true);
     return response.ok;
   } catch {
@@ -874,9 +880,13 @@ async function refreshAuthOptions() {
 
 async function fetchAuthOptions() {
   try {
-    const response = await fetch("/api/auth/options", {
-      credentials: "same-origin",
-    });
+    const response = await fetchWithTimeout(
+      "/api/auth/options",
+      {
+        credentials: "same-origin",
+      },
+      AUTH_OPTIONS_TIMEOUT_MS,
+    );
     setConnectionStatus(true);
     if (!response.ok) throw new Error(await response.text());
     const options = await response.json();
@@ -886,7 +896,13 @@ async function fetchAuthOptions() {
     };
   } catch (error) {
     console.error(error);
-    if (error instanceof TypeError) setConnectionStatus(false);
+    if (error?.name === "AbortError" || error instanceof TypeError) {
+      setConnectionStatus(false);
+      return {
+        passkeyRegistered: false,
+        passwordLoginAllowed: true,
+      };
+    }
     const passkeyRegistered = await fetchLegacyPasskeyAvailability();
     return {
       passkeyRegistered,
@@ -897,9 +913,13 @@ async function fetchAuthOptions() {
 
 async function fetchLegacyPasskeyAvailability() {
   try {
-    const response = await fetch("/api/passkey/available", {
-      credentials: "same-origin",
-    });
+    const response = await fetchWithTimeout(
+      "/api/passkey/available",
+      {
+        credentials: "same-origin",
+      },
+      AUTH_OPTIONS_TIMEOUT_MS,
+    );
     setConnectionStatus(true);
     if (!response.ok) return false;
     const status = await response.json();
@@ -907,6 +927,20 @@ async function fetchLegacyPasskeyAvailability() {
   } catch (error) {
     if (error instanceof TypeError) setConnectionStatus(false);
     return false;
+  }
+}
+
+async function fetchWithTimeout(path, options = {}, timeoutMs = 0) {
+  if (!timeoutMs) return fetch(path, options);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(path, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 
@@ -1092,6 +1126,7 @@ async function logout() {
 }
 
 function showLogin() {
+  hideBoot();
   const showPasswordLogin = !state.passkeyRegistered || state.passwordLoginAllowed;
   el("app").hidden = true;
   el("login").hidden = false;
@@ -1106,9 +1141,15 @@ function showLogin() {
 }
 
 function showApp() {
+  hideBoot();
   el("login").hidden = true;
   el("app").hidden = false;
   refreshPasskeyRegisterButton();
+}
+
+function hideBoot() {
+  const boot = el("boot");
+  if (boot) boot.hidden = true;
 }
 
 async function refreshPasskeyRegisterButton() {

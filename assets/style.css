@@ -562,6 +562,32 @@ main {
   color: #b42318;
 }
 
+.boot-screen {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.boot-mark {
+  width: 32px;
+  height: 32px;
+  justify-self: center;
+  border: 3px solid #d9e0e4;
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: boot-spin 800ms linear infinite;
+}
+
+@keyframes boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .login-panel {
   min-height: 100vh;
   display: grid;
@@ -813,6 +839,10 @@ a {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .boot-mark {
+    animation: none;
+  }
+
   .markdown .image-frame img {
     transition: none;
   }
