@@ -525,7 +525,7 @@ fn obsidian_embed_html(raw: &str) -> String {
     }
 
     format!(
-        r#"<img src="{}" alt="{}" loading="lazy"{}>"#,
+        r#"<img src="{}" alt="{}" loading="lazy" decoding="async"{}>"#,
         escape_html_attr(&src),
         escape_html_attr(target),
         attrs
@@ -580,8 +580,10 @@ fn sanitize_rendered_html(rendered: &str) -> String {
     cleaner
         .add_tags(&["input"])
         .add_tag_attributes("a", &["data-page", "target"])
-        .add_tag_attributes("img", &["loading"])
-        .add_tag_attributes("input", &["type", "checked", "disabled", "data-task-index"]);
+        .add_tag_attributes("img", &["loading", "decoding"])
+        .add_tag_attributes("input", &["type", "checked", "disabled", "data-task-index"])
+        .set_tag_attribute_value("img", "loading", "lazy")
+        .set_tag_attribute_value("img", "decoding", "async");
     cleaner.clean(rendered).to_string()
 }
 
@@ -958,7 +960,18 @@ mod tests {
         assert!(rendered.contains(r#"data-page="People/可可""#));
         assert!(rendered.contains(">可可</a>"));
         assert!(rendered.contains(r#"<img src="/assets/images/hello%20world.jpg""#));
+        assert!(rendered.contains(r#"loading="lazy""#));
+        assert!(rendered.contains(r#"decoding="async""#));
         assert!(rendered.contains(r#"width="250""#));
+    }
+
+    #[test]
+    fn render_markdown_html_lazy_loads_markdown_images() {
+        let rendered = render_markdown_html("![Alt text](photo.jpg)");
+
+        assert!(rendered.contains(r#"<img src="photo.jpg" alt="Alt text""#));
+        assert!(rendered.contains(r#"loading="lazy""#));
+        assert!(rendered.contains(r#"decoding="async""#));
     }
 
     #[test]
