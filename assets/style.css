@@ -150,6 +150,37 @@ nav {
   gap: 6px;
 }
 
+.connection-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--muted);
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.connection-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #b42318;
+  box-shadow: 0 0 0 3px rgb(180 35 24 / 12%);
+}
+
+.connection-status.is-online .connection-dot {
+  background: #198754;
+  box-shadow: 0 0 0 3px rgb(25 135 84 / 14%);
+}
+
+.connection-status.is-offline {
+  color: #8a1f16;
+}
+
 .auth-actions button {
   width: 34px;
   height: 34px;
@@ -348,6 +379,13 @@ main {
   color: var(--muted);
 }
 
+.offline-note {
+  margin: 0 0 10px;
+  color: #8a1f16;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 a {
   color: var(--blue);
 }
@@ -358,8 +396,17 @@ a {
 }
 
 .page-actions {
-  justify-content: flex-end;
-  margin-bottom: 12px;
+  justify-content: space-between;
+  width: 100%;
+  margin: 0 0 12px;
+}
+
+.page-actions button {
+  min-height: 40px;
+}
+
+#edit-button {
+  margin-left: auto;
 }
 
 #page-title {
@@ -396,6 +443,11 @@ a {
 .markdown pre code {
   background: transparent;
   padding: 0;
+}
+
+.offline-source-preview {
+  max-height: 70vh;
+  overflow: auto;
 }
 
 .search-highlight {
@@ -554,11 +606,27 @@ a {
   }
 
   nav,
-  .page-actions,
   .search-bar,
   .todo-form {
     width: 100%;
     flex-wrap: wrap;
+  }
+
+  .page-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+    margin-top: -4px;
+  }
+
+  .page-actions button {
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+  }
+
+  #edit-button {
+    margin-left: 0;
   }
 
   .toolbar {
@@ -587,6 +655,24 @@ a {
     grid-column: 2;
     grid-row: 1;
     justify-self: end;
+  }
+
+  .connection-status {
+    width: 34px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .connection-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    white-space: nowrap;
+    border: 0;
+    clip: rect(0, 0, 0, 0);
   }
 
   .metadata-panel {

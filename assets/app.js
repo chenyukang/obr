@@ -9,6 +9,8 @@ const state = {
   searchTimer: 0,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
+  connectionOnline: navigator.onLine,
+  connectionTimer: 0,
   entrySaving: false,
   entryImagePreparing: false,
   longPress: null,
@@ -17,6 +19,9 @@ const state = {
   suppressLinkElement: null,
   toastTimer: 0,
   viewScroll: {},
+  syncingOutbox: false,
+  historyReady: false,
+  applyingHistory: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -29,6 +34,11 @@ const LONG_PRESS_COPY_MS = 650;
 const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
 const TOAST_MS = 1800;
+const PING_INTERVAL_MS = 15000;
+const PING_TIMEOUT_MS = 3000;
+const RECENT_PAGE_LIMIT = 20;
+const RECENT_PAGES_KEY = "obr.offline.recent-pages";
+const OUTBOX_KEY = "obr.offline.outbox";
 
 const ICONS = {
   "arrow-left": '<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>',
@@ -61,12 +71,19 @@ const ICONS = {
 document.addEventListener("DOMContentLoaded", async () => {
   installIcons();
   bindEvents();
+  initializeAppHistory({ view: "day" });
+  void registerServiceWorker();
+  startConnectionMonitor();
   restoreDraft();
   updateEntrySaveState();
   const ok = await verify();
   if (ok) {
     showApp();
-    showView("day");
+    showView("day", { updateHistory: false });
+    void syncOutbox();
+  } else if (canUseOfflineApp()) {
+    showApp();
+    await showOfflineStart();
   } else {
     await refreshAuthOptions();
     showLogin();
@@ -83,6 +100,7 @@ function bindEvents() {
   el("passkey-login-button").addEventListener("click", passkeyLogin);
   el("passkey-register-button").addEventListener("click", registerPasskey);
   window.addEventListener("beforeunload", handleBeforeUnload);
+  window.addEventListener("popstate", handleAppPopState);
   window.addEventListener("scroll", handleWindowScroll, { passive: true });
   document.addEventListener("keydown", handleGlobalKeydown);
   installLongPressCopy(el("page-content"));
@@ -144,9 +162,7 @@ function bindEvents() {
     await loadTodo();
   });
 
-  el("back-button").addEventListener("click", async () => {
-    await showView(state.lastListView, { focusSearch: false });
-  });
+  el("back-button").addEventListener("click", goBackToLastList);
   el("edit-button").addEventListener("click", toggleEdit);
 
   el("page-content").addEventListener("click", async (event) => {
@@ -165,15 +181,437 @@ function bindEvents() {
   });
 }
 
-async function request(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      ...(options.body ? { "content-type": "application/json" } : {}),
-      ...(options.headers || {}),
-    },
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    await navigator.serviceWorker.register("/sw.js");
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function initializeAppHistory(entry) {
+  if (!window.history?.replaceState) return;
+  state.historyReady = true;
+  replaceAppHistory(entry);
+}
+
+function appHistoryState(entry) {
+  return {
+    obr: true,
+    ...entry,
+  };
+}
+
+function replaceAppHistory(entry) {
+  if (!state.historyReady) return;
+  window.history.replaceState(appHistoryState(entry), "", location.href);
+}
+
+function pushAppHistory(entry) {
+  if (!state.historyReady || state.applyingHistory) return;
+  const next = appHistoryState(entry);
+  if (sameAppHistoryState(window.history.state, next)) return;
+  window.history.pushState(next, "", location.href);
+}
+
+function sameAppHistoryState(left, right) {
+  if (!left?.obr || !right?.obr) return false;
+  return (
+    left.view === right.view &&
+    left.file === right.file &&
+    left.sourceView === right.sourceView &&
+    left.highlightKeyword === right.highlightKeyword
+  );
+}
+
+function currentAppHistoryEntry() {
+  if (state.view === "page") {
+    return {
+      view: "page",
+      file: state.currentFile,
+      sourceView: state.lastListView,
+      highlightKeyword: state.currentHighlightKeyword,
+    };
+  }
+  return { view: state.view };
+}
+
+async function handleAppPopState(event) {
+  const target = event.state;
+  if (!target?.obr) return;
+
+  if (!prepareToLeavePageEditor()) {
+    pushAppHistory(currentAppHistoryEntry());
+    return;
+  }
+
+  state.applyingHistory = true;
+  try {
+    if (target.view === "page" && target.file) {
+      await fetchPage(
+        target.file,
+        target.sourceView || state.lastListView,
+        target.highlightKeyword || "",
+        { updateHistory: false },
+      );
+      return;
+    }
+    await showView(target.view || "day", {
+      focusSearch: false,
+      updateHistory: false,
+    });
+  } finally {
+    state.applyingHistory = false;
+  }
+}
+
+function startConnectionMonitor() {
+  setConnectionStatus(navigator.onLine);
+  window.addEventListener("online", () => void checkConnectivity({ sync: true }));
+  window.addEventListener("offline", () => setConnectionStatus(false));
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void checkConnectivity({ sync: true });
   });
+  void checkConnectivity({ sync: true });
+  state.connectionTimer = window.setInterval(
+    () => void checkConnectivity({ sync: true }),
+    PING_INTERVAL_MS,
+  );
+}
+
+async function checkConnectivity(options = {}) {
+  if (!navigator.onLine) {
+    setConnectionStatus(false);
+    return false;
+  }
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), PING_TIMEOUT_MS);
+  try {
+    const response = await fetch(`/api/ping?ts=${Date.now()}`, {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    const online = response.ok;
+    setConnectionStatus(online);
+    if (online && options.sync) void syncOutbox();
+    return online;
+  } catch {
+    setConnectionStatus(false);
+    return false;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function setConnectionStatus(online) {
+  state.connectionOnline = Boolean(online);
+  const status = el("connection-status");
+  const label = el("connection-label");
+  if (!status || !label) return;
+
+  status.classList.toggle("is-online", state.connectionOnline);
+  status.classList.toggle("is-offline", !state.connectionOnline);
+  updateConnectionStatusLabel();
+}
+
+function updateConnectionStatusLabel() {
+  const status = el("connection-status");
+  const label = el("connection-label");
+  if (!status || !label) return;
+
+  const pending = readOutbox().length;
+  const base = state.connectionOnline ? "Online" : "Offline";
+  const text = pending ? `${base} · ${pending} pending` : base;
+  label.textContent = text;
+  status.title = text;
+  status.setAttribute("aria-label", text);
+}
+
+function canUseOfflineApp() {
+  return !state.connectionOnline && readRecentPages().length > 0;
+}
+
+async function showOfflineStart() {
+  const [recent] = readRecentPages();
+  if (recent) {
+    state.currentFile = recent.file;
+    state.currentContent = pendingPageContent(recent.file) ?? recent.source ?? "";
+    state.currentContentLoaded = Boolean(state.currentContent);
+    showPage(
+      recent.file,
+      recent.html || offlineSourcePreview(state.currentContent),
+      "find",
+    );
+    showToast("Offline copy.");
+    return;
+  }
+  await showView("find");
+}
+
+function readRecentPages() {
+  return readJson(RECENT_PAGES_KEY, []).filter((page) => page?.file);
+}
+
+function writeRecentPages(pages) {
+  try {
+    writeJson(RECENT_PAGES_KEY, pages.slice(0, RECENT_PAGE_LIMIT));
+  } catch (error) {
+    console.error(error);
+    try {
+      writeJson(RECENT_PAGES_KEY, pages.slice(0, 5));
+    } catch (retryError) {
+      console.error(retryError);
+    }
+  }
+}
+
+function rememberPage(data, requestedPath = "", source = null) {
+  if (!data?.file || data.file === "NoPage") return;
+  const pages = readRecentPages();
+  const aliases = pageAliases(data.file, requestedPath);
+  const existing = pages.find((page) => page.file === data.file);
+  const next = {
+    file: data.file,
+    html: data.html ?? existing?.html ?? "",
+    source: source ?? existing?.source ?? "",
+    aliases: uniqueStrings([...(existing?.aliases || []), ...aliases]),
+    savedAt: Date.now(),
+  };
+  writeRecentPages([
+    next,
+    ...pages.filter((page) => page.file !== data.file),
+  ]);
+}
+
+function rememberPageSource(file, source) {
+  if (!file || file === "NoPage") return;
+  const pages = readRecentPages();
+  const index = pages.findIndex((page) => page.file === file);
+  if (index === -1) {
+    writeRecentPages([
+      {
+        file,
+        html: "",
+        source,
+        aliases: pageAliases(file),
+        savedAt: Date.now(),
+      },
+      ...pages,
+    ]);
+    return;
+  }
+  pages[index] = {
+    ...pages[index],
+    source,
+    savedAt: Date.now(),
+  };
+  writeRecentPages(pages);
+}
+
+function findCachedPage(path) {
+  const needle = normalizePageAlias(path);
+  return readRecentPages().find((page) =>
+    pageAliases(page.file, ...(page.aliases || [])).some(
+      (alias) => normalizePageAlias(alias) === needle,
+    ),
+  );
+}
+
+function cachedPageSource(file) {
+  return findCachedPage(file)?.source || "";
+}
+
+function pageAliases(file, ...extra) {
+  const aliases = [file, ...extra].filter(Boolean);
+  if (file.endsWith(".md")) aliases.push(file.slice(0, -3));
+  return uniqueStrings(aliases.map(normalizePageAlias));
+}
+
+function normalizePageAlias(path) {
+  return String(path || "").replace(/^\/+/, "").replace(/\.md$/, "");
+}
+
+function renderCachedSearchResults(keyword = "") {
+  const needle = keyword.trim().toLowerCase();
+  const pages = readRecentPages().filter((page) => {
+    if (!needle) return true;
+    return page.file.toLowerCase().includes(needle);
+  });
+  if (!pages.length) {
+    el("search-results").innerHTML =
+      '<p class="empty">No offline pages cached.</p>';
+    return;
+  }
+  const items = pages
+    .map(
+      (page) =>
+        `<li><a id="${escapeHtmlAttr(page.file)}" href="#">${escapeHtml(page.file)}</a></li>`,
+    )
+    .join("");
+  el("search-results").innerHTML = `<p class="offline-note">Offline recent pages</p><ul>${items}</ul>`;
+}
+
+function readOutbox() {
+  return readJson(OUTBOX_KEY, []).filter((item) => item?.id && item?.type);
+}
+
+function writeOutbox(items) {
+  writeJson(OUTBOX_KEY, items);
+  updateConnectionStatusLabel();
+}
+
+function queueOfflineMutation(type, payload) {
+  const items = readOutbox();
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const item = { id, type, payload, createdAt: Date.now() };
+  if (type === "page") {
+    const filtered = items.filter(
+      (existing) =>
+        existing.type !== "page" || existing.payload.file !== payload.file,
+    );
+    writeOutbox([...filtered, item]);
+    return;
+  }
+  writeOutbox([...items, item]);
+}
+
+function pendingPageContent(file) {
+  const item = [...readOutbox()]
+    .reverse()
+    .find((queued) => queued.type === "page" && queued.payload.file === file);
+  return item?.payload.content ?? null;
+}
+
+async function syncOutbox() {
+  if (state.syncingOutbox || !state.connectionOnline) return;
+  let items = readOutbox();
+  if (!items.length) return;
+
+  state.syncingOutbox = true;
+  updateConnectionStatusLabel();
+  const remaining = [];
+  try {
+    for (const item of items) {
+      try {
+        await syncOutboxItem(item);
+      } catch (error) {
+        console.error(error);
+        remaining.push(item, ...items.slice(items.indexOf(item) + 1));
+        break;
+      }
+    }
+  } finally {
+    state.syncingOutbox = false;
+    writeOutbox(remaining);
+  }
+}
+
+async function syncOutboxItem(item) {
+  if (item.type === "entry") {
+    const response = await request("/api/entry", {
+      method: "POST",
+      body: JSON.stringify(item.payload),
+    });
+    const text = await response.text();
+    if (text !== "ok") throw new Error(text);
+    showToast("Offline entry synced.");
+    if (item.payload.page === "todo" && state.view === "todo") {
+      await loadTodo();
+    }
+    return;
+  }
+
+  if (item.type === "page") {
+    const response = await request("/api/page", {
+      method: "POST",
+      body: JSON.stringify(item.payload),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const data = await response.json();
+    rememberPage(data, item.payload.file, item.payload.content);
+    if (state.currentFile === data.file) {
+      state.currentContent = item.payload.content;
+      state.currentContentLoaded = true;
+      if (el("page-editor").value === item.payload.content) {
+        clearPageDraft(data.file);
+      }
+      if (el("page-editor").hidden) {
+        el("page-content").innerHTML = data.html || "";
+        highlightPageContent(state.currentHighlightKeyword);
+      }
+      setPageEditorStatus("");
+    }
+    showToast("Offline page synced.");
+    return;
+  }
+
+  throw new Error(`Unknown offline item: ${item.type}`);
+}
+
+function readJson(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    console.error(error);
+    throw new Error("Local offline storage is full.");
+  }
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function shouldQueueOffline(error) {
+  return (
+    !state.connectionOnline ||
+    error instanceof TypeError ||
+    error?.name === "AbortError"
+  );
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttr(value) {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
+function offlineSourcePreview(source) {
+  if (!source) return '<p class="empty">Offline copy has no source cached.</p>';
+  return `<p class="offline-note">Offline draft queued. Rendered view updates after sync.</p><pre class="offline-source-preview">${escapeHtml(source)}</pre>`;
+}
+
+async function request(path, options = {}) {
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      ...options,
+      headers: {
+        ...(options.body ? { "content-type": "application/json" } : {}),
+        ...(options.headers || {}),
+      },
+    });
+    setConnectionStatus(response.headers.get("x-obr-offline-cache") !== "1");
+  } catch (error) {
+    setConnectionStatus(false);
+    throw error;
+  }
   if (response.status === 401) {
     await refreshAuthOptions();
     showLogin();
@@ -184,9 +622,14 @@ async function request(path, options = {}) {
 
 async function verify() {
   try {
-    const response = await fetch("/api/verify", { credentials: "same-origin" });
+    const response = await fetch("/api/verify", {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    setConnectionStatus(true);
     return response.ok;
   } catch {
+    setConnectionStatus(false);
     return false;
   }
 }
@@ -211,6 +654,7 @@ async function fetchAuthOptions() {
     const response = await fetch("/api/auth/options", {
       credentials: "same-origin",
     });
+    setConnectionStatus(true);
     if (!response.ok) throw new Error(await response.text());
     const options = await response.json();
     return {
@@ -219,6 +663,7 @@ async function fetchAuthOptions() {
     };
   } catch (error) {
     console.error(error);
+    if (error instanceof TypeError) setConnectionStatus(false);
     const passkeyRegistered = await fetchLegacyPasskeyAvailability();
     return {
       passkeyRegistered,
@@ -232,10 +677,12 @@ async function fetchLegacyPasskeyAvailability() {
     const response = await fetch("/api/passkey/available", {
       credentials: "same-origin",
     });
+    setConnectionStatus(true);
     if (!response.ok) return false;
     const status = await response.json();
     return Boolean(status.registered);
-  } catch {
+  } catch (error) {
+    if (error instanceof TypeError) setConnectionStatus(false);
     return false;
   }
 }
@@ -251,22 +698,31 @@ function isLocalBrowserHost() {
 
 async function login() {
   el("login-error").hidden = true;
-  const response = await fetch("/api/login", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      username: el("username").value,
-      password: el("password").value,
-    }),
-  });
+  let response;
+  try {
+    response = await fetch("/api/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username: el("username").value,
+        password: el("password").value,
+      }),
+    });
+    setConnectionStatus(true);
+  } catch {
+    setConnectionStatus(false);
+    setLoginError("Offline. Recent pages are still available on this device.");
+    return;
+  }
   if (!response.ok) {
     el("login-error").hidden = false;
     return;
   }
   el("password").value = "";
   showApp();
-  showView("day");
+  replaceAppHistory({ view: "day" });
+  showView("day", { updateHistory: false });
 }
 
 async function passkeyLogin() {
@@ -320,7 +776,8 @@ async function passkeyLogin() {
     state.passkeyRegistered = true;
     setLoginError("", true);
     showApp();
-    showView("day");
+    replaceAppHistory({ view: "day" });
+    showView("day", { updateHistory: false });
   } catch (error) {
     console.error(error);
     setLoginError(error.message || "Passkey login failed.");
@@ -445,7 +902,7 @@ async function refreshPasskeyRegisterButton() {
 
 async function showView(name, options = {}) {
   if (!prepareToLeavePageEditor()) return;
-  const { focusSearch = true, restoreScroll = true } = options;
+  const { focusSearch = true, restoreScroll = true, updateHistory = true } = options;
   saveCurrentScrollPosition();
   state.view = name;
   for (const view of document.querySelectorAll(".view")) {
@@ -456,6 +913,7 @@ async function showView(name, options = {}) {
     el("todo-view").hidden = false;
     await loadTodo();
     if (restoreScroll) restoreViewScroll("todo");
+    if (updateHistory) pushAppHistory({ view: "todo" });
     return;
   }
   if (name === "find") {
@@ -469,10 +927,12 @@ async function showView(name, options = {}) {
       focusSearchInput();
     }
     if (restoreScroll) restoreViewScroll("find");
+    if (updateHistory) pushAppHistory({ view: "find" });
     return;
   }
   el("day-view").hidden = false;
   if (restoreScroll) restoreViewScroll("day");
+  if (updateHistory) pushAppHistory({ view: "day" });
 }
 
 async function saveEntry() {
@@ -481,17 +941,18 @@ async function saveEntry() {
     updateEntrySaveState();
     return;
   }
+  const payload = {
+    page: el("entry-page").value,
+    links: el("entry-links").value,
+    text: el("entry-text").value,
+    image: state.image,
+  };
   setEntrySaving(true);
   setEntryStatus("Saving...");
   try {
     const response = await request("/api/entry", {
       method: "POST",
-      body: JSON.stringify({
-        page: el("entry-page").value,
-        links: el("entry-links").value,
-        text: el("entry-text").value,
-        image: state.image,
-      }),
+      body: JSON.stringify(payload),
     });
     const text = await response.text();
     if (text !== "ok") throw new Error(text);
@@ -500,6 +961,19 @@ async function saveEntry() {
     showToast("Saved.");
   } catch (error) {
     console.error(error);
+    if (shouldQueueOffline(error)) {
+      try {
+        queueOfflineMutation("entry", payload);
+        resetEntry();
+        setEntryStatus("Saved offline. Will sync when online.");
+        showToast("Saved offline.");
+        return;
+      } catch (queueError) {
+        console.error(queueError);
+        setEntryStatus(queueError.message || "Could not save offline.");
+        return;
+      }
+    }
     const message = error.message ? `Save failed: ${error.message}` : "Save failed.";
     setEntryStatus(message);
   } finally {
@@ -668,10 +1142,19 @@ function setEntrySaving(saving) {
 async function search() {
   const keyword = el("search-input").value.trim();
   updateSearchClear();
-  const response = await request(
-    `/api/search?keyword=${encodeURIComponent(keyword)}`,
-  );
-  el("search-results").innerHTML = `<ul>${await response.text()}</ul>`;
+  try {
+    const response = await request(
+      `/api/search?keyword=${encodeURIComponent(keyword)}`,
+    );
+    el("search-results").innerHTML = `<ul>${await response.text()}</ul>`;
+  } catch (error) {
+    console.error(error);
+    if (shouldQueueOffline(error)) {
+      renderCachedSearchResults(keyword);
+      return;
+    }
+    el("search-results").innerHTML = '<p class="empty">Search failed.</p>';
+  }
 }
 
 async function clearSearch() {
@@ -696,28 +1179,42 @@ function focusSearchInput(options = {}) {
 }
 
 async function loadTodo() {
-  const response = await request("/api/page?path=Zero%2Ftodo");
-  const data = await response.json();
-  const html = data.file === "NoPage" ? "" : data.html || "";
-  el("todo-list").innerHTML = html.trim()
-    ? html
-    : '<p class="empty">No todos.</p>';
+  try {
+    const response = await request("/api/page?path=Zero%2Ftodo");
+    const data = await response.json();
+    if (data.file !== "NoPage") {
+      rememberPage(data, "Zero/todo");
+      void warmPageSource(data.file);
+    }
+    const html = data.file === "NoPage" ? "" : data.html || "";
+    el("todo-list").innerHTML = html.trim()
+      ? html
+      : '<p class="empty">No todos.</p>';
+  } catch (error) {
+    console.error(error);
+    const cached = findCachedPage("Zero/todo");
+    const html = cached?.html || "";
+    el("todo-list").innerHTML = html.trim()
+      ? html
+      : '<p class="empty">No offline todo cache.</p>';
+  }
 }
 
 async function addTodo() {
   const text = el("todo-input").value.trim();
   if (!text) return;
+  const payload = {
+    page: "todo",
+    links: "",
+    text,
+    image: "",
+  };
   el("todo-status").textContent = "Saving...";
   el("todo-status").hidden = false;
   try {
     const response = await request("/api/entry", {
       method: "POST",
-      body: JSON.stringify({
-        page: "todo",
-        links: "",
-        text,
-        image: "",
-      }),
+      body: JSON.stringify(payload),
     });
     const result = await response.text();
     if (result !== "ok") throw new Error(result);
@@ -727,6 +1224,17 @@ async function addTodo() {
     await loadTodo();
   } catch (error) {
     console.error(error);
+    if (shouldQueueOffline(error)) {
+      try {
+        queueOfflineMutation("entry", payload);
+        el("todo-input").value = "";
+        el("todo-status").textContent = "Saved offline. Will sync when online.";
+        showToast("Todo saved offline.");
+        return;
+      } catch (queueError) {
+        console.error(queueError);
+      }
+    }
     el("todo-status").textContent = "Save failed.";
   }
 }
@@ -735,27 +1243,46 @@ async function fetchPage(
   path,
   sourceView = state.view,
   highlightKeyword = "",
+  options = {},
 ) {
   if (!prepareToLeavePageEditor()) return;
-  const response = await request(`/api/page?path=${encodeURIComponent(path)}`);
-  const data = await response.json();
+  const { updateHistory = true } = options;
+  let data;
+  try {
+    const response = await request(`/api/page?path=${encodeURIComponent(path)}`);
+    data = await response.json();
+    if (data.file !== "NoPage") {
+      rememberPage(data, path);
+      void warmPageSource(data.file);
+    }
+  } catch (error) {
+    console.error(error);
+    const cached = findCachedPage(path);
+    if (!cached) {
+      showToast("No offline copy.");
+      return;
+    }
+    data = cached;
+    showToast("Offline copy.");
+  }
   const file = data.file;
-  const html = data.html || "";
   state.currentHighlightKeyword = highlightKeyword.trim();
   if (file === "NoPage") {
     state.currentFile = path.endsWith(".md") ? path : `${path}.md`;
     state.currentContent = "";
     state.currentContentLoaded = true;
-    showPage("NoPage", "No page yet.", sourceView);
+    showPage("NoPage", "No page yet.", sourceView, { updateHistory });
     return;
   }
   state.currentFile = file;
-  state.currentContent = "";
-  state.currentContentLoaded = false;
-  showPage(file, html, sourceView);
+  state.currentContent = pendingPageContent(file) ?? data.source ?? "";
+  state.currentContentLoaded = Boolean(state.currentContent);
+  const html = data.html || offlineSourcePreview(state.currentContent);
+  showPage(file, html, sourceView, { updateHistory });
 }
 
-function showPage(title, html, sourceView) {
+function showPage(title, html, sourceView, options = {}) {
+  const { updateHistory = true } = options;
   saveCurrentScrollPosition();
   if (sourceView === "todo" || sourceView === "find") {
     state.lastListView = sourceView;
@@ -778,6 +1305,14 @@ function showPage(title, html, sourceView) {
     window.scrollTo(0, 0);
   } else {
     restoreReadingPosition(state.currentFile);
+  }
+  if (updateHistory) {
+    pushAppHistory({
+      view: "page",
+      file: state.currentFile || title,
+      sourceView: state.lastListView,
+      highlightKeyword: state.currentHighlightKeyword,
+    });
   }
 }
 
@@ -811,19 +1346,21 @@ async function toggleEdit() {
   setPageEditorStatus("Saving...");
   button.disabled = true;
   setButtonIcon(button, "save", "Saving...");
+  const payload = {
+    file: state.currentFile,
+    content: editor.value,
+  };
   try {
     const response = await request("/api/page", {
       method: "POST",
-      body: JSON.stringify({
-        file: state.currentFile,
-        content: editor.value,
-      }),
+      body: JSON.stringify(payload),
     });
     if (!response.ok) throw new Error(await response.text());
     const data = await response.json();
     state.currentContent = editor.value;
     state.currentContentLoaded = true;
     state.currentFile = data.file || state.currentFile;
+    replaceAppHistory(currentAppHistoryEntry());
     clearPageDraft(state.currentFile);
     content.innerHTML = data.html || "";
     highlightPageContent(state.currentHighlightKeyword);
@@ -834,6 +1371,28 @@ async function toggleEdit() {
     setButtonIcon(button, "pencil", "Edit");
   } catch (error) {
     console.error(error);
+    if (shouldQueueOffline(error)) {
+      try {
+        queueOfflineMutation("page", payload);
+        state.currentContent = payload.content;
+        state.currentContentLoaded = true;
+        replaceAppHistory(currentAppHistoryEntry());
+        clearPageDraft(state.currentFile);
+        rememberPageSource(state.currentFile, payload.content);
+        content.innerHTML = offlineSourcePreview(payload.content);
+        editor.hidden = true;
+        content.hidden = false;
+        setPageEditorStatus("Saved offline. Will sync when online.");
+        showToast("Saved offline.");
+        setButtonIcon(button, "pencil", "Edit");
+        return;
+      } catch (queueError) {
+        console.error(queueError);
+        setPageEditorStatus(queueError.message || "Could not save offline.");
+        setButtonIcon(button, "save", "Save");
+        return;
+      }
+    }
     const message = error.message ? `Save failed: ${error.message}` : "Save failed.";
     setPageEditorStatus(message);
     setButtonIcon(button, "save", "Save");
@@ -844,6 +1403,18 @@ async function toggleEdit() {
 
 async function loadCurrentPageSource() {
   if (state.currentContentLoaded) return;
+  const pending = pendingPageContent(state.currentFile);
+  if (pending !== null) {
+    state.currentContent = pending;
+    state.currentContentLoaded = true;
+    return;
+  }
+  const cached = cachedPageSource(state.currentFile);
+  if (cached) {
+    state.currentContent = cached;
+    state.currentContentLoaded = true;
+    return;
+  }
   const response = await request(
     `/api/page/source?path=${encodeURIComponent(state.currentFile)}`,
   );
@@ -857,6 +1428,21 @@ async function loadCurrentPageSource() {
   state.currentFile = data.file;
   state.currentContent = data.content || "";
   state.currentContentLoaded = true;
+  rememberPageSource(state.currentFile, state.currentContent);
+}
+
+async function warmPageSource(file) {
+  if (!file || cachedPageSource(file) || pendingPageContent(file) !== null) return;
+  try {
+    const response = await request(
+      `/api/page/source?path=${encodeURIComponent(file)}`,
+    );
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data.file !== "NoPage") rememberPageSource(data.file, data.content || "");
+  } catch {
+    // Best effort only.
+  }
 }
 
 function handlePageEditorInput() {
@@ -1009,6 +1595,14 @@ function readReadingPosition(file) {
 
 function readingPositionKey(file) {
   return `obr.reading.${encodeURIComponent(file)}`;
+}
+
+async function goBackToLastList() {
+  if (window.history.state?.obr && window.history.state.view === "page") {
+    window.history.back();
+    return;
+  }
+  await showView(state.lastListView, { focusSearch: false });
 }
 
 function handleGlobalKeydown(event) {

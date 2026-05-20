@@ -87,11 +87,56 @@ struct PageSourceResponse {
     content: String,
 }
 
+#[derive(Serialize)]
+struct PingResponse {
+    ok: bool,
+}
+
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
 const PASSKEY_AUTHENTICATION_SESSION_KEY: &str = "passkey_authentication";
 
 pub(crate) async fn index() -> Html<&'static str> {
     Html(include_str!("../assets/index.html"))
+}
+
+pub(crate) async fn service_worker() -> Response {
+    static_service_response(
+        include_str!("../assets/sw.js"),
+        "text/javascript; charset=utf-8",
+        "no-cache",
+    )
+}
+
+pub(crate) async fn manifest() -> Response {
+    static_service_response(
+        include_str!("../assets/manifest.webmanifest"),
+        "application/manifest+json; charset=utf-8",
+        "private, max-age=3600",
+    )
+}
+
+pub(crate) async fn ping() -> Response {
+    let mut response = Json(PingResponse { ok: true }).into_response();
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    response
+}
+
+fn static_service_response(
+    body: &'static str,
+    content_type: &'static str,
+    cache: &'static str,
+) -> Response {
+    let mut response = body.into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static(cache));
+    response
 }
 
 pub(crate) async fn login(

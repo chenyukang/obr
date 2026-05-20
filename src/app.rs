@@ -185,6 +185,9 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/front", get(routes::index))
         .route("/front/", get(routes::index))
         .route("/front/index.html", get(routes::index))
+        .route("/sw.js", get(routes::service_worker))
+        .route("/manifest.webmanifest", get(routes::manifest))
+        .route("/api/ping", get(routes::ping))
         .route(
             "/index/front.html",
             get(|| async { Redirect::permanent("/") }),

@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Obr</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-touch-polish">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" content="#eef5f3">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-history-back">
   </head>
   <body>
     <div id="login" class="login-panel" hidden>
@@ -37,6 +39,10 @@
             <button data-view="todo" data-icon="list-checks">Todo</button>
           </nav>
           <div class="auth-actions">
+            <div id="connection-status" class="connection-status is-offline" role="status" aria-live="polite" title="Offline">
+              <span class="connection-dot" aria-hidden="true"></span>
+              <span id="connection-label" class="connection-label">Offline</span>
+            </div>
             <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key" hidden></button>
             <button id="logout-button" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
           </div>
@@ -109,6 +115,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-touch-polish"></script>
+    <script src="/assets/app.js?v=20260520-history-back"></script>
   </body>
 </html>
