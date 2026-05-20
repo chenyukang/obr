@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260520-7";
+const CACHE_VERSION = "obr-offline-20260520-8";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = `${CACHE_VERSION}:images`;
@@ -9,8 +9,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260520-day-cleanup",
-  "/assets/app.js?v=20260520-day-cleanup",
+  "/assets/style.css?v=20260520-sw-update",
+  "/assets/app.js?v=20260520-sw-update",
 ];
 
 self.addEventListener("install", (event) => {
@@ -35,6 +35,12 @@ self.addEventListener("activate", (event) => {
       )
       .then(() => self.clients.claim()),
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    event.waitUntil(self.skipWaiting());
+  }
 });
 
 self.addEventListener("fetch", (event) => {

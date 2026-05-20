@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-day-cleanup">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-sw-update">
   </head>
   <body>
     <div id="login" class="login-panel" hidden>
@@ -48,6 +48,9 @@
           </div>
         </div>
       </header>
+      <button id="update-banner" class="update-banner" type="button" data-icon="rotate-ccw" hidden>
+        New version ready
+      </button>
 
       <main>
         <section id="day-view" class="view">
@@ -115,6 +118,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-day-cleanup"></script>
+    <script src="/assets/app.js?v=20260520-sw-update"></script>
   </body>
 </html>

@@ -23,6 +23,8 @@ const state = {
   syncingOutbox: false,
   historyReady: false,
   applyingHistory: false,
+  updateWorker: null,
+  refreshingForUpdate: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -104,6 +106,7 @@ function bindEvents() {
   window.addEventListener("popstate", handleAppPopState);
   window.addEventListener("scroll", handleWindowScroll, { passive: true });
   document.addEventListener("keydown", handleGlobalKeydown);
+  el("update-banner").addEventListener("click", applyServiceWorkerUpdate);
   installLongPressCopy(el("page-content"));
   installLongPressCopy(el("search-results"));
 
@@ -185,10 +188,37 @@ function bindEvents() {
 async function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   try {
-    await navigator.serviceWorker.register("/sw.js");
+    const registration = await navigator.serviceWorker.register("/sw.js");
+    if (registration.waiting && navigator.serviceWorker.controller) {
+      showServiceWorkerUpdate(registration.waiting);
+    }
+    registration.addEventListener("updatefound", () => {
+      const worker = registration.installing;
+      if (!worker) return;
+      worker.addEventListener("statechange", () => {
+        if (worker.state === "installed" && navigator.serviceWorker.controller) {
+          showServiceWorkerUpdate(worker);
+        }
+      });
+    });
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (state.refreshingForUpdate) window.location.reload();
+    });
   } catch (error) {
     console.error(error);
   }
+}
+
+function showServiceWorkerUpdate(worker) {
+  state.updateWorker = worker;
+  el("update-banner").hidden = false;
+}
+
+function applyServiceWorkerUpdate() {
+  state.refreshingForUpdate = true;
+  el("update-banner").hidden = true;
+  state.updateWorker?.postMessage({ type: "SKIP_WAITING" });
+  window.setTimeout(() => window.location.reload(), 800);
 }
 
 function initializeAppHistory(entry) {
