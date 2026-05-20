@@ -352,6 +352,11 @@ a {
   color: var(--blue);
 }
 
+.markdown a,
+.list-panel a {
+  touch-action: manipulation;
+}
+
 .page-actions {
   justify-content: flex-end;
   margin-bottom: 12px;
@@ -407,7 +412,7 @@ a {
 
 .metadata-panel {
   margin: 0 0 18px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: #f8faf9;
 }
@@ -453,7 +458,7 @@ a {
   grid-template-columns: minmax(120px, 180px) minmax(0, 1fr);
   gap: 8px 16px;
   margin: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
   padding: 12px;
 }
 
@@ -498,12 +503,38 @@ a {
 
 .metadata-raw {
   margin: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
   border-radius: 0 0 8px 8px;
   background: #172026;
   color: #f7fafc;
   padding: 12px;
   white-space: pre-wrap;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 100;
+  max-width: min(360px, calc(100vw - 32px));
+  border-radius: 999px;
+  background: #172026;
+  color: #ffffff;
+  padding: 10px 14px;
+  box-shadow: 0 10px 30px rgb(23 32 38 / 18%);
+  font-size: 14px;
+  font-weight: 700;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 10px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
 }
 
 @media (max-width: 640px) {

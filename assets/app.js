@@ -11,6 +11,12 @@ const state = {
   passwordLoginAllowed: true,
   entrySaving: false,
   entryImagePreparing: false,
+  longPress: null,
+  scrollTimer: 0,
+  suppressLinkClickUntil: 0,
+  suppressLinkElement: null,
+  toastTimer: 0,
+  viewScroll: {},
 };
 
 const el = (id) => document.getElementById(id);
@@ -19,6 +25,10 @@ const PAGE_EDITOR_LEAVE_MESSAGE =
 const MAX_IMAGE_DATA_URL_BYTES = 6 * 1024 * 1024;
 const MAX_IMAGE_DIMENSIONS = [1920, 1440, 1080];
 const IMAGE_JPEG_QUALITIES = [0.82, 0.72, 0.62];
+const LONG_PRESS_COPY_MS = 650;
+const LONG_PRESS_MOVE_PX = 12;
+const SCROLL_SAVE_MS = 160;
+const TOAST_MS = 1800;
 
 const ICONS = {
   "arrow-left": '<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>',
@@ -73,6 +83,10 @@ function bindEvents() {
   el("passkey-login-button").addEventListener("click", passkeyLogin);
   el("passkey-register-button").addEventListener("click", registerPasskey);
   window.addEventListener("beforeunload", handleBeforeUnload);
+  window.addEventListener("scroll", handleWindowScroll, { passive: true });
+  document.addEventListener("keydown", handleGlobalKeydown);
+  installLongPressCopy(el("page-content"));
+  installLongPressCopy(el("search-results"));
 
   el("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -131,7 +145,7 @@ function bindEvents() {
   });
 
   el("back-button").addEventListener("click", async () => {
-    await showView(state.lastListView);
+    await showView(state.lastListView, { focusSearch: false });
   });
   el("edit-button").addEventListener("click", toggleEdit);
 
@@ -146,7 +160,7 @@ function bindEvents() {
     const wiki = event.target.closest("a[data-page]");
     if (wiki) {
       event.preventDefault();
-      await fetchPage(wiki.dataset.page);
+      await fetchPage(wiki.dataset.page, state.lastListView);
     }
   });
 }
@@ -429,8 +443,10 @@ async function refreshPasskeyRegisterButton() {
   }
 }
 
-async function showView(name) {
+async function showView(name, options = {}) {
   if (!prepareToLeavePageEditor()) return;
+  const { focusSearch = true, restoreScroll = true } = options;
+  saveCurrentScrollPosition();
   state.view = name;
   for (const view of document.querySelectorAll(".view")) {
     view.hidden = true;
@@ -439,19 +455,24 @@ async function showView(name) {
     state.lastListView = "todo";
     el("todo-view").hidden = false;
     await loadTodo();
+    if (restoreScroll) restoreViewScroll("todo");
     return;
   }
   if (name === "find") {
     state.lastListView = "find";
     el("find-view").hidden = false;
     updateSearchClear();
-    focusSearchInput();
     if (!el("search-results").innerHTML.trim()) {
       await search();
     }
+    if (focusSearch && getViewScroll("find") < 80) {
+      focusSearchInput();
+    }
+    if (restoreScroll) restoreViewScroll("find");
     return;
   }
   el("day-view").hidden = false;
+  if (restoreScroll) restoreViewScroll("day");
 }
 
 async function saveEntry() {
@@ -476,6 +497,7 @@ async function saveEntry() {
     if (text !== "ok") throw new Error(text);
     resetEntry();
     setEntryStatus("Saved.");
+    showToast("Saved.");
   } catch (error) {
     console.error(error);
     const message = error.message ? `Save failed: ${error.message}` : "Save failed.";
@@ -665,8 +687,12 @@ function updateSearchClear() {
   el("search-clear").hidden = !el("search-input").value;
 }
 
-function focusSearchInput() {
-  window.requestAnimationFrame(() => el("search-input").focus());
+function focusSearchInput(options = {}) {
+  window.requestAnimationFrame(() => {
+    const input = el("search-input");
+    input.focus({ preventScroll: true });
+    if (options.select) input.select();
+  });
 }
 
 async function loadTodo() {
@@ -697,6 +723,7 @@ async function addTodo() {
     if (result !== "ok") throw new Error(result);
     el("todo-input").value = "";
     el("todo-status").hidden = true;
+    showToast("Todo saved.");
     await loadTodo();
   } catch (error) {
     console.error(error);
@@ -729,7 +756,13 @@ async function fetchPage(
 }
 
 function showPage(title, html, sourceView) {
-  state.lastListView = sourceView === "todo" ? "todo" : "find";
+  saveCurrentScrollPosition();
+  if (sourceView === "todo" || sourceView === "find") {
+    state.lastListView = sourceView;
+  } else if (state.lastListView !== "todo") {
+    state.lastListView = "find";
+  }
+  state.view = "page";
   for (const view of document.querySelectorAll(".view")) {
     view.hidden = true;
   }
@@ -741,6 +774,11 @@ function showPage(title, html, sourceView) {
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
+  if (title === "NoPage") {
+    window.scrollTo(0, 0);
+  } else {
+    restoreReadingPosition(state.currentFile);
+  }
 }
 
 async function toggleEdit() {
@@ -792,6 +830,7 @@ async function toggleEdit() {
     editor.hidden = true;
     content.hidden = false;
     setPageEditorStatus("Saved.");
+    showToast("Page saved.");
     setButtonIcon(button, "pencil", "Edit");
   } catch (error) {
     console.error(error);
@@ -826,6 +865,7 @@ function handlePageEditorInput() {
 }
 
 function handleBeforeUnload(event) {
+  saveCurrentScrollPosition();
   if (!hasUnsavedPageEdit()) return;
   event.preventDefault();
   event.returnValue = "";
@@ -884,6 +924,225 @@ function pageDraftKey(file) {
 function setPageEditorStatus(message) {
   el("page-editor-status").textContent = message;
   el("page-editor-status").hidden = !message;
+}
+
+function handleWindowScroll() {
+  window.clearTimeout(state.scrollTimer);
+  state.scrollTimer = window.setTimeout(saveCurrentScrollPosition, SCROLL_SAVE_MS);
+}
+
+function saveCurrentScrollPosition() {
+  if (state.view === "page") {
+    saveReadingPosition();
+  } else {
+    saveViewScroll(state.view);
+  }
+}
+
+function saveViewScroll(view) {
+  if (!["day", "find", "todo"].includes(view)) return;
+  const y = Math.max(0, Math.round(window.scrollY));
+  state.viewScroll[view] = y;
+  try {
+    sessionStorage.setItem(viewScrollKey(view), String(y));
+  } catch {
+    // Best effort only; scroll memory should never block the UI.
+  }
+}
+
+function getViewScroll(view) {
+  if (state.viewScroll[view] !== undefined) return state.viewScroll[view];
+  let saved = 0;
+  try {
+    saved = Number(sessionStorage.getItem(viewScrollKey(view)) || 0);
+  } catch {
+    saved = 0;
+  }
+  state.viewScroll[view] = Number.isFinite(saved) ? saved : 0;
+  return state.viewScroll[view];
+}
+
+function restoreViewScroll(view) {
+  const y = getViewScroll(view);
+  window.requestAnimationFrame(() => {
+    window.scrollTo(0, y);
+  });
+}
+
+function viewScrollKey(view) {
+  return `obr.scroll.${view}`;
+}
+
+function saveReadingPosition(file = state.currentFile) {
+  if (!file || el("page-editor").hidden === false) return;
+  const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  const y = Math.min(maxY, Math.max(0, Math.round(window.scrollY)));
+  try {
+    localStorage.setItem(readingPositionKey(file), JSON.stringify({ y }));
+  } catch {
+    // Best effort only.
+  }
+}
+
+function restoreReadingPosition(file) {
+  const y = readReadingPosition(file);
+  restorePageScroll(y);
+  window.setTimeout(() => restorePageScroll(y), 250);
+}
+
+function restorePageScroll(y) {
+  window.requestAnimationFrame(() => {
+    const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    window.scrollTo(0, Math.min(y, maxY));
+  });
+}
+
+function readReadingPosition(file) {
+  if (!file) return 0;
+  try {
+    const saved = JSON.parse(localStorage.getItem(readingPositionKey(file)) || "{}");
+    return Number.isFinite(saved.y) ? Math.max(0, saved.y) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function readingPositionKey(file) {
+  return `obr.reading.${encodeURIComponent(file)}`;
+}
+
+function handleGlobalKeydown(event) {
+  if (el("app").hidden) return;
+  if (event.defaultPrevented || isEditableTarget(event.target)) return;
+  const searchShortcut =
+    event.key === "/" ||
+    ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k");
+  if (!searchShortcut || event.altKey) return;
+  event.preventDefault();
+  void showView("find", { restoreScroll: false }).then(() =>
+    focusSearchInput({ select: true }),
+  );
+}
+
+function isEditableTarget(target) {
+  return Boolean(
+    target?.closest?.("input, textarea, select, [contenteditable='true']"),
+  );
+}
+
+function installLongPressCopy(root) {
+  root.addEventListener("pointerdown", startLongPressCopy);
+  root.addEventListener("pointermove", moveLongPressCopy, { passive: true });
+  root.addEventListener("pointerup", endLongPressCopy);
+  root.addEventListener("pointercancel", endLongPressCopy);
+  root.addEventListener("click", suppressCopiedLinkClick, true);
+  root.addEventListener("contextmenu", suppressCopiedLinkMenu);
+}
+
+function startLongPressCopy(event) {
+  if (event.button && event.button !== 0) return;
+  const anchor = event.target.closest("a[href], a[data-page]");
+  if (!anchor) return;
+  clearLongPressCopy();
+  state.longPress = {
+    anchor,
+    copied: false,
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    timer: window.setTimeout(() => completeLongPressCopy(anchor), LONG_PRESS_COPY_MS),
+  };
+}
+
+function moveLongPressCopy(event) {
+  const press = state.longPress;
+  if (!press || press.pointerId !== event.pointerId || press.copied) return;
+  const moved = Math.hypot(event.clientX - press.x, event.clientY - press.y);
+  if (moved > LONG_PRESS_MOVE_PX) clearLongPressCopy();
+}
+
+function endLongPressCopy(event) {
+  const press = state.longPress;
+  if (!press || press.pointerId !== event.pointerId) return;
+  window.clearTimeout(press.timer);
+  state.longPress = null;
+}
+
+async function completeLongPressCopy(anchor) {
+  const press = state.longPress;
+  if (!press || press.anchor !== anchor) return;
+  press.copied = true;
+  state.suppressLinkClickUntil = Date.now() + 800;
+  state.suppressLinkElement = anchor;
+  try {
+    await copyText(linkCopyText(anchor));
+    navigator.vibrate?.(12);
+    showToast("Link copied.");
+  } catch (error) {
+    console.error(error);
+    showToast("Copy failed.");
+  }
+}
+
+function suppressCopiedLinkClick(event) {
+  if (
+    Date.now() <= state.suppressLinkClickUntil &&
+    event.target.closest("a") === state.suppressLinkElement
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
+
+function suppressCopiedLinkMenu(event) {
+  if (
+    Date.now() <= state.suppressLinkClickUntil &&
+    event.target.closest("a") === state.suppressLinkElement
+  ) {
+    event.preventDefault();
+  }
+}
+
+function clearLongPressCopy() {
+  if (state.longPress?.timer) window.clearTimeout(state.longPress.timer);
+  state.longPress = null;
+}
+
+function linkCopyText(anchor) {
+  if (anchor.dataset.page) return `[[${anchor.dataset.page}]]`;
+  if (anchor.id && anchor.getAttribute("href") === "#") return `[[${anchor.id}]]`;
+  return anchor.href || anchor.textContent.trim();
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
+function showToast(message) {
+  const toast = el("toast");
+  if (!toast) return;
+  window.clearTimeout(state.toastTimer);
+  toast.textContent = message;
+  toast.hidden = false;
+  window.requestAnimationFrame(() => toast.classList.add("show"));
+  state.toastTimer = window.setTimeout(() => {
+    toast.classList.remove("show");
+    window.setTimeout(() => {
+      if (!toast.classList.contains("show")) toast.hidden = true;
+    }, 160);
+  }, TOAST_MS);
 }
 
 function highlightPageContent(keyword) {
