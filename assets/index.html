@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-fast-start">
+    <link rel="stylesheet" href="/assets/style.css?v=20260520-image-lightbox">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -153,7 +153,19 @@
 
     </div>
 
+    <div id="image-lightbox" class="image-lightbox" role="dialog" aria-modal="true" aria-label="Image preview" hidden>
+      <div class="image-lightbox-toolbar">
+        <button id="image-lightbox-zoom-out" type="button" aria-label="Zoom out" title="Zoom out" data-icon="minus"></button>
+        <button id="image-lightbox-reset" type="button" aria-label="Reset zoom" title="Reset zoom" data-icon="rotate-ccw"></button>
+        <button id="image-lightbox-zoom-in" type="button" aria-label="Zoom in" title="Zoom in" data-icon="plus"></button>
+        <button id="image-lightbox-close" type="button" aria-label="Close image preview" title="Close" data-icon="x"></button>
+      </div>
+      <div id="image-lightbox-stage" class="image-lightbox-stage">
+        <img id="image-lightbox-img" class="image-lightbox-img" alt="">
+      </div>
+    </div>
+
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-fast-start"></script>
+    <script src="/assets/app.js?v=20260520-image-lightbox"></script>
   </body>
 </html>
