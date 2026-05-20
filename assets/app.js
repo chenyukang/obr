@@ -1160,7 +1160,7 @@ async function saveEntry() {
     image: state.image,
   };
   setEntrySaving(true);
-  setEntryStatus("Saving...");
+  setEntryStatus("Local draft saved. Syncing...");
   try {
     const response = await request("/api/entry", {
       method: "POST",
@@ -1169,16 +1169,16 @@ async function saveEntry() {
     const text = await response.text();
     if (text !== "ok") throw new Error(text);
     resetEntry();
-    setEntryStatus("Saved.");
-    showToast("Saved.");
+    setEntryStatus("Synced to file.");
+    showToast("Synced to file.");
   } catch (error) {
     console.error(error);
     if (shouldQueueOffline(error)) {
       try {
         queueOfflineMutation("entry", payload);
         resetEntry();
-        setEntryStatus("Saved offline. Will sync when online.");
-        showToast("Saved offline.");
+        setEntryStatus("Local copy saved. Waiting to sync.");
+        showToast("Waiting to sync.");
         return;
       } catch (queueError) {
         console.error(queueError);
@@ -1432,7 +1432,7 @@ async function addTodo() {
     text,
     image: "",
   };
-  el("todo-status").textContent = "Saving...";
+  el("todo-status").textContent = "Local draft saved. Syncing...";
   el("todo-status").hidden = false;
   try {
     const response = await request("/api/entry", {
@@ -1442,8 +1442,8 @@ async function addTodo() {
     const result = await response.text();
     if (result !== "ok") throw new Error(result);
     el("todo-input").value = "";
-    el("todo-status").hidden = true;
-    showToast("Todo saved.");
+    el("todo-status").textContent = "Synced to file.";
+    showToast("Todo synced to file.");
     await loadTodo();
   } catch (error) {
     console.error(error);
@@ -1451,8 +1451,8 @@ async function addTodo() {
       try {
         queueOfflineMutation("entry", payload);
         el("todo-input").value = "";
-        el("todo-status").textContent = "Saved offline. Will sync when online.";
-        showToast("Todo saved offline.");
+        el("todo-status").textContent = "Local copy saved. Waiting to sync.";
+        showToast("Todo waiting to sync.");
         return;
       } catch (queueError) {
         console.error(queueError);
@@ -1578,7 +1578,7 @@ async function toggleEdit() {
     setButtonIcon(button, "save", "Save");
     return;
   }
-  setPageEditorStatus("Saving...");
+  setPageEditorStatus("Local draft saved. Syncing...");
   button.disabled = true;
   setButtonIcon(button, "save", "Saving...");
   const payload = {
@@ -1601,8 +1601,8 @@ async function toggleEdit() {
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     content.hidden = false;
-    setPageEditorStatus("Saved.");
-    showToast("Page saved.");
+    setPageEditorStatus("Synced to file.");
+    showToast("Page synced to file.");
     setButtonIcon(button, "pencil", "Edit");
   } catch (error) {
     console.error(error);
@@ -1617,8 +1617,8 @@ async function toggleEdit() {
         content.innerHTML = offlineSourcePreview(payload.content);
         editor.hidden = true;
         content.hidden = false;
-        setPageEditorStatus("Saved offline. Will sync when online.");
-        showToast("Saved offline.");
+        setPageEditorStatus("Local copy saved. Waiting to sync.");
+        showToast("Page waiting to sync.");
         setButtonIcon(button, "pencil", "Edit");
         return;
       } catch (queueError) {
