@@ -10,10 +10,10 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Router,
     body::Body,
-    extract::DefaultBodyLimit,
+    extract::{ConnectInfo, DefaultBodyLimit},
     http::{
         HeaderValue, Request, StatusCode,
-        header::{CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS},
+        header::{CONTENT_SECURITY_POLICY, REFERRER_POLICY, USER_AGENT, X_CONTENT_TYPE_OPTIONS},
     },
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
@@ -23,7 +23,7 @@ use chrono::Local;
 use tokio::net::TcpListener;
 use tower_http::{
     services::ServeDir,
-    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+    trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
 use tracing::{Level, info, warn};
@@ -97,7 +97,11 @@ async fn serve() -> Result<()> {
 
     let listener = TcpListener::bind(listen).await?;
     info!("listening on http://{listen}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -244,7 +248,27 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .merge(protected)
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .make_span_with(|request: &Request<Body>| {
+                    let remote_addr = request
+                        .extensions()
+                        .get::<ConnectInfo<SocketAddr>>()
+                        .map(|ConnectInfo(addr)| addr.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    let user_agent = request
+                        .headers()
+                        .get(USER_AGENT)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("-");
+
+                    tracing::info_span!(
+                        "request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        version = ?request.version(),
+                        remote_addr = %remote_addr,
+                        user_agent = %user_agent,
+                    )
+                })
                 .on_request(DefaultOnRequest::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )

@@ -10,7 +10,8 @@ const state = {
   passkeyRegistered: false,
   passwordLoginAllowed: true,
   connectionOnline: navigator.onLine,
-  connectionTimer: 0,
+  connectionPingController: null,
+  connectionWindowFocused: true,
   entrySaving: false,
   entryImagePreparing: false,
   longPress: null,
@@ -34,11 +35,11 @@ const LONG_PRESS_COPY_MS = 650;
 const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
 const TOAST_MS = 1800;
-const PING_INTERVAL_MS = 15000;
 const PING_TIMEOUT_MS = 3000;
 const RECENT_PAGE_LIMIT = 20;
 const RECENT_PAGES_KEY = "obr.offline.recent-pages";
 const OUTBOX_KEY = "obr.offline.outbox";
+const CLIENT_ID_KEY = "obr.client-id";
 
 const ICONS = {
   "arrow-left": '<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>',
@@ -267,29 +268,75 @@ async function handleAppPopState(event) {
 }
 
 function startConnectionMonitor() {
+  state.connectionWindowFocused = document.hasFocus?.() ?? true;
   setConnectionStatus(navigator.onLine);
-  window.addEventListener("online", () => void checkConnectivity({ sync: true }));
-  window.addEventListener("offline", () => setConnectionStatus(false));
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) void checkConnectivity({ sync: true });
+  window.addEventListener("online", () => resumeConnectionMonitor());
+  window.addEventListener("offline", () => {
+    pauseConnectionMonitor();
+    setConnectionStatus(false);
   });
+  window.addEventListener("focus", () => {
+    state.connectionWindowFocused = true;
+    resumeConnectionMonitor();
+  });
+  window.addEventListener("blur", () => {
+    state.connectionWindowFocused = false;
+    pauseConnectionMonitor();
+  });
+  window.addEventListener("pageshow", () => {
+    state.connectionWindowFocused = true;
+    resumeConnectionMonitor();
+  });
+  window.addEventListener("pagehide", () => {
+    state.connectionWindowFocused = false;
+    pauseConnectionMonitor();
+  });
+  document.addEventListener("freeze", () => {
+    state.connectionWindowFocused = false;
+    pauseConnectionMonitor();
+  });
+  document.addEventListener("resume", () => {
+    state.connectionWindowFocused = true;
+    resumeConnectionMonitor();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      pauseConnectionMonitor();
+      return;
+    }
+    resumeConnectionMonitor();
+  });
+  resumeConnectionMonitor();
+}
+
+function resumeConnectionMonitor() {
+  if (!isForegroundPage()) return;
   void checkConnectivity({ sync: true });
-  state.connectionTimer = window.setInterval(
-    () => void checkConnectivity({ sync: true }),
-    PING_INTERVAL_MS,
-  );
+}
+
+function pauseConnectionMonitor() {
+  abortConnectivityCheck();
+}
+
+function abortConnectivityCheck() {
+  state.connectionPingController?.abort();
+  state.connectionPingController = null;
 }
 
 async function checkConnectivity(options = {}) {
+  if (!isForegroundPage() && !options.allowHidden) {
+    return state.connectionOnline;
+  }
   if (!navigator.onLine) {
     setConnectionStatus(false);
     return false;
   }
 
   const controller = new AbortController();
+  state.connectionPingController = controller;
   const timeout = window.setTimeout(() => controller.abort(), PING_TIMEOUT_MS);
   try {
-    const response = await fetch(`/api/ping?ts=${Date.now()}`, {
+    const response = await fetch(pingUrl(), {
       cache: "no-store",
       credentials: "same-origin",
       signal: controller.signal,
@@ -299,11 +346,36 @@ async function checkConnectivity(options = {}) {
     if (online && options.sync) void syncOutbox();
     return online;
   } catch {
-    setConnectionStatus(false);
+    if (!document.hidden) setConnectionStatus(false);
     return false;
   } finally {
     window.clearTimeout(timeout);
+    if (state.connectionPingController === controller) {
+      state.connectionPingController = null;
+    }
   }
+}
+
+function isForegroundPage() {
+  return !document.hidden && state.connectionWindowFocused;
+}
+
+function pingUrl() {
+  const params = new URLSearchParams({
+    ts: String(Date.now()),
+    client: clientId(),
+    visible: document.hidden ? "0" : "1",
+    focused: state.connectionWindowFocused ? "1" : "0",
+  });
+  return `/api/ping?${params}`;
+}
+
+function clientId() {
+  let id = localStorage.getItem(CLIENT_ID_KEY);
+  if (id) return id;
+  id = Math.random().toString(36).slice(2, 10);
+  localStorage.setItem(CLIENT_ID_KEY, id);
+  return id;
 }
 
 function setConnectionStatus(online) {
@@ -1452,6 +1524,7 @@ function handlePageEditorInput() {
 
 function handleBeforeUnload(event) {
   saveCurrentScrollPosition();
+  pauseConnectionMonitor();
   if (!hasUnsavedPageEdit()) return;
   event.preventDefault();
   event.returnValue = "";
