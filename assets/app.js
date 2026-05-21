@@ -7,6 +7,7 @@ const state = {
   currentHighlightKeyword: "",
   image: "",
   imagePreviewUrl: "",
+  imageReadId: 0,
   searchTimer: 0,
   editorPreviewTimer: 0,
   activeEditorBlock: -1,
@@ -1561,6 +1562,7 @@ function resetEntry() {
   el("entry-links").value = "";
   el("entry-image-file").value = "";
   el("entry-camera-file").value = "";
+  state.imageReadId += 1;
   state.image = "";
   clearEntryPreview();
   localStorage.removeItem("obr.entry.text");
@@ -1610,26 +1612,30 @@ function handleImageFile(event) {
 
 async function readImage(file) {
   if (!file || !file.type.startsWith("image/")) return;
+  const readId = state.imageReadId + 1;
+  state.imageReadId = readId;
   state.image = "";
   clearEntryPreview();
-  const previewUrl = URL.createObjectURL(file);
-  state.imagePreviewUrl = previewUrl;
-  el("entry-preview").src = previewUrl;
-  el("entry-preview").hidden = false;
+  const previewUrl = setEntryPreviewBlob(file);
   state.entryImagePreparing = true;
   updateEntrySaveState();
   setEntryStatus("Preparing image...");
   try {
-    state.image = await prepareImage(file, previewUrl);
+    const prepared = await prepareImage(file, previewUrl);
+    if (readId !== state.imageReadId) return;
+    state.image = prepared;
+    setEntryPreviewBlob(prepared);
     updateEntrySaveState();
     setEntryStatus(imagePreparationStatus(file, state.image));
   } catch (error) {
+    if (readId !== state.imageReadId) return;
     console.error(error);
     state.image = "";
     clearEntryPreview();
     updateEntrySaveState();
     setEntryStatus(error.message || "Could not prepare image.");
   } finally {
+    if (readId !== state.imageReadId) return;
     state.entryImagePreparing = false;
     updateEntrySaveState();
   }
@@ -1790,6 +1796,19 @@ function clearEntryPreview() {
   }
   el("entry-preview").removeAttribute("src");
   el("entry-preview").hidden = true;
+}
+
+function setEntryPreviewBlob(blob) {
+  if (state.imagePreviewUrl) {
+    URL.revokeObjectURL(state.imagePreviewUrl);
+  }
+  const previewUrl = URL.createObjectURL(blob);
+  state.imagePreviewUrl = previewUrl;
+  const preview = el("entry-preview");
+  preview.src = previewUrl;
+  preview.alt = "Selected image preview";
+  preview.hidden = false;
+  return previewUrl;
 }
 
 function loadImage(url) {
