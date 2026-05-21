@@ -43,6 +43,10 @@ const state = {
   imageObserver: null,
   imageQueue: [],
   imageActiveLoads: 0,
+  pagePrefetchQueue: [],
+  pagePrefetching: false,
+  pagePrefetchScheduled: false,
+  pagePrefetchSeen: new Set(),
   pageOutline: [],
   currentOutlineId: "",
 };
@@ -67,6 +71,8 @@ const IMAGE_LIGHTBOX_MAX_SCALE = 4;
 const IMAGE_LIGHTBOX_ZOOM_STEP = 1.35;
 const MARKDOWN_IMAGE_MAX_ACTIVE_LOADS = 2;
 const MARKDOWN_IMAGE_ROOT_MARGIN = "900px 0px";
+const PAGE_PREFETCH_LIMIT = 6;
+const PAGE_PREFETCH_IDLE_TIMEOUT_MS = 1400;
 const RECENT_PAGE_LIMIT = 20;
 const RECENT_PAGES_KEY = "obr.offline.recent-pages";
 const RECENT_EDITS_KEY = "obr.recent-edits";
@@ -655,6 +661,73 @@ function renderCachedSearchResults(keyword = "") {
     )
     .join("");
   el("search-results").innerHTML = `<p class="offline-note">Offline recent pages</p><ul>${items}</ul>`;
+  schedulePagePrefetch(pages.map((page) => page.file));
+}
+
+function scheduleSearchResultPrefetch() {
+  const paths = [...el("search-results").querySelectorAll("a[id]")]
+    .slice(0, PAGE_PREFETCH_LIMIT)
+    .map((link) => link.id);
+  schedulePagePrefetch(paths);
+}
+
+function schedulePagePrefetch(paths) {
+  const next = uniqueStrings(paths)
+    .map((path) => String(path || "").trim())
+    .filter(shouldPrefetchPage);
+  if (!next.length) return;
+  state.pagePrefetchQueue = uniqueStrings([...state.pagePrefetchQueue, ...next]);
+  for (const path of next) state.pagePrefetchSeen.add(normalizePageAlias(path));
+  schedulePrefetchRun();
+}
+
+function schedulePrefetchRun() {
+  if (state.pagePrefetching || state.pagePrefetchScheduled) return;
+  state.pagePrefetchScheduled = true;
+  const run = () => {
+    state.pagePrefetchScheduled = false;
+    void prefetchQueuedPages();
+  };
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(run, { timeout: PAGE_PREFETCH_IDLE_TIMEOUT_MS });
+  } else {
+    window.setTimeout(run, 240);
+  }
+}
+
+function shouldPrefetchPage(path) {
+  const normalized = normalizePageAlias(path);
+  if (!normalized || normalized === "NoPage") return false;
+  if (state.pagePrefetchSeen.has(normalized)) return false;
+  return !findCachedPage(path)?.html;
+}
+
+async function prefetchQueuedPages() {
+  if (state.pagePrefetching) return;
+  state.pagePrefetching = true;
+  try {
+    const batch = state.pagePrefetchQueue.splice(0, PAGE_PREFETCH_LIMIT);
+    for (const path of batch) {
+      await prefetchPage(path);
+    }
+  } finally {
+    state.pagePrefetching = false;
+    if (state.pagePrefetchQueue.length) schedulePrefetchRun();
+  }
+}
+
+async function prefetchPage(path) {
+  try {
+    const params = new URLSearchParams({ path });
+    const response = await request(`/api/page?${params}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data.file === "NoPage") return;
+    rememberPage(data, path);
+    void warmPageSource(data.file);
+  } catch {
+    // Best effort only; prefetch should never interrupt reading.
+  }
 }
 
 function readSearchCache() {
@@ -1610,10 +1683,12 @@ function renderSearchResults(html, options = {}) {
     if (list) {
       list.querySelector(".search-more-row")?.remove();
       list.insertAdjacentHTML("beforeend", html);
+      scheduleSearchResultPrefetch();
       return;
     }
   }
   results.innerHTML = `<ul>${html}</ul>`;
+  scheduleSearchResultPrefetch();
 }
 
 async function clearSearch() {
@@ -1677,6 +1752,7 @@ function renderRecentPanel() {
   el("recent-pages").innerHTML = recentItemsHtml(pages, "No recent pages.");
   el("recent-edits").innerHTML = recentItemsHtml(edits, "No recent edits.");
   el("recent-panel").hidden = !pages.length && !edits.length;
+  schedulePagePrefetch([...pages, ...edits].map((page) => page.file));
 }
 
 function recentItemsHtml(items, emptyMessage) {
