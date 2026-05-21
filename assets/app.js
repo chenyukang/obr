@@ -1487,7 +1487,11 @@ function entryImageFileName(blob) {
       ? "gif"
       : blob.type === "image/webp"
         ? "webp"
-        : "jpg";
+        : blob.type === "image/heic"
+          ? "heic"
+          : blob.type === "image/heif"
+            ? "heif"
+            : "jpg";
   return `entry-image.${ext}`;
 }
 
@@ -1584,7 +1588,7 @@ async function readImage(file) {
   try {
     state.image = await prepareImage(file, previewUrl);
     updateEntrySaveState();
-    setEntryStatus("");
+    setEntryStatus(isHeicImage(state.image) ? "This HEIC photo cannot be previewed here; uploading original." : "");
   } catch (error) {
     console.error(error);
     state.image = "";
@@ -1605,7 +1609,20 @@ async function prepareImage(file, previewUrl) {
     return file;
   }
 
-  const image = await loadImage(previewUrl);
+  let image;
+  try {
+    image = await loadImage(previewUrl);
+  } catch (error) {
+    if (isHeicImage(file)) {
+      if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
+        throw new Error("HEIC is too large to upload. Retake as JPEG or choose a smaller image.");
+      }
+      setEntryStatus("This HEIC photo cannot be previewed here; uploading original.");
+      return file;
+    }
+    throw error;
+  }
+
   for (const maxDimension of MAX_IMAGE_DIMENSIONS) {
     const { width, height } = scaledDimensions(
       image.naturalWidth,
@@ -1636,6 +1653,12 @@ function scaledDimensions(width, height, maxDimension) {
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
   };
+}
+
+function isHeicImage(file) {
+  const type = (file.type || "").toLowerCase();
+  const name = (file.name || "").toLowerCase();
+  return type === "image/heic" || type === "image/heif" || name.endsWith(".heic") || name.endsWith(".heif");
 }
 
 function blobToDataUrl(blob) {

@@ -593,6 +593,8 @@ pub(crate) fn save_image_bytes(
         "image/png" | "png" => "png",
         "image/gif" | "gif" => "gif",
         "image/webp" | "webp" => "webp",
+        "image/heic" | "heic" => "heic",
+        "image/heif" | "heif" => "heif",
         other => bail!("unsupported image type: {other}"),
     };
     fs::create_dir_all(vault.join("Pics"))?;
