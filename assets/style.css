@@ -47,6 +47,10 @@ body.lightbox-open {
   overflow: hidden;
 }
 
+body.command-open {
+  overflow: hidden;
+}
+
 button,
 input,
 textarea {
@@ -1560,6 +1564,50 @@ a {
     top: 132px;
     right: 14px;
     max-height: calc(100vh - 150px);
+  }
+
+  .command-palette {
+    align-items: end;
+    padding: 0;
+    background: rgb(23 32 38 / 34%);
+  }
+
+  .command-dialog {
+    width: 100%;
+    max-height: min(82vh, calc(100dvh - 18px));
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 10px 10px 0 0;
+  }
+
+  .command-dialog h2 {
+    padding: 16px 18px 2px;
+    font-size: 12px;
+  }
+
+  #command-input {
+    padding: 14px 18px;
+    font-size: 16px;
+  }
+
+  .command-list {
+    max-height: none;
+    min-height: 0;
+    padding: 8px 10px max(12px, env(safe-area-inset-bottom));
+  }
+
+  .command-item {
+    min-height: 52px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+    padding: 11px 10px;
+  }
+
+  .command-item small {
+    font-size: 12px;
   }
 
   .metadata-panel {

@@ -2480,12 +2480,14 @@ function openCommandPalette() {
   state.commandIndex = 0;
   el("command-input").value = "";
   el("command-palette").hidden = false;
+  document.body.classList.add("command-open");
   renderCommandPalette();
   window.requestAnimationFrame(() => el("command-input").focus());
 }
 
 function closeCommandPalette() {
   el("command-palette").hidden = true;
+  document.body.classList.remove("command-open");
 }
 
 function handleCommandBackdropClick(event) {
