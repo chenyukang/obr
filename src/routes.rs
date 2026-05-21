@@ -59,6 +59,7 @@ pub(crate) struct PageUpdate {
 
 #[derive(Deserialize)]
 pub(crate) struct EntryRequest {
+    sync_id: Option<String>,
     page: String,
     links: String,
     text: String,
@@ -527,18 +528,24 @@ pub(crate) async fn post_entry(
     State(state): State<Arc<AppState>>,
     Json(body): Json<EntryRequest>,
 ) -> AppResult<Response> {
+    let now = Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    if entry_already_synced(&state, &body.page, body.sync_id.as_deref(), &date)? {
+        return Ok("ok".into_response());
+    }
     let image_name = if body.image.trim().is_empty() {
         None
     } else {
         Some(save_data_url_image(
             &state.config.vault_path,
             &body.image,
-            &Local::now(),
+            &now,
         )?)
     };
     write_entry(
         state,
         EntryPayload {
+            sync_id: body.sync_id,
             page: body.page,
             links: body.links,
             text: body.text,
@@ -553,16 +560,19 @@ pub(crate) async fn post_entry_multipart(
 ) -> AppResult<Response> {
     let started = Instant::now();
     let now = Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
     let mut page = String::new();
     let mut links = String::new();
     let mut text = String::new();
-    let mut image_name = None;
+    let mut image_data = None;
     let mut image_bytes = 0usize;
     let mut image_type = String::new();
+    let mut sync_id = None;
 
     while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
+            "sync_id" => sync_id = Some(field.text().await.map_err(anyhow::Error::from)?),
             "page" => page = field.text().await.map_err(anyhow::Error::from)?,
             "links" => links = field.text().await.map_err(anyhow::Error::from)?,
             "text" => text = field.text().await.map_err(anyhow::Error::from)?,
@@ -587,21 +597,41 @@ pub(crate) async fn post_entry_multipart(
                     return Ok((StatusCode::PAYLOAD_TOO_LARGE, "image too large").into_response());
                 }
                 if !bytes.is_empty() {
-                    image_name = Some(save_image_bytes(
-                        &state.config.vault_path,
-                        &bytes,
-                        &image_type,
-                        &now,
-                    )?);
+                    image_data = Some(bytes.to_vec());
                 }
             }
             _ => {}
         }
     }
 
+    if entry_already_synced(&state, &page, sync_id.as_deref(), &date)? {
+        info!(
+            api = "entry_multipart",
+            page = %page,
+            image_bytes = image_bytes,
+            image_type = %image_type,
+            elapsed_ms = started.elapsed().as_millis(),
+            status = "duplicate",
+            "api timing"
+        );
+        return Ok("ok".into_response());
+    }
+
+    let image_name = if let Some(bytes) = image_data {
+        Some(save_image_bytes(
+            &state.config.vault_path,
+            &bytes,
+            &image_type,
+            &now,
+        )?)
+    } else {
+        None
+    };
+
     let response = write_entry(
         state,
         EntryPayload {
+            sync_id,
             page: page.clone(),
             links,
             text,
@@ -620,6 +650,7 @@ pub(crate) async fn post_entry_multipart(
 }
 
 struct EntryPayload {
+    sync_id: Option<String>,
     page: String,
     links: String,
     text: String,
@@ -640,10 +671,51 @@ fn normalize_multipart_image_type(content_type: &str, file_name: Option<&str>) -
     }
 }
 
+fn entry_sync_marker(sync_id: Option<&str>) -> Option<String> {
+    let sync_id = sync_id?.trim();
+    if sync_id.is_empty() || sync_id.len() > 96 {
+        return None;
+    }
+    if !sync_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return None;
+    }
+    Some(format!("<!-- obr-entry:{sync_id} -->"))
+}
+
+fn entry_already_synced(
+    state: &AppState,
+    page: &str,
+    sync_id: Option<&str>,
+    date: &str,
+) -> AppResult<bool> {
+    let Some(marker) = entry_sync_marker(sync_id) else {
+        return Ok(false);
+    };
+    let page = page.trim();
+    let path = if page.is_empty() {
+        state
+            .config
+            .vault_path
+            .join("Daily")
+            .join(format!("{date}.md"))
+    } else {
+        let rel = normalize_markdown_rel(&format!("Zero/{page}"), true)?;
+        state.config.vault_path.join(rel)
+    };
+    ensure_inside(&state.config.vault_path, &path)?;
+    Ok(fs::read_to_string(&path)
+        .map(|content| content.contains(&marker))
+        .unwrap_or(false))
+}
+
 fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> {
     let now = Local::now();
     let date = now.format("%Y-%m-%d").to_string();
     let time = now.format("%H:%M").to_string();
+    let sync_marker = entry_sync_marker(body.sync_id.as_deref());
 
     let page = body.page.trim();
     if page.is_empty()
@@ -670,6 +742,12 @@ fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> 
     }
 
     let mut existing = fs::read_to_string(&path).unwrap_or_default();
+    if sync_marker
+        .as_ref()
+        .is_some_and(|marker| existing.contains(marker))
+    {
+        return Ok("ok".into_response());
+    }
     if page.is_empty() && existing.is_empty() {
         existing = format!("## {date}");
     }
@@ -706,6 +784,9 @@ fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> 
     if let Some(image_name) = body.image_name {
         appended.push_str(&format!("\n\n![[{image_name}|250]]\n"));
     }
+    if let Some(marker) = sync_marker {
+        appended.push_str(&format!("\n{marker}"));
+    }
 
     let content = if page == "todo" {
         format!("{appended}\n\n---\n\n{existing}")
@@ -716,6 +797,25 @@ fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> 
     state.markdown_index.update_path(&path, content)?;
     state.maybe_git_sync();
     Ok("ok".into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entry_sync_marker;
+
+    #[test]
+    fn entry_sync_marker_accepts_queue_ids() {
+        assert_eq!(
+            entry_sync_marker(Some("1779372323121-abcd_ef")),
+            Some("<!-- obr-entry:1779372323121-abcd_ef -->".to_string())
+        );
+    }
+
+    #[test]
+    fn entry_sync_marker_rejects_comment_breakout() {
+        assert_eq!(entry_sync_marker(Some("bad-->id")), None);
+        assert_eq!(entry_sync_marker(Some("")), None);
+    }
 }
 
 pub(crate) async fn mark_todo(

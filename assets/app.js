@@ -36,6 +36,10 @@ const state = {
   toastTimer: 0,
   viewScroll: {},
   syncingOutbox: false,
+  outboxSyncTimer: 0,
+  outboxAbortController: null,
+  outboxActiveItemId: "",
+  outboxCancelingIds: new Set(),
   historyReady: false,
   applyingHistory: false,
   updateWorker: null,
@@ -64,7 +68,7 @@ const TARGET_IMAGE_UPLOAD_BYTES = 1200 * 1024;
 const MAX_ORIGINAL_IMAGE_UPLOAD_BYTES = 1536 * 1024;
 const MAX_IMAGE_DIMENSIONS = [1600, 1280, 1024, 800];
 const IMAGE_JPEG_QUALITIES = [0.82, 0.74, 0.66, 0.58, 0.5];
-const ENTRY_SAVE_TIMEOUT_MS = 30000;
+const ENTRY_SYNC_TIMEOUT_MS = 45000;
 const LONG_PRESS_COPY_MS = 650;
 const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
@@ -514,9 +518,10 @@ function updateConnectionStatusLabel() {
   const label = el("connection-label");
   if (!status || !label) return;
 
-  const pending = readOutbox().length;
+  const items = readOutbox();
+  const pending = items.length;
   const base = state.connectionOnline ? "Online" : "Offline";
-  const text = pending ? `${base} · ${pending} pending` : base;
+  const text = pending ? `${base} · ${outboxSummaryLabel(items)}` : base;
   label.textContent = text;
   status.title = text;
   status.setAttribute("aria-label", text);
@@ -783,27 +788,90 @@ function rememberSearchResults(keyword, page, html) {
 }
 
 function readOutbox() {
-  return readJson(OUTBOX_KEY, []).filter((item) => item?.id && item?.type);
+  return readJson(OUTBOX_KEY, [])
+    .filter((item) => item?.id && item?.type)
+    .map(normalizeOutboxItem);
+}
+
+function normalizeOutboxItem(item) {
+  const status = item.status === "syncing" && item.id !== state.outboxActiveItemId
+    ? "pending"
+    : item.status || (item.error ? "failed" : "pending");
+  return {
+    ...item,
+    status,
+    attempts: Number(item.attempts || 0),
+    error: item.error || "",
+  };
 }
 
 function writeOutbox(items) {
-  writeJson(OUTBOX_KEY, items);
+  writeJson(OUTBOX_KEY, items.map(normalizeOutboxItem));
   updateConnectionStatusLabel();
+}
+
+function newOutboxId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function queueOfflineMutation(type, payload) {
   const items = readOutbox();
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const item = { id, type, payload, createdAt: Date.now(), error: "" };
+  const id = payload.sync_id || newOutboxId();
+  const queuedPayload =
+    type === "entry" && !payload.sync_id ? { ...payload, sync_id: id } : payload;
+  const item = {
+    id,
+    type,
+    payload: queuedPayload,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    attempts: 0,
+    status: "pending",
+    error: "",
+  };
   if (type === "page") {
     const filtered = items.filter(
       (existing) =>
         existing.type !== "page" || existing.payload.file !== payload.file,
     );
     writeOutbox([...filtered, item]);
-    return;
+    scheduleOutboxSync();
+    return item;
   }
   writeOutbox([...items, item]);
+  scheduleOutboxSync();
+  return item;
+}
+
+function updateOutboxItem(id, patch) {
+  const items = readOutbox();
+  const next = items.map((item) =>
+    item.id === id ? { ...item, ...patch, updatedAt: Date.now() } : item,
+  );
+  writeOutbox(next);
+}
+
+function removeOutboxItem(id) {
+  writeOutbox(readOutbox().filter((item) => item.id !== id));
+}
+
+function scheduleOutboxSync(delay = 250) {
+  if (state.outboxSyncTimer) return;
+  state.outboxSyncTimer = window.setTimeout(() => {
+    state.outboxSyncTimer = 0;
+    void syncOutbox();
+  }, delay);
+}
+
+function resetFailedOutboxItems(id = "") {
+  const items = readOutbox();
+  writeOutbox(
+    items.map((item) => {
+      if (id && item.id !== id) return item;
+      if (item.status !== "failed") return item;
+      return { ...item, status: "pending", error: "", updatedAt: Date.now() };
+    }),
+  );
 }
 
 function pendingPageContent(file) {
@@ -815,37 +883,60 @@ function pendingPageContent(file) {
 
 async function syncOutbox() {
   if (state.syncingOutbox || !state.connectionOnline) return;
-  let items = readOutbox();
-  if (!items.length) return;
+  if (!readOutbox().some((item) => item.status === "pending")) return;
 
   state.syncingOutbox = true;
   updateConnectionStatusLabel();
-  const remaining = [];
   try {
-    for (const item of items) {
+    while (state.connectionOnline) {
+      const item = readOutbox().find((queued) => queued.status === "pending");
+      if (!item) break;
+      state.outboxActiveItemId = item.id;
+      state.outboxAbortController = new AbortController();
+      updateOutboxItem(item.id, {
+        status: "syncing",
+        error: "",
+        attempts: item.attempts + 1,
+        lastTriedAt: Date.now(),
+      });
       try {
-        await syncOutboxItem(item);
+        await syncOutboxItem(item, { signal: state.outboxAbortController.signal });
+        removeOutboxItem(item.id);
       } catch (error) {
         console.error(error);
-        remaining.push(
-          { ...item, error: errorMessage(error) },
-          ...items.slice(items.indexOf(item) + 1),
-        );
+        if (state.outboxCancelingIds.has(item.id)) {
+          state.outboxCancelingIds.delete(item.id);
+          removeOutboxItem(item.id);
+          showToast("Sync item canceled.");
+        } else {
+          updateOutboxItem(item.id, {
+            status: "failed",
+            error: errorMessage(error),
+          });
+        }
         break;
+      } finally {
+        state.outboxAbortController = null;
+        state.outboxActiveItemId = "";
       }
     }
   } finally {
     state.syncingOutbox = false;
-    writeOutbox(remaining);
+    updateConnectionStatusLabel();
   }
 }
 
 function updateOutboxButton(pending = readOutbox().length) {
   const button = el("outbox-button");
   if (!button) return;
+  const items = readOutbox();
+  const failed = items.some((item) => item.status === "failed");
+  const syncing = items.some((item) => item.status === "syncing");
   button.hidden = pending === 0;
+  button.classList.toggle("has-error", failed);
+  button.classList.toggle("is-syncing", syncing);
   setButtonIcon(button, "list-checks", String(pending));
-  const label = `${pending} pending sync ${pending === 1 ? "item" : "items"}`;
+  const label = outboxSummaryLabel(items);
   button.title = label;
   button.setAttribute("aria-label", label);
 }
@@ -861,27 +952,45 @@ function hideOutboxPanel() {
 }
 
 async function retryOutbox() {
+  resetFailedOutboxItems();
   renderOutboxPanel();
   if (!readOutbox().length) return;
   showToast("Retrying sync.");
-  const online = await checkConnectivity({ sync: true, allowHidden: true });
+  const online = await checkConnectivity({ sync: false, allowHidden: true });
+  if (online) scheduleOutboxSync(0);
   if (!online) showToast("Still offline.");
   renderOutboxPanel();
 }
 
 function handleOutboxListClick(event) {
+  const retryButton = event.target.closest("button[data-outbox-retry]");
+  if (retryButton) {
+    resetFailedOutboxItems(retryButton.dataset.outboxRetry);
+    renderOutboxPanel();
+    scheduleOutboxSync(0);
+    return;
+  }
+  const cancelButton = event.target.closest("button[data-outbox-cancel]");
+  if (cancelButton) {
+    cancelOutboxItem(cancelButton.dataset.outboxCancel);
+    renderOutboxPanel();
+    return;
+  }
   const button = event.target.closest("button[data-outbox-delete]");
   if (!button) return;
   const id = button.dataset.outboxDelete;
-  writeOutbox(readOutbox().filter((item) => item.id !== id));
+  removeOutboxItem(id);
   renderOutboxPanel();
   showToast("Removed pending item.");
 }
 
 function renderOutboxPanel() {
   const items = readOutbox();
-  el("outbox-count").textContent = `${items.length} pending`;
-  el("outbox-retry").disabled = !items.length || state.syncingOutbox;
+  el("outbox-count").textContent = outboxSummaryLabel(items);
+  el("outbox-retry").disabled =
+    !items.length ||
+    state.syncingOutbox ||
+    !items.some((item) => item.status === "pending" || item.status === "failed");
   if (!items.length) {
     el("outbox-list").innerHTML = '<p class="empty">Nothing waiting to sync.</p>';
     return;
@@ -892,20 +1001,67 @@ function renderOutboxPanel() {
 function outboxItemHtml(item) {
   const title = item.type === "page" ? "Page edit" : "Memo";
   const detail = outboxItemDetail(item);
+  const status = outboxItemStatus(item);
   const error = item.error
     ? `<p class="outbox-item-error">${escapeHtml(item.error)}</p>`
     : "";
+  const retry = status === "failed"
+    ? `<button type="button" data-outbox-retry="${escapeHtmlAttr(item.id)}">${iconSvg("rotate-ccw")}<span>Retry</span></button>`
+    : "";
+  const cancel = status === "pending" || status === "syncing"
+    ? `<button type="button" data-outbox-cancel="${escapeHtmlAttr(item.id)}">${iconSvg("x")}<span>Cancel</span></button>`
+    : "";
+  const del = status === "failed"
+    ? `<button type="button" data-outbox-delete="${escapeHtmlAttr(item.id)}">${iconSvg("trash-2")}<span>Delete</span></button>`
+    : "";
   return `
-    <article class="outbox-item">
+    <article class="outbox-item is-${escapeHtmlAttr(status)}">
       <div class="outbox-item-title">
         <span>${escapeHtml(title)}</span>
         <span>${escapeHtml(formatTime(item.createdAt))}</span>
       </div>
+      <p class="outbox-item-status">${escapeHtml(outboxStatusLabel(item))}</p>
       <p class="outbox-item-detail">${escapeHtml(detail)}</p>
       ${error}
-      <button type="button" data-outbox-delete="${escapeHtmlAttr(item.id)}">${iconSvg("x")}<span>Delete</span></button>
+      <div class="outbox-item-actions">${retry}${cancel}${del}</div>
     </article>
   `;
+}
+
+function outboxSummaryLabel(items) {
+  const pending = items.filter((item) => item.status === "pending").length;
+  const syncing = items.filter((item) => item.status === "syncing").length;
+  const failed = items.filter((item) => item.status === "failed").length;
+  const parts = [];
+  if (syncing) parts.push(`${syncing} syncing`);
+  if (pending) parts.push(`${pending} queued`);
+  if (failed) parts.push(`${failed} failed`);
+  if (!parts.length) return "0 pending";
+  return parts.join(" · ");
+}
+
+function outboxItemStatus(item) {
+  if (item.status === "syncing" && item.id !== state.outboxActiveItemId) {
+    return "pending";
+  }
+  return item.status || "pending";
+}
+
+function outboxStatusLabel(item) {
+  const status = outboxItemStatus(item);
+  if (status === "syncing") return `Syncing${item.attempts ? ` · attempt ${item.attempts}` : ""}`;
+  if (status === "failed") return `Failed${item.attempts ? ` · attempt ${item.attempts}` : ""}`;
+  return item.attempts ? `Queued · ${item.attempts} tried` : "Queued";
+}
+
+function cancelOutboxItem(id) {
+  if (state.outboxActiveItemId === id && state.outboxAbortController) {
+    state.outboxCancelingIds.add(id);
+    state.outboxAbortController.abort();
+    return;
+  }
+  removeOutboxItem(id);
+  showToast("Sync item canceled.");
 }
 
 function outboxItemDetail(item) {
@@ -937,15 +1093,25 @@ function errorMessage(error) {
   return error?.message || String(error || "Sync failed.");
 }
 
-async function syncOutboxItem(item) {
+async function syncOutboxItem(item, options = {}) {
   if (item.type === "entry") {
-    const response = await request("/api/entry", {
-      method: "POST",
-      body: JSON.stringify(item.payload),
-    });
+    const imageBlob = item.payload.image ? dataUrlToBlob(item.payload.image) : null;
+    const response = imageBlob
+      ? await request("/api/entry/multipart", {
+          method: "POST",
+          body: entryFormData(item.payload, imageBlob),
+          signal: options.signal,
+          timeoutMs: ENTRY_SYNC_TIMEOUT_MS,
+        })
+      : await request("/api/entry", {
+          method: "POST",
+          body: JSON.stringify(item.payload),
+          signal: options.signal,
+          timeoutMs: ENTRY_SYNC_TIMEOUT_MS,
+        });
     const text = await response.text();
     if (text !== "ok") throw new Error(text);
-    showToast("Offline entry synced.");
+    showToast(item.payload.image ? "Image memo synced." : "Memo synced.");
     if (item.payload.page === "todo" && state.view === "todo") {
       await loadTodo({ renderCache: false });
     }
@@ -956,6 +1122,7 @@ async function syncOutboxItem(item) {
     const response = await request("/api/page", {
       method: "POST",
       body: JSON.stringify(item.payload),
+      signal: options.signal,
     });
     if (!response.ok) throw new Error(await response.text());
     const data = await response.json();
@@ -1462,57 +1629,41 @@ async function saveEntry() {
     updateEntrySaveState();
     return;
   }
+  const image = state.image;
   const payload = {
+    sync_id: newOutboxId(),
     page: el("entry-page").value,
     links: el("entry-links").value,
     text: el("entry-text").value,
     image: "",
   };
-  const formData = entryFormData(payload);
   setEntrySaving(true);
-  const imageSize = state.image ? ` (${formatBytes(state.image.size)})` : "";
-  setEntryStatus(`Local draft saved. Syncing${imageSize}...`);
+  setEntryStatus("Saving locally...");
   try {
-    const response = await request("/api/entry/multipart", {
-      method: "POST",
-      body: formData,
-      timeoutMs: ENTRY_SAVE_TIMEOUT_MS,
-    });
-    const text = await response.text();
-    if (text !== "ok") throw new Error(text);
+    if (image) payload.image = await blobToDataUrl(image);
+    const item = queueOfflineMutation("entry", payload);
     resetEntry();
     setEntryStatus("");
-    showToast("Synced to file.");
+    showToast(image ? "Saved locally. Image syncing..." : "Saved locally. Syncing...");
+    scheduleOutboxSync(0);
+    if (!item) throw new Error("Could not queue entry.");
   } catch (error) {
     console.error(error);
-    if (shouldQueueOffline(error)) {
-      try {
-        payload.image = state.image ? await blobToDataUrl(state.image) : "";
-        queueOfflineMutation("entry", payload);
-        resetEntry();
-        setEntryStatus("");
-        showToast("Waiting to sync.");
-        return;
-      } catch (queueError) {
-        console.error(queueError);
-        setEntryStatus(queueError.message || "Could not save offline.");
-        return;
-      }
-    }
-    const message = error.message ? `Save failed: ${error.message}` : "Save failed.";
+    const message = error.message ? `Local save failed: ${error.message}` : "Local save failed.";
     setEntryStatus(message);
   } finally {
     setEntrySaving(false);
   }
 }
 
-function entryFormData(payload) {
+function entryFormData(payload, imageBlob = null) {
   const formData = new FormData();
+  if (payload.sync_id) formData.append("sync_id", payload.sync_id);
   formData.append("page", payload.page);
   formData.append("links", payload.links);
   formData.append("text", payload.text);
-  if (state.image) {
-    formData.append("image", state.image, entryImageFileName(state.image));
+  if (imageBlob) {
+    formData.append("image", imageBlob, entryImageFileName(imageBlob));
   }
   return formData;
 }
@@ -1763,6 +1914,20 @@ function blobToDataUrl(blob) {
     reader.onload = () => resolve(reader.result);
     reader.readAsDataURL(blob);
   });
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [meta, encoded] = String(dataUrl || "").split(",", 2);
+  if (!meta?.startsWith("data:") || !encoded) {
+    throw new Error("Queued image data is invalid.");
+  }
+  const mime = meta.slice(5).split(";", 1)[0] || "image/jpeg";
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: mime });
 }
 
 function canvasToBlob(canvas, type, quality) {

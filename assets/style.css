@@ -214,6 +214,16 @@ nav {
   font-weight: 800;
 }
 
+.outbox-button.is-syncing {
+  border-color: #8ab7a2;
+  color: #0d6b45;
+}
+
+.outbox-button.has-error {
+  border-color: #f1b5aa;
+  color: #b42318;
+}
+
 .update-banner {
   position: sticky;
   top: 64px;
@@ -316,6 +326,16 @@ nav {
   padding: 10px;
 }
 
+.outbox-item.is-syncing {
+  border-color: #8ab7a2;
+  background: #f4fbf7;
+}
+
+.outbox-item.is-failed {
+  border-color: #f1b5aa;
+  background: #fff8f7;
+}
+
 .outbox-item-title {
   display: flex;
   justify-content: space-between;
@@ -325,10 +345,15 @@ nav {
 
 .outbox-item-time,
 .outbox-item-detail,
+.outbox-item-status,
 .outbox-item-error {
   margin: 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+.outbox-item-status {
+  font-weight: 800;
 }
 
 .outbox-item-detail {
@@ -339,7 +364,13 @@ nav {
   color: #8a1f16;
 }
 
-.outbox-item button {
+.outbox-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.outbox-item-actions button {
   justify-self: start;
   min-height: 32px;
   padding: 5px 9px;
