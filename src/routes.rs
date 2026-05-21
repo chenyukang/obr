@@ -27,9 +27,9 @@ use crate::{
     auth::{AUTH_SESSION_KEY, allows_local_password_login, verify_login},
     error::{AppError, AppResult},
     markdown::{
-        MarkdownEditBlock, auto_link_note_titles, ensure_inside, escape_html, escape_html_attr,
-        mark_todo_content, markdown_source_hash, normalize_markdown_rel, normalize_rel_path,
-        rel_to_vault, render_markdown_edit_blocks, render_markdown_html, save_data_url_image,
+        auto_link_note_titles, ensure_inside, escape_html, escape_html_attr, mark_todo_content,
+        normalize_markdown_rel, normalize_rel_path, rel_to_vault, render_markdown_html,
+        save_data_url_image,
     },
 };
 
@@ -54,11 +54,6 @@ pub(crate) struct SearchQuery {
 #[derive(Deserialize)]
 pub(crate) struct PageUpdate {
     file: String,
-    content: String,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct MarkdownEditRequest {
     content: String,
 }
 
@@ -96,23 +91,6 @@ struct PageResponse {
 struct PageSourceResponse {
     file: String,
     content: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PageEditResponse {
-    file: String,
-    content: String,
-    source_hash: String,
-    blocks: Vec<MarkdownEditBlock>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MarkdownEditResponse {
-    content: String,
-    source_hash: String,
-    blocks: Vec<MarkdownEditBlock>,
 }
 
 #[derive(Serialize)]
@@ -394,73 +372,6 @@ pub(crate) async fn get_page_source(
         "api timing"
     );
     Ok(Json(PageSourceResponse { file: rel, content }).into_response())
-}
-
-pub(crate) async fn get_page_edit(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<PageQuery>,
-) -> AppResult<Response> {
-    let started = Instant::now();
-    let requested_path = query.path.clone().unwrap_or_default();
-    let query_type = query.query_type.clone().unwrap_or_default();
-    let Some((rel, content)) = read_page_content(&state, query)? else {
-        info!(
-            api = "page_edit",
-            path = %requested_path,
-            query_type = %query_type,
-            found = false,
-            elapsed_ms = started.elapsed().as_millis(),
-            "api timing"
-        );
-        return Ok(Json(PageEditResponse {
-            file: "NoPage".to_string(),
-            source_hash: markdown_source_hash(""),
-            content: String::new(),
-            blocks: render_markdown_edit_blocks(""),
-        })
-        .into_response());
-    };
-    let render_started = Instant::now();
-    let blocks = render_markdown_edit_blocks(&content);
-    info!(
-        api = "page_edit",
-        path = %requested_path,
-        query_type = %query_type,
-        file = %rel,
-        found = true,
-        bytes = content.len(),
-        blocks = blocks.len(),
-        render_ms = render_started.elapsed().as_millis(),
-        elapsed_ms = started.elapsed().as_millis(),
-        "api timing"
-    );
-    Ok(Json(PageEditResponse {
-        file: rel,
-        source_hash: markdown_source_hash(&content),
-        content,
-        blocks,
-    })
-    .into_response())
-}
-
-pub(crate) async fn render_markdown_edit(Json(body): Json<MarkdownEditRequest>) -> Response {
-    let started = Instant::now();
-    let render_started = Instant::now();
-    let blocks = render_markdown_edit_blocks(&body.content);
-    info!(
-        api = "markdown_edit",
-        bytes = body.content.len(),
-        blocks = blocks.len(),
-        render_ms = render_started.elapsed().as_millis(),
-        elapsed_ms = started.elapsed().as_millis(),
-        "api timing"
-    );
-    Json(MarkdownEditResponse {
-        source_hash: markdown_source_hash(&body.content),
-        blocks,
-        content: body.content,
-    })
-    .into_response()
 }
 
 pub(crate) async fn post_page(
