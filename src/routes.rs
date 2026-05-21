@@ -568,6 +568,8 @@ pub(crate) async fn post_entry_multipart(
                     .content_type()
                     .map(str::to_owned)
                     .unwrap_or_else(|| "image/jpeg".to_string());
+                let file_name = field.file_name().map(str::to_owned);
+                let image_type = normalize_multipart_image_type(&content_type, file_name.as_deref());
                 let bytes = field.bytes().await.map_err(anyhow::Error::from)?;
                 if bytes.len() > MAX_ENTRY_IMAGE_BYTES {
                     return Ok((StatusCode::PAYLOAD_TOO_LARGE, "image too large").into_response());
@@ -576,7 +578,7 @@ pub(crate) async fn post_entry_multipart(
                     image_name = Some(save_image_bytes(
                         &state.config.vault_path,
                         &bytes,
-                        &content_type,
+                        &image_type,
                         &now,
                     )?);
                 }
@@ -601,6 +603,17 @@ struct EntryPayload {
     links: String,
     text: String,
     image_name: Option<String>,
+}
+
+fn normalize_multipart_image_type(content_type: &str, file_name: Option<&str>) -> String {
+    match content_type {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/heic" | "image/heif" => {
+            content_type.to_string()
+        }
+        _ => file_name
+            .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()))
+            .unwrap_or_else(|| "jpg".to_string()),
+    }
 }
 
 fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> {

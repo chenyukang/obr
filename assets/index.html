@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260521-heic-camera">
+    <link rel="stylesheet" href="/assets/style.css?v=20260521-original-fallback">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -96,7 +96,7 @@
               </label>
               <label class="file-button" data-icon="camera">
                 Camera
-                <input id="entry-camera-file" type="file" accept="image/jpeg,image/png,image/webp" capture="environment">
+                <input id="entry-camera-file" type="file" accept="image/*" capture="environment">
               </label>
               <button id="entry-reset" type="button" data-icon="rotate-ccw">Reset</button>
               <button id="entry-save" type="submit" data-icon="save">Save</button>
@@ -197,6 +197,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260521-heic-camera"></script>
+    <script src="/assets/app.js?v=20260521-original-fallback"></script>
   </body>
 </html>

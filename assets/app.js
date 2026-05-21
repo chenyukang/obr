@@ -1588,7 +1588,7 @@ async function readImage(file) {
   try {
     state.image = await prepareImage(file, previewUrl);
     updateEntrySaveState();
-    setEntryStatus(isHeicImage(state.image) ? "This HEIC photo cannot be previewed here; uploading original." : "");
+    setEntryStatus(usesOriginalImageUpload(file) ? "Using original image for upload." : "");
   } catch (error) {
     console.error(error);
     state.image = "";
@@ -1613,14 +1613,10 @@ async function prepareImage(file, previewUrl) {
   try {
     image = await loadImage(previewUrl);
   } catch (error) {
-    if (isHeicImage(file)) {
-      if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
-        throw new Error("HEIC is too large to upload. Retake as JPEG or choose a smaller image.");
-      }
-      setEntryStatus("This HEIC photo cannot be previewed here; uploading original.");
+    if (file.size <= MAX_IMAGE_UPLOAD_BYTES) {
       return file;
     }
-    throw error;
+    throw new Error("This image cannot be compressed here and is larger than 5 MB. Please choose a smaller image.");
   }
 
   for (const maxDimension of MAX_IMAGE_DIMENSIONS) {
@@ -1659,6 +1655,10 @@ function isHeicImage(file) {
   const type = (file.type || "").toLowerCase();
   const name = (file.name || "").toLowerCase();
   return type === "image/heic" || type === "image/heif" || name.endsWith(".heic") || name.endsWith(".heif");
+}
+
+function usesOriginalImageUpload(file) {
+  return state.image === file && file.type !== "image/gif";
 }
 
 function blobToDataUrl(blob) {
