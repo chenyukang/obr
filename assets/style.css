@@ -713,7 +713,9 @@ main {
 }
 
 .preview {
+  display: block;
   max-width: 260px;
+  margin: 0 auto;
   border: 1px solid var(--line);
   border-radius: 6px;
 }
