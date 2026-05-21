@@ -14,7 +14,8 @@ use chrono::Local;
 use notify::{
     Config as NotifyConfig, Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use pulldown_cmark::{Event, Options, Parser, html};
+use pulldown_cmark::{Event, Options, Parser, Tag, html};
+use serde::Serialize;
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 use yaml_serde::Value as YamlValue;
@@ -50,6 +51,18 @@ pub(crate) struct MarkdownSearchResults {
     pub(crate) total_matches: usize,
     pub(crate) offset: usize,
     pub(crate) limit: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MarkdownEditBlock {
+    pub(crate) id: String,
+    pub(crate) start: usize,
+    pub(crate) text_end: usize,
+    pub(crate) end: usize,
+    pub(crate) text: String,
+    pub(crate) html: String,
+    pub(crate) kind: &'static str,
 }
 
 pub(crate) struct MarkdownIndex {
@@ -614,11 +627,7 @@ pub(crate) fn render_markdown_html(raw: &str) -> String {
         .map(|(frontmatter, body)| (Some(frontmatter), body))
         .unwrap_or((None, raw));
     let preprocessed = preprocess_obsidian_refs(body);
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_TASKLISTS);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_FOOTNOTES);
+    let options = markdown_options();
 
     let parser = Parser::new_ext(&preprocessed, options);
     let mut events = Vec::new();
@@ -649,6 +658,196 @@ pub(crate) fn render_markdown_html(raw: &str) -> String {
     }
     output.push_str(&sanitize_rendered_html(&rendered));
     output
+}
+
+pub(crate) fn render_markdown_edit_blocks(raw: &str) -> Vec<MarkdownEditBlock> {
+    let ranges = markdown_edit_block_ranges(raw);
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(index, range)| {
+            let text = raw[range.start..range.text_end].to_string();
+            MarkdownEditBlock {
+                id: format!("b{index}"),
+                start: range.start,
+                text_end: range.text_end,
+                end: range.end,
+                html: render_markdown_html(&text),
+                text,
+                kind: range.kind,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn markdown_source_hash(raw: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in raw.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn markdown_options() -> Options {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options
+}
+
+#[derive(Debug)]
+struct MarkdownEditRange {
+    start: usize,
+    text_end: usize,
+    end: usize,
+    kind: &'static str,
+}
+
+fn markdown_edit_block_ranges(raw: &str) -> Vec<MarkdownEditRange> {
+    let mut ranges = Vec::new();
+    let mut body_start = 0usize;
+    if let Some(frontmatter_end) = frontmatter_raw_end(raw) {
+        let text_end = trim_edit_block_text_end(raw, 0, frontmatter_end);
+        ranges.push(MarkdownEditRange {
+            start: 0,
+            text_end,
+            end: frontmatter_end,
+            kind: "frontmatter",
+        });
+        body_start = frontmatter_end;
+    }
+
+    let body = &raw[body_start..];
+    let parser = Parser::new_ext(body, markdown_options()).into_offset_iter();
+    let mut depth = 0usize;
+    let mut current: Option<MarkdownEditRange> = None;
+
+    for (event, offset) in parser {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0 && is_top_level_edit_tag(&tag) {
+                    current = Some(MarkdownEditRange {
+                        start: body_start + offset.start,
+                        text_end: body_start + offset.end,
+                        end: body_start + offset.end,
+                        kind: edit_tag_kind(&tag),
+                    });
+                }
+                depth += 1;
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0
+                    && let Some(mut range) = current.take()
+                {
+                    range.text_end = range.text_end.max(body_start + offset.end);
+                    range.text_end = trim_edit_block_text_end(raw, range.start, range.text_end);
+                    range.end = range.text_end;
+                    ranges.push(range);
+                }
+            }
+            Event::Rule if depth == 0 => {
+                let start = body_start + offset.start;
+                let text_end = trim_edit_block_text_end(raw, start, body_start + offset.end);
+                ranges.push(MarkdownEditRange {
+                    start,
+                    text_end,
+                    end: text_end,
+                    kind: "rule",
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if ranges.is_empty() {
+        return vec![MarkdownEditRange {
+            start: 0,
+            text_end: raw.len(),
+            end: raw.len(),
+            kind: "empty",
+        }];
+    }
+
+    ranges.sort_by_key(|range| range.start);
+    for index in 0..ranges.len() {
+        let next_start = ranges
+            .get(index + 1)
+            .map(|next| next.start)
+            .unwrap_or(raw.len());
+        ranges[index].end = next_start.max(ranges[index].text_end);
+    }
+    ranges
+}
+
+fn trim_edit_block_text_end(raw: &str, start: usize, mut end: usize) -> usize {
+    while end > start {
+        let bytes = raw.as_bytes();
+        if bytes.get(end - 1) == Some(&b'\n') {
+            end -= 1;
+            if end > start && bytes.get(end - 1) == Some(&b'\r') {
+                end -= 1;
+            }
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn is_top_level_edit_tag(tag: &Tag<'_>) -> bool {
+    matches!(
+        tag,
+        Tag::Paragraph
+            | Tag::Heading { .. }
+            | Tag::BlockQuote(_)
+            | Tag::CodeBlock(_)
+            | Tag::HtmlBlock
+            | Tag::List(_)
+            | Tag::FootnoteDefinition(_)
+            | Tag::DefinitionList
+            | Tag::Table(_)
+            | Tag::MetadataBlock(_)
+    )
+}
+
+fn edit_tag_kind(tag: &Tag<'_>) -> &'static str {
+    match tag {
+        Tag::Paragraph => "paragraph",
+        Tag::Heading { .. } => "heading",
+        Tag::BlockQuote(_) => "quote",
+        Tag::CodeBlock(_) => "code",
+        Tag::HtmlBlock => "html",
+        Tag::List(_) => "list",
+        Tag::FootnoteDefinition(_) => "footnote",
+        Tag::DefinitionList => "definition",
+        Tag::Table(_) => "table",
+        Tag::MetadataBlock(_) => "metadata",
+        _ => "block",
+    }
+}
+
+fn frontmatter_raw_end(raw: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    let first_line = raw.split_inclusive('\n').next()?;
+    let (first_body, _) = split_line_ending(first_line);
+    if first_body.trim() != "---" {
+        return None;
+    }
+
+    offset += first_line.len();
+    for line in raw[offset..].split_inclusive('\n') {
+        let (body, _) = split_line_ending(line);
+        let marker = body.trim_end();
+        if marker == "---" || marker == "..." {
+            return Some(offset + line.len());
+        }
+        offset += line.len();
+    }
+    None
 }
 
 fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
@@ -1484,6 +1683,36 @@ mod tests {
         assert!(rendered.contains(r#"<span class="metadata-chip">Words</span>"#));
         assert!(rendered.contains("<h1>Body</h1>"));
         assert!(!rendered.contains("doc_type: hypothesis-highlights"));
+    }
+
+    #[test]
+    fn render_markdown_edit_blocks_returns_source_ranges_and_html() {
+        let source = "---\ntags:\n  - Words\n---\n\n# Title\n\n- [ ] todo\n- [x] done\n\n```rust\nfn main() {}\n```";
+        let blocks = render_markdown_edit_blocks(source);
+
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].kind, "frontmatter");
+        assert!(blocks[0].html.contains("metadata-panel"));
+        assert_eq!(blocks[1].kind, "heading");
+        assert_eq!(blocks[1].text, "# Title");
+        assert!(blocks[1].html.contains("<h1>Title</h1>"));
+        assert_eq!(blocks[2].kind, "list");
+        assert!(blocks[2].html.contains("data-task-index"));
+        assert_eq!(blocks[3].kind, "code");
+        assert_eq!(&source[blocks[3].start..blocks[3].text_end], blocks[3].text);
+    }
+
+    #[test]
+    fn render_markdown_edit_blocks_preserves_separators_between_blocks() {
+        let source = "First\n\n\nSecond";
+        let blocks = render_markdown_edit_blocks(source);
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "First");
+        assert_eq!(blocks[0].text_end, 5);
+        assert_eq!(blocks[0].end, 8);
+        assert_eq!(blocks[1].start, 8);
+        assert_eq!(blocks[1].text, "Second");
     }
 
     #[test]

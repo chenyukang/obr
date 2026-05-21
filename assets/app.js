@@ -7,12 +7,14 @@ const state = {
   currentHighlightKeyword: "",
   image: "",
   searchTimer: 0,
-  editorPreviewTimer: 0,
+  editorBlocks: [],
+  editorSourceHash: "",
   activeEditorBlock: -1,
   activeEditorBlockStart: -1,
   activeEditorBlockTextEnd: -1,
   lastReadBlockIndex: -1,
   lastReadBlockFile: "",
+  lastReadBlockRatio: -1,
   searchController: null,
   searchRequestId: 0,
   searchPage: 0,
@@ -1910,6 +1912,7 @@ function displayPageData(
       ? requestedPath
       : `${requestedPath}.md`;
     state.lastReadBlockIndex = -1;
+    state.lastReadBlockRatio = -1;
     state.lastReadBlockFile = state.currentFile;
     state.currentContent = "";
     state.currentContentLoaded = true;
@@ -1918,6 +1921,7 @@ function displayPageData(
   }
   state.currentFile = file;
   state.lastReadBlockIndex = -1;
+  state.lastReadBlockRatio = -1;
   state.lastReadBlockFile = file;
   state.currentContent =
     pendingPageContent(file) ?? data.source ?? cachedPageSource(file) ?? "";
@@ -1950,6 +1954,8 @@ function showPage(title, html, sourceView, options = {}) {
   el("page-editor").hidden = true;
   el("page-editor-shell").hidden = true;
   el("page-block-editor").innerHTML = "";
+  state.editorBlocks = [];
+  state.editorSourceHash = "";
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
@@ -2100,34 +2106,32 @@ function stickyHeaderOffset() {
 function rememberReadBlockFromPointer(event) {
   if (event.pointerType === "mouse" && event.button !== 0) return;
   if (el("page-content").hidden || !state.currentContent) return;
-  const index = estimateEditorBlockIndexFromViewportY(event.clientY, state.currentContent);
-  if (index < 0) return;
-  state.lastReadBlockIndex = index;
+  const rect = el("page-content").getBoundingClientRect();
+  const height = Math.max(rect.height, 1);
+  state.lastReadBlockRatio = clamp((event.clientY - rect.top) / height, 0, 1);
+  state.lastReadBlockIndex = -1;
   state.lastReadBlockFile = state.currentFile;
 }
 
 function initialEditorBlockIndex(source) {
-  const blocks = splitMarkdownBlocks(source);
+  const blocks = state.editorBlocks;
   if (!blocks.length) return 0;
-  if (state.lastReadBlockFile === state.currentFile && state.lastReadBlockIndex >= 0) {
-    return Math.min(state.lastReadBlockIndex, blocks.length - 1);
+  if (state.lastReadBlockFile === state.currentFile && state.lastReadBlockRatio >= 0) {
+    return blockIndexForSourceOffset(state.lastReadBlockRatio * String(source || "").length, blocks);
   }
-  return estimateEditorBlockIndexFromViewportY(stickyHeaderOffset() + 24, source);
-}
-
-function estimateEditorBlockIndexFromViewportY(clientY, source) {
   const content = el("page-content");
-  const blocks = splitMarkdownBlocks(source);
-  if (!content || !blocks.length) return 0;
   const rect = content.getBoundingClientRect();
   const height = Math.max(rect.height, 1);
-  const relativeY = clamp(clientY - rect.top, 0, height);
-  const contentOffset = (relativeY / height) * String(source || "").length;
+  const ratio = clamp((stickyHeaderOffset() + 24 - rect.top) / height, 0, 1);
+  return blockIndexForSourceOffset(ratio * String(source || "").length, blocks);
+}
+
+function blockIndexForSourceOffset(sourceOffset, blocks) {
   let bestIndex = 0;
   for (let index = 0; index < blocks.length; index += 1) {
     const block = blocks[index];
-    if (contentOffset >= block.start) bestIndex = index;
-    if (contentOffset < block.end) return index;
+    if (sourceOffset >= block.start) bestIndex = index;
+    if (sourceOffset < block.end) return index;
   }
   return bestIndex;
 }
@@ -2155,6 +2159,9 @@ async function toggleEdit() {
     button.disabled = false;
     const draft = loadPageDraft(state.currentFile);
     editor.value = draft ?? state.currentContent;
+    if (draft !== null) {
+      await loadEditorBlocksForSource(draft);
+    }
     const initialBlockIndex = initialEditorBlockIndex(editor.value);
     editor.hidden = false;
     editorShell.hidden = false;
@@ -2197,6 +2204,8 @@ async function toggleEdit() {
     editor.hidden = true;
     editorShell.hidden = true;
     el("page-block-editor").innerHTML = "";
+    state.editorBlocks = [];
+    state.editorSourceHash = "";
     content.hidden = false;
     updateReadingProgress();
     restoreReadingPositionAfterEdit(restoreFile, restoreY);
@@ -2219,6 +2228,8 @@ async function toggleEdit() {
         editor.hidden = true;
         editorShell.hidden = true;
         el("page-block-editor").innerHTML = "";
+        state.editorBlocks = [];
+        state.editorSourceHash = "";
         content.hidden = false;
         updateReadingProgress();
         restoreReadingPositionAfterEdit(restoreFile, restoreY);
@@ -2247,20 +2258,22 @@ async function loadCurrentPageSource(options = {}) {
   if (pending !== null) {
     state.currentContent = pending;
     state.currentContentLoaded = true;
+    await loadEditorBlocksForSource(pending);
     return;
   }
-  if (!forceNetwork && state.currentContentLoaded) return;
+  if (!forceNetwork && state.currentContentLoaded && state.editorBlocks.length) return;
   if (!forceNetwork) {
     const cached = cachedPageSource(state.currentFile);
     if (cached) {
       state.currentContent = cached;
       state.currentContentLoaded = true;
+      await loadEditorBlocksForSource(cached);
       return;
     }
   }
   const params = new URLSearchParams({ path: state.currentFile });
   if (forceNetwork) params.set("fresh", String(Date.now()));
-  const response = await request(`/api/page/source?${params}`, {
+  const response = await request(`/api/page/edit?${params}`, {
     cache: "no-store",
   });
   if (!response.ok) throw new Error(await response.text());
@@ -2268,12 +2281,36 @@ async function loadCurrentPageSource(options = {}) {
   if (data.file === "NoPage") {
     state.currentContent = "";
     state.currentContentLoaded = true;
+    setEditorBlocks(data.blocks || [], "");
     return;
   }
   state.currentFile = data.file;
   state.currentContent = data.content || "";
   state.currentContentLoaded = true;
+  state.editorSourceHash = data.sourceHash || "";
+  setEditorBlocks(data.blocks || [], state.currentContent);
   rememberPageSource(state.currentFile, state.currentContent);
+}
+
+async function loadEditorBlocksForSource(source) {
+  try {
+    const data = await renderEditorSource(source);
+    state.editorSourceHash = data.sourceHash || "";
+    setEditorBlocks(data.blocks || [], source);
+  } catch (error) {
+    console.error(error);
+    state.editorSourceHash = "";
+    setEditorBlocks([], source);
+  }
+}
+
+async function renderEditorSource(source) {
+  const response = await request("/api/markdown/edit", {
+    method: "POST",
+    body: JSON.stringify({ content: source }),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
 }
 
 async function warmPageSource(file) {
@@ -2293,7 +2330,7 @@ async function warmPageSource(file) {
 function handlePageEditorInput() {
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
-  renderBlockEditor({ activeIndex: state.activeEditorBlock });
+  void refreshEditorBlocksFromSource({ activeIndex: state.activeEditorBlock, focus: false });
 }
 
 function handlePageBlockEditorClick(event) {
@@ -2308,11 +2345,77 @@ function handlePageBlockEditorFocusOut(event) {
   commitActiveEditorBlock();
 }
 
+function setEditorBlocks(blocks, source) {
+  const normalized = normalizeEditorSource(source);
+  state.editorBlocks = normalizeEditorBlocks(blocks, normalized);
+  state.activeEditorBlock = Math.min(
+    state.activeEditorBlock,
+    state.editorBlocks.length - 1,
+  );
+}
+
+function normalizeEditorBlocks(blocks, source) {
+  const next = Array.isArray(blocks) ? blocks : [];
+  if (!next.length) return fallbackEditorBlocks(source);
+  return next.map((block, index) => ({
+    id: block.id || `b${index}`,
+    start: Number(block.start || 0),
+    textEnd: Number(block.textEnd ?? block.text_end ?? 0),
+    end: Number(block.end ?? block.textEnd ?? block.text_end ?? 0),
+    text: String(block.text || ""),
+    html: block.html || '<p class="editor-preview-empty">Empty block</p>',
+    kind: block.kind || "block",
+  }));
+}
+
+function fallbackEditorBlocks(source) {
+  const text = normalizeEditorSource(source);
+  return [
+    {
+      id: "b0",
+      start: 0,
+      textEnd: text.length,
+      end: text.length,
+      text,
+      html: text
+        ? `<pre class="offline-source-preview">${escapeHtml(text)}</pre>`
+        : '<p class="editor-preview-empty">Empty block</p>',
+      kind: text ? "source" : "empty",
+    },
+  ];
+}
+
+async function refreshEditorBlocksFromSource(options = {}) {
+  const editor = el("page-editor");
+  if (!editor || editor.hidden) return;
+  const source = normalizeEditorSource(editor.value);
+  try {
+    const data = await renderEditorSource(source);
+    if (normalizeEditorSource(editor.value) !== source) return;
+    state.editorSourceHash = data.sourceHash || "";
+    setEditorBlocks(data.blocks || [], source);
+    if (!editor.hidden && options.render !== false) {
+      renderBlockEditor({
+        activeIndex: options.activeIndex ?? state.activeEditorBlock,
+        focus: options.focus ?? false,
+      });
+    }
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function normalizeEditorSource(value) {
+  return String(value || "").replace(/\r\n?/g, "\n");
+}
+
 function renderBlockEditor(options = {}) {
   const editor = el("page-editor");
   const blockEditor = el("page-block-editor");
   if (!editor || !blockEditor || editor.hidden) return;
-  const blocks = splitMarkdownBlocks(editor.value);
+  const blocks = state.editorBlocks.length
+    ? state.editorBlocks
+    : fallbackEditorBlocks(editor.value);
   const activeIndex = Math.min(
     Math.max(Number(options.activeIndex ?? state.activeEditorBlock ?? -1), -1),
     blocks.length - 1,
@@ -2324,6 +2427,9 @@ function renderBlockEditor(options = {}) {
   blockEditor.innerHTML = blocks
     .map((block, index) => editorBlockHtml(block, index, index === activeIndex))
     .join("");
+  blockEditor.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.disabled = true;
+  });
   enhanceMarkdownImages(blockEditor);
   if (activeIndex >= 0) {
     const active = blockEditor.querySelector(`[data-block-index="${activeIndex}"] textarea`);
@@ -2344,19 +2450,25 @@ function renderBlockEditor(options = {}) {
 
 function activateEditorBlock(index) {
   if (index === state.activeEditorBlock) return;
-  commitActiveEditorBlock();
+  commitActiveEditorBlock({ render: false });
   renderBlockEditor({ activeIndex: index, placeCursorAtEnd: true });
 }
 
-function commitActiveEditorBlock() {
+function commitActiveEditorBlock(options = {}) {
   const blockEditor = el("page-block-editor");
   const active = blockEditor?.querySelector(".editor-block.is-active textarea");
   if (!active) return;
-  replaceSourceBlock(Number(active.dataset.blockIndex || 0), active.value);
+  const index = Number(active.dataset.blockIndex || 0);
+  replaceSourceBlock(index, active.value);
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
   state.activeEditorBlock = -1;
+  if (options.render === false) {
+    void refreshEditorBlocksFromSource({ render: false });
+    return;
+  }
   renderBlockEditor({ activeIndex: -1, focus: false });
+  void refreshEditorBlocksFromSource({ focus: false });
 }
 
 function updateActiveBlockFromTextarea(textarea) {
@@ -2368,23 +2480,34 @@ function updateActiveBlockFromTextarea(textarea) {
 
 function replaceSourceBlock(index, value) {
   const editor = el("page-editor");
-  const source = String(editor.value || "").replace(/\r\n?/g, "\n");
-  const normalizedValue = String(value || "").replace(/\r\n?/g, "\n");
-  let start = state.activeEditorBlockStart;
-  let textEnd = state.activeEditorBlockTextEnd;
-
-  if (index !== state.activeEditorBlock || start < 0 || textEnd < start || textEnd > source.length) {
-    const blocks = splitMarkdownBlocks(source);
-    const block = blocks[index];
-    if (!block) return;
-    start = block.start;
-    textEnd = block.textEnd;
-  }
+  const source = normalizeEditorSource(editor.value);
+  const normalizedValue = normalizeEditorSource(value);
+  const block = state.editorBlocks[index];
+  if (!block) return;
+  const start = Number(block.start);
+  const textEnd = Number(block.textEnd);
+  if (start < 0 || textEnd < start || textEnd > source.length) return;
 
   editor.value = `${source.slice(0, start)}${normalizedValue}${source.slice(textEnd)}`;
+  const delta = normalizedValue.length - (textEnd - start);
+  block.text = normalizedValue;
+  block.textEnd = start + normalizedValue.length;
+  block.end = Math.max(block.textEnd, Number(block.end || textEnd) + delta);
+  block.html = '<p class="editor-preview-empty">Preview updates after editing.</p>';
+  shiftEditorBlockOffsets(index + 1, delta);
   state.activeEditorBlock = index;
   state.activeEditorBlockStart = start;
   state.activeEditorBlockTextEnd = start + normalizedValue.length;
+}
+
+function shiftEditorBlockOffsets(startIndex, delta) {
+  if (!delta) return;
+  for (let index = startIndex; index < state.editorBlocks.length; index += 1) {
+    const block = state.editorBlocks[index];
+    block.start += delta;
+    block.textEnd += delta;
+    block.end += delta;
+  }
 }
 
 function handleBlockTextareaKeydown(event) {
@@ -2399,221 +2522,16 @@ function autoResizeBlockTextarea(textarea) {
   textarea.style.height = `${Math.max(46, textarea.scrollHeight)}px`;
 }
 
-function splitMarkdownBlocks(source) {
-  const text = String(source || "").replace(/\r\n?/g, "\n");
-  if (!text.trim()) return [{ text: "", separator: "", start: 0, textEnd: 0, end: 0 }];
-  const blocks = [];
-  const separatorPattern = /\n{2,}/g;
-  let start = 0;
-  let match;
-  while ((match = separatorPattern.exec(text)) !== null) {
-    blocks.push({
-      text: text.slice(start, match.index),
-      separator: match[0],
-      start,
-      textEnd: match.index,
-      end: match.index + match[0].length,
-    });
-    start = match.index + match[0].length;
-  }
-  blocks.push({
-    text: text.slice(start),
-    separator: "",
-    start,
-    textEnd: text.length,
-    end: text.length,
-  });
-  return blocks.length ? blocks : [{ text: "", separator: "", start: 0, textEnd: 0, end: 0 }];
-}
-
-function joinMarkdownBlocks(blocks) {
-  return blocks.map((block) => `${block.text}${block.separator || ""}`).join("");
-}
-
 function editorBlockHtml(block, index, active) {
   if (active) {
     return `<div class="editor-block is-active" data-block-index="${index}"><textarea class="editor-block-source" data-block-index="${index}" rows="1">${escapeTextarea(block.text)}</textarea></div>`;
   }
-  const rendered = renderMarkdownBlock(block.text);
-  return `<div class="editor-block" data-block-index="${index}" tabindex="0">${rendered}</div>`;
+  const rendered = block.html || '<p class="editor-preview-empty">Empty block</p>';
+  return `<div class="editor-block" data-block-index="${index}" data-block-kind="${escapeHtmlAttr(block.kind || "block")}" tabindex="0">${rendered}</div>`;
 }
 
 function escapeTextarea(value) {
   return escapeHtml(value).replace(/"/g, "&quot;");
-}
-
-function renderMarkdownBlock(source) {
-  const sourceText = String(source || "");
-  if (!sourceText.trim()) {
-    return '<p class="editor-preview-empty">Empty block</p>';
-  }
-  return renderMarkdownLines(sourceText);
-}
-
-function renderMarkdownLines(source) {
-  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
-  const html = [];
-  let paragraph = [];
-  let listType = "";
-  let listClass = "";
-  let codeLines = null;
-
-  const closeParagraph = () => {
-    if (!paragraph.length) return;
-    const renderedLines = paragraph
-      .map((line) => renderInlineMarkdown(line.trim()))
-      .filter((line) => line.length > 0);
-    html.push(`<p>${renderedLines.join("<br>\n")}</p>`);
-    paragraph = [];
-  };
-  const closeList = () => {
-    if (!listType) return;
-    html.push(`</${listType}>`);
-    listType = "";
-    listClass = "";
-  };
-  const openList = (type, className = "") => {
-    if (listType === type && listClass === className) return;
-    closeParagraph();
-    closeList();
-    html.push(`<${type}${className ? ` class="${className}"` : ""}>`);
-    listType = type;
-    listClass = className;
-  };
-
-  for (const rawLine of lines) {
-    const line = rawLine.replace(/\s+$/g, "");
-    if (/^\s*```/.test(line)) {
-      if (codeLines) {
-        html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-        codeLines = null;
-      } else {
-        closeParagraph();
-        closeList();
-        codeLines = [];
-      }
-      continue;
-    }
-    if (codeLines) {
-      codeLines.push(rawLine);
-      continue;
-    }
-    if (!line.trim()) {
-      closeParagraph();
-      closeList();
-      continue;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      closeParagraph();
-      closeList();
-      const level = heading[1].length;
-      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      continue;
-    }
-    const task = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/);
-    if (task) {
-      openList("ul", "editor-preview-task-list");
-      const checked = task[1].toLowerCase() === "x" ? " checked" : "";
-      html.push(`<li class="editor-preview-task"><input type="checkbox" disabled${checked}>${renderInlineMarkdown(task[2])}</li>`);
-      continue;
-    }
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
-    if (unordered) {
-      openList("ul");
-      html.push(`<li>${renderInlineMarkdown(unordered[1])}</li>`);
-      continue;
-    }
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
-    if (ordered) {
-      openList("ol");
-      html.push(`<li>${renderInlineMarkdown(ordered[1])}</li>`);
-      continue;
-    }
-    const quote = line.match(/^\s*>\s?(.+)$/);
-    if (quote) {
-      closeParagraph();
-      closeList();
-      html.push(`<blockquote><p>${renderInlineMarkdown(quote[1])}</p></blockquote>`);
-      continue;
-    }
-    closeList();
-    paragraph.push(line);
-  }
-  closeParagraph();
-  closeList();
-  if (codeLines) html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-  return html.join("\n");
-}
-
-function renderInlineMarkdown(text) {
-  const tokens = [];
-  const token = (html) => {
-    const marker = `\u0000${tokens.length}\u0000`;
-    tokens.push(html);
-    return marker;
-  };
-  let value = String(text || "")
-    .replace(/`([^`]+)`/g, (_, code) => token(`<code>${escapeHtml(code)}</code>`))
-    .replace(/!\[\[([^\]]+)\]\]/g, (_, raw) => token(renderEditorObsidianEmbed(raw)))
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) =>
-      token(renderEditorMarkdownImage(src, alt)),
-    );
-  value = escapeHtml(value)
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
-    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/_([^_]+)_/g, "<em>$1</em>")
-    .replace(/\[\[([^\]]+)\]\]/g, '<span class="editor-preview-wikilink">$1</span>');
-  tokens.forEach((html, index) => {
-    value = value.replace(`\u0000${index}\u0000`, html);
-  });
-  return value;
-}
-
-function renderEditorObsidianEmbed(raw) {
-  const [targetPart, sizePart] = String(raw || "").split("|");
-  const target = targetPart.trim();
-  if (!target) return escapeHtml(raw);
-  const src = `/assets/images/${percentEncodePath(target)}`;
-  if (isEditorPdfTarget(target)) {
-    return `<span class="pdf-embed"><span class="pdf-icon" aria-hidden="true">PDF</span><span class="pdf-meta"><strong>${escapeHtml(target)}</strong><span>Open PDF</span></span><a class="pdf-link" href="${escapeHtmlAttr(src)}" target="_blank">Open PDF</a></span>`;
-  }
-  const attrs = editorImageSizeAttrs(sizePart);
-  return `<img data-src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(target)}" loading="lazy" decoding="async" fetchpriority="low"${attrs}>`;
-}
-
-function renderEditorMarkdownImage(src, alt = "") {
-  const cleanSrc = String(src || "").trim().replace(/^<|>$/g, "");
-  if (!cleanSrc) return "";
-  const attr = cleanSrc.startsWith("data:") ? "src" : "data-src";
-  return `<img ${attr}="${escapeHtmlAttr(cleanSrc)}" alt="${escapeHtmlAttr(alt)}" loading="lazy" decoding="async" fetchpriority="low">`;
-}
-
-function isEditorPdfTarget(target) {
-  return String(target || "")
-    .split("#")[0]
-    .split("?")[0]
-    .toLowerCase()
-    .endsWith(".pdf");
-}
-
-function editorImageSizeAttrs(size) {
-  const value = String(size || "").trim();
-  if (!value) return "";
-  const [width, height] = value.split(/[xX]/).map((part) => part.trim());
-  let attrs = "";
-  if (/^\d+$/.test(width || "")) attrs += ` width="${width}"`;
-  if (/^\d+$/.test(height || "")) attrs += ` height="${height}"`;
-  return attrs;
-}
-
-function percentEncodePath(path) {
-  return String(path || "")
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
 }
 
 function handleBeforeUnload(event) {
@@ -2645,7 +2563,8 @@ function closePageEditor() {
   editor.hidden = true;
   el("page-editor-shell").hidden = true;
   el("page-block-editor").innerHTML = "";
-  window.clearTimeout(state.editorPreviewTimer);
+  state.editorBlocks = [];
+  state.editorSourceHash = "";
   el("page-content").hidden = false;
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   setPageEditorStatus("");

@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260521-45";
+const CACHE_VERSION = "obr-offline-20260521-47";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = `${CACHE_VERSION}:images`;
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260521-softbreak-fix",
-  "/assets/app.js?v=20260521-softbreak-fix",
+  "/assets/style.css?v=20260521-server-blocks",
+  "/assets/app.js?v=20260521-server-blocks",
 ];
 
 self.addEventListener("install", (event) => {
@@ -87,6 +87,7 @@ self.addEventListener("fetch", (event) => {
 function isPageApi(url) {
   return (
     url.pathname === "/api/page" ||
+    url.pathname === "/api/page/edit" ||
     url.pathname === "/api/page/source" ||
     url.pathname === "/api/search"
   );
