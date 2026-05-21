@@ -477,10 +477,10 @@ fn normalize_rel(input: &str, extension: Option<&str>) -> Result<PathBuf> {
     if trimmed.contains('\0') {
         bail!("path contains null byte");
     }
-    if let Some(extension) = extension
-        && !trimmed.ends_with(extension)
-    {
-        trimmed.push_str(extension);
+    if let Some(extension) = extension {
+        if !trimmed.ends_with(extension) {
+            trimmed.push_str(extension);
+        }
     }
     let path = Path::new(&trimmed);
     if path.is_absolute() {
@@ -841,6 +841,14 @@ fn obsidian_embed_html(raw: &str) -> String {
     }
 
     let src = format!("/assets/images/{}", percent_encode_path(target));
+    if is_pdf_embed_target(target) {
+        return format!(
+            r#"<div class="pdf-embed"><div class="pdf-icon" aria-hidden="true">PDF</div><div class="pdf-meta"><strong>{}</strong><span>Preview may be blocked by mobile WebViews.</span></div><a class="pdf-link" href="{}" target="_blank">Open PDF</a></div>"#,
+            escape_html(target),
+            escape_html_attr(&src)
+        );
+    }
+
     let mut attrs = String::new();
     if let Some(size) = size {
         let (width, height) = split_embed_size(size);
@@ -858,6 +866,16 @@ fn obsidian_embed_html(raw: &str) -> String {
         escape_html_attr(target),
         attrs
     )
+}
+
+fn is_pdf_embed_target(target: &str) -> bool {
+    target
+        .split('#')
+        .next()
+        .unwrap_or(target)
+        .rsplit('.')
+        .next()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
 fn split_obsidian_target(raw: &str) -> (&str, Option<&str>) {
@@ -907,7 +925,9 @@ fn sanitize_rendered_html(rendered: &str) -> String {
     let mut cleaner = ammonia::Builder::new();
     cleaner
         .add_tags(&["input"])
-        .add_tag_attributes("a", &["data-page", "target"])
+        .add_tag_attributes("a", &["class", "data-page", "target"])
+        .add_tag_attributes("div", &["class", "aria-hidden"])
+        .add_tag_attributes("span", &["class"])
         .add_tag_attributes("img", &["loading", "decoding"])
         .add_tag_attributes("input", &["type", "checked", "disabled", "data-task-index"])
         .set_tag_attribute_value("img", "loading", "lazy")
@@ -1416,6 +1436,20 @@ mod tests {
         assert!(rendered.contains(r#"loading="lazy""#));
         assert!(rendered.contains(r#"decoding="async""#));
         assert!(rendered.contains(r#"width="250""#));
+    }
+
+    #[test]
+    fn render_markdown_html_embeds_pdfs_with_stable_link_card() {
+        let rendered = render_markdown_html("![[O'Reilly_Invoice_Annual Plan_2-18-2024.pdf]]");
+
+        assert!(rendered.contains(r#"<div class="pdf-embed">"#));
+        assert!(rendered.contains(r#"class="pdf-icon""#));
+        assert!(rendered.contains(">PDF</div>"));
+        assert!(rendered.contains(r#"<div class="pdf-meta">"#));
+        assert!(rendered.contains(r#"Reilly_Invoice_Annual Plan_2-18-2024.pdf"#));
+        assert!(rendered.contains(r#"<a class="pdf-link" href="/assets/images/O%27Reilly_Invoice_Annual%20Plan_2-18-2024.pdf" target="_blank""#));
+        assert!(!rendered.contains("<iframe"));
+        assert!(!rendered.contains("<img"));
     }
 
     #[test]

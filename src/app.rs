@@ -53,9 +53,10 @@ const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
     "style-src 'self'; ",
     "img-src 'self' data:; ",
     "connect-src 'self'; ",
-    "object-src 'none'; ",
+    "frame-src 'self'; ",
+    "object-src 'self'; ",
     "base-uri 'none'; ",
-    "frame-ancestors 'none'; ",
+    "frame-ancestors 'self'; ",
     "form-action 'self'"
 );
 
@@ -320,15 +321,22 @@ async fn require_auth(session: Session, request: Request<Body>, next: Next) -> R
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
+    let path = request.uri().path().to_string();
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-    headers.insert(
-        CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY_VALUE),
-    );
+    if !is_pdf_attachment_path(&path) {
+        headers.insert(
+            CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY_VALUE),
+        );
+    }
     response
+}
+
+fn is_pdf_attachment_path(path: &str) -> bool {
+    path.starts_with("/assets/images/") && path.to_ascii_lowercase().ends_with(".pdf")
 }
 
 impl AppState {

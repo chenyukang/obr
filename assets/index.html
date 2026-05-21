@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260520-edit-border">
+    <link rel="stylesheet" href="/assets/style.css?v=20260521-search-cache">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -112,6 +112,16 @@
             <img id="entry-preview" class="preview" hidden>
             <p id="entry-status" class="status" role="status" aria-live="polite" hidden></p>
           </form>
+          <section id="recent-panel" class="recent-panel" aria-label="Recent pages and edits" hidden>
+            <div class="recent-column">
+              <h2>Recent pages</h2>
+              <div id="recent-pages" class="recent-list"></div>
+            </div>
+            <div class="recent-column">
+              <h2>Recent edits</h2>
+              <div id="recent-edits" class="recent-list"></div>
+            </div>
+          </section>
         </section>
 
         <section id="find-view" class="view" hidden>
@@ -153,6 +163,17 @@
 
     </div>
 
+    <button id="toc-button" class="toc-button" type="button" aria-label="Open page outline" title="Outline" data-icon="list" hidden></button>
+    <div id="toc-panel" class="toc-panel" hidden>
+      <div class="toc-sheet" role="dialog" aria-modal="true" aria-labelledby="toc-title">
+        <div class="toc-header">
+          <h2 id="toc-title">Outline</h2>
+          <button id="toc-close" type="button" aria-label="Close outline" title="Close" data-icon="x"></button>
+        </div>
+        <div id="toc-list" class="toc-list"></div>
+      </div>
+    </div>
+
     <div id="image-lightbox" class="image-lightbox" role="dialog" aria-modal="true" aria-label="Image preview" hidden>
       <div class="image-lightbox-toolbar">
         <button id="image-lightbox-zoom-out" type="button" aria-label="Zoom out" title="Zoom out" data-icon="minus"></button>
@@ -166,6 +187,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260520-edit-scroll"></script>
+    <script src="/assets/app.js?v=20260521-search-cache"></script>
   </body>
 </html>

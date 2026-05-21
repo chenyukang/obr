@@ -43,6 +43,7 @@ const state = {
   imageObserver: null,
   imageQueue: [],
   imageActiveLoads: 0,
+  pageOutline: [],
 };
 
 const el = (id) => document.getElementById(id);
@@ -55,7 +56,7 @@ const LONG_PRESS_COPY_MS = 650;
 const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
 const TOAST_MS = 1800;
-const PING_TIMEOUT_MS = 3000;
+const PING_TIMEOUT_MS = 5000;
 const CONNECTION_RETRY_MS = 5000;
 const STARTUP_VERIFY_TIMEOUT_MS = 1200;
 const AUTH_OPTIONS_TIMEOUT_MS = 1200;
@@ -67,6 +68,9 @@ const MARKDOWN_IMAGE_MAX_ACTIVE_LOADS = 2;
 const MARKDOWN_IMAGE_ROOT_MARGIN = "900px 0px";
 const RECENT_PAGE_LIMIT = 20;
 const RECENT_PAGES_KEY = "obr.offline.recent-pages";
+const RECENT_EDITS_KEY = "obr.recent-edits";
+const SEARCH_CACHE_KEY = "obr.search-cache";
+const SEARCH_CACHE_LIMIT = 24;
 const OUTBOX_KEY = "obr.offline.outbox";
 const CLIENT_ID_KEY = "obr.client-id";
 
@@ -82,6 +86,7 @@ const ICONS = {
     '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
   command:
     '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0 0-6"></path>',
+  list: '<path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>',
   "list-checks":
     '<path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>',
   loader:
@@ -148,6 +153,11 @@ function bindEvents() {
   el("command-input").addEventListener("input", renderCommandPalette);
   el("command-input").addEventListener("keydown", handleCommandInputKeydown);
   el("command-list").addEventListener("click", handleCommandListClick);
+  el("recent-panel").addEventListener("click", handleRecentPanelClick);
+  el("toc-button").addEventListener("click", openTocPanel);
+  el("toc-close").addEventListener("click", closeTocPanel);
+  el("toc-panel").addEventListener("click", handleTocPanelClick);
+  el("toc-list").addEventListener("click", handleTocListClick);
   bindImageLightboxEvents();
   installLongPressCopy(el("page-content"));
   installLongPressCopy(el("search-results"));
@@ -548,6 +558,7 @@ function rememberPage(data, requestedPath = "", source = null) {
     next,
     ...pages.filter((page) => page.file !== data.file),
   ]);
+  renderRecentPanel();
 }
 
 function rememberPageSource(file, source) {
@@ -565,6 +576,7 @@ function rememberPageSource(file, source) {
       },
       ...pages,
     ]);
+    renderRecentPanel();
     return;
   }
   pages[index] = {
@@ -573,6 +585,27 @@ function rememberPageSource(file, source) {
     savedAt: Date.now(),
   };
   writeRecentPages(pages);
+  renderRecentPanel();
+}
+
+function readRecentEdits() {
+  return readJson(RECENT_EDITS_KEY, []).filter((page) => page?.file);
+}
+
+function rememberRecentEdit(file) {
+  if (!file || file === "NoPage") return;
+  const edits = readRecentEdits();
+  const cached = findCachedPage(file);
+  const next = {
+    file,
+    savedAt: Date.now(),
+    source: cached?.source || "",
+  };
+  writeJson(
+    RECENT_EDITS_KEY,
+    [next, ...edits.filter((page) => page.file !== file)].slice(0, RECENT_PAGE_LIMIT),
+  );
+  renderRecentPanel();
 }
 
 function findCachedPage(path) {
@@ -621,6 +654,45 @@ function renderCachedSearchResults(keyword = "") {
     )
     .join("");
   el("search-results").innerHTML = `<p class="offline-note">Offline recent pages</p><ul>${items}</ul>`;
+}
+
+function readSearchCache() {
+  return readJson(SEARCH_CACHE_KEY, []).filter(
+    (item) =>
+      item &&
+      typeof item.key === "string" &&
+      typeof item.html === "string" &&
+      Number.isInteger(item.page),
+  );
+}
+
+function searchCacheKey(keyword, page) {
+  return `${keyword.trim().toLowerCase()}\u0000${page}`;
+}
+
+function findCachedSearchResults(keyword, page) {
+  const key = searchCacheKey(keyword, page);
+  return readSearchCache().find((item) => item.key === key) || null;
+}
+
+function rememberSearchResults(keyword, page, html) {
+  const key = searchCacheKey(keyword, page);
+  const cache = readSearchCache();
+  const next = {
+    key,
+    keyword: keyword.trim(),
+    page,
+    html,
+    savedAt: Date.now(),
+  };
+  try {
+    writeJson(
+      SEARCH_CACHE_KEY,
+      [next, ...cache.filter((item) => item.key !== key)].slice(0, SEARCH_CACHE_LIMIT),
+    );
+  } catch (error) {
+    console.warn("Could not cache search results.", error);
+  }
 }
 
 function readOutbox() {
@@ -876,7 +948,12 @@ async function request(path, options = {}) {
         ...(options.headers || {}),
       },
     });
-    setConnectionStatus(response.headers.get("x-obr-offline-cache") !== "1");
+    const fromOfflineCache = response.headers.get("x-obr-offline-cache") === "1";
+    if (fromOfflineCache) {
+      void checkConnectivity({ sync: true, allowHidden: true });
+    } else if (response.ok) {
+      setConnectionStatus(true);
+    }
   } catch (error) {
     if (error?.name !== "AbortError") setConnectionStatus(false);
     throw error;
@@ -1226,6 +1303,7 @@ async function showView(name, options = {}) {
     view.hidden = true;
   }
   if (name === "todo") {
+    clearPageOutline();
     state.lastListView = "todo";
     el("todo-view").hidden = false;
     await loadTodo();
@@ -1234,6 +1312,7 @@ async function showView(name, options = {}) {
     return;
   }
   if (name === "find") {
+    clearPageOutline();
     state.lastListView = "find";
     el("find-view").hidden = false;
     updateSearchClear();
@@ -1247,7 +1326,9 @@ async function showView(name, options = {}) {
     if (updateHistory) pushAppHistory({ view: "find" });
     return;
   }
+  clearPageOutline();
   el("day-view").hidden = false;
+  renderRecentPanel();
   if (restoreScroll) restoreViewScroll("day");
   if (updateHistory) pushAppHistory({ view: "day" });
 }
@@ -1478,6 +1559,8 @@ async function search(options = {}) {
   state.searchRequestId = requestId;
   const controller = new AbortController();
   state.searchController = controller;
+  const cached = append ? null : findCachedSearchResults(keyword, page);
+  if (cached) renderSearchResults(cached.html);
   setSearchLoading(true);
   try {
     const response = await request(
@@ -1486,13 +1569,20 @@ async function search(options = {}) {
     );
     const html = await response.text();
     if (requestId !== state.searchRequestId) return;
-    renderSearchResults(html, { append });
+    rememberSearchResults(keyword, page, html);
+    if (!cached || cached.html !== html) {
+      renderSearchResults(html, { append });
+    }
     state.searchPage = page;
   } catch (error) {
     if (error?.name === "AbortError" || requestId !== state.searchRequestId) return;
     console.error(error);
     if (shouldQueueOffline(error)) {
-      renderCachedSearchResults(keyword);
+      if (!cached) renderCachedSearchResults(keyword);
+      return;
+    }
+    if (cached) {
+      showToast("Showing cached search.");
       return;
     }
     el("search-results").innerHTML = '<p class="empty">Search failed.</p>';
@@ -1578,6 +1668,40 @@ function renderTodoHtml(html, emptyMessage) {
     el("todo-list"),
     html.trim() ? html : `<p class="empty">${escapeHtml(emptyMessage)}</p>`,
   );
+}
+
+function renderRecentPanel() {
+  const pages = readRecentPages().slice(0, 5);
+  const edits = readRecentEdits().slice(0, 5);
+  el("recent-pages").innerHTML = recentItemsHtml(pages, "No recent pages.");
+  el("recent-edits").innerHTML = recentItemsHtml(edits, "No recent edits.");
+  el("recent-panel").hidden = !pages.length && !edits.length;
+}
+
+function recentItemsHtml(items, emptyMessage) {
+  if (!items.length) return `<p class="empty">${escapeHtml(emptyMessage)}</p>`;
+  return items
+    .map((item) => {
+      const title = pageDisplayName(item.file);
+      const meta = item.savedAt ? formatTime(item.savedAt) : "";
+      return `<button class="recent-item" type="button" data-page="${escapeHtmlAttr(item.file)}" title="${escapeHtmlAttr(item.file)}"><span>${escapeHtml(title)}</span><small>${escapeHtml(meta)}</small></button>`;
+    })
+    .join("");
+}
+
+async function handleRecentPanelClick(event) {
+  const button = event.target.closest("[data-page]");
+  if (!button) return;
+  event.preventDefault();
+  await fetchPage(button.dataset.page, "find");
+}
+
+function pageDisplayName(file) {
+  return String(file || "")
+    .replace(/\.md$/, "")
+    .split("/")
+    .filter(Boolean)
+    .pop() || file;
 }
 
 async function addTodo() {
@@ -1733,6 +1857,7 @@ function showPage(title, html, sourceView, options = {}) {
   }
   el("page-title").textContent = title;
   setDeferredMarkdownHtml(el("page-content"), html);
+  updatePageOutline();
   highlightPageContent(state.currentHighlightKeyword);
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
@@ -1752,6 +1877,95 @@ function showPage(title, html, sourceView, options = {}) {
       highlightKeyword: state.currentHighlightKeyword,
     });
   }
+}
+
+function clearPageOutline() {
+  state.pageOutline = [];
+  el("toc-button").hidden = true;
+  closeTocPanel();
+}
+
+function updatePageOutline() {
+  const content = el("page-content");
+  const headings = [...content.querySelectorAll("h1, h2, h3")].filter((heading) =>
+    heading.textContent.trim(),
+  );
+  const usedIds = new Set();
+  state.pageOutline = headings.map((heading, index) => {
+    let baseId = heading.id || `section-${index + 1}`;
+    let id = baseId;
+    let suffix = 2;
+    while (usedIds.has(id)) {
+      id = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    heading.id = id;
+    usedIds.add(id);
+    return {
+      id: heading.id,
+      level: Number(heading.tagName.slice(1)),
+      text: heading.textContent.trim(),
+    };
+  });
+  const show = state.pageOutline.length >= 2;
+  el("toc-button").hidden = !show || state.view !== "page" || !el("page-editor").hidden;
+  if (!show) closeTocPanel();
+}
+
+function openTocPanel() {
+  if (!state.pageOutline.length) return;
+  renderTocPanel();
+  el("toc-panel").hidden = false;
+}
+
+function closeTocPanel() {
+  const panel = el("toc-panel");
+  if (panel) panel.hidden = true;
+}
+
+function renderTocPanel() {
+  el("toc-list").innerHTML = state.pageOutline
+    .map(
+      (item) => `
+        <button class="toc-item toc-level-${item.level}" type="button" data-heading-id="${escapeHtmlAttr(item.id)}">
+          <span>${escapeHtml(item.text)}</span>
+        </button>
+      `,
+    )
+    .join("");
+}
+
+function handleTocPanelClick(event) {
+  if (event.target === el("toc-panel")) closeTocPanel();
+}
+
+function handleTocListClick(event) {
+  const button = event.target.closest("[data-heading-id]");
+  if (!button) return;
+  const target = document.getElementById(button.dataset.headingId);
+  if (!target) return;
+  closeTocPanel();
+  scrollToHeading(target);
+}
+
+function scrollToHeading(target) {
+  const top =
+    target.getBoundingClientRect().top + window.scrollY - stickyHeaderOffset();
+  window.scrollTo({
+    top: Math.max(0, top),
+    behavior: "smooth",
+  });
+}
+
+function stickyHeaderOffset() {
+  const fixedTopElements = [document.querySelector(".topbar"), el("update-banner")];
+  const bottom = fixedTopElements.reduce((max, element) => {
+    if (!element || element.hidden) return max;
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.top >= window.innerHeight) return max;
+    return Math.max(max, rect.bottom);
+  }, 0);
+  return Math.ceil(bottom + 12);
 }
 
 async function toggleEdit() {
@@ -1778,6 +1992,8 @@ async function toggleEdit() {
     editor.value = draft ?? state.currentContent;
     editor.hidden = false;
     content.hidden = true;
+    el("toc-button").hidden = true;
+    closeTocPanel();
     setPageEditorStatus(draft === null ? "" : "Draft restored.");
     setButtonIcon(button, "save", "Save");
     return;
@@ -1802,9 +2018,11 @@ async function toggleEdit() {
     state.currentContentLoaded = true;
     state.currentFile = data.file || state.currentFile;
     rememberPageSource(state.currentFile, state.currentContent);
+    rememberRecentEdit(state.currentFile);
     replaceAppHistory(currentAppHistoryEntry());
     clearPageDraft(state.currentFile);
     setDeferredMarkdownHtml(content, data.html || "");
+    updatePageOutline();
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     content.hidden = false;
@@ -1822,7 +2040,9 @@ async function toggleEdit() {
         replaceAppHistory(currentAppHistoryEntry());
         clearPageDraft(state.currentFile);
         rememberPageSource(state.currentFile, payload.content);
+        rememberRecentEdit(state.currentFile);
         content.innerHTML = offlineSourcePreview(payload.content);
+        updatePageOutline();
         editor.hidden = true;
         content.hidden = false;
         restoreReadingPositionAfterEdit(restoreFile, restoreY);
@@ -2239,6 +2459,14 @@ function buildCommandItems() {
       id: `recent:${page.file}`,
       label: page.file,
       hint: "Recent page",
+      run: () => fetchPage(page.file, "find"),
+    });
+  }
+  for (const page of readRecentEdits().slice(0, 6)) {
+    commands.push({
+      id: `recent-edit:${page.file}`,
+      label: page.file,
+      hint: "Recent edit",
       run: () => fetchPage(page.file, "find"),
     });
   }
