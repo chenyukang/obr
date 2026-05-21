@@ -1378,6 +1378,7 @@ async function showView(name, options = {}) {
   }
   if (name === "todo") {
     clearPageOutline();
+    updateReadingProgress();
     state.lastListView = "todo";
     el("todo-view").hidden = false;
     await loadTodo();
@@ -1387,6 +1388,7 @@ async function showView(name, options = {}) {
   }
   if (name === "find") {
     clearPageOutline();
+    updateReadingProgress();
     state.lastListView = "find";
     el("find-view").hidden = false;
     updateSearchClear();
@@ -1401,6 +1403,7 @@ async function showView(name, options = {}) {
     return;
   }
   clearPageOutline();
+  updateReadingProgress();
   el("day-view").hidden = false;
   renderRecentPanel();
   if (restoreScroll) restoreViewScroll("day");
@@ -1941,11 +1944,13 @@ function showPage(title, html, sourceView, options = {}) {
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
+  updateReadingProgress();
   if (title === "NoPage") {
     window.scrollTo(0, 0);
   } else if (restoreReading) {
     restoreReadingPosition(state.currentFile);
   }
+  window.requestAnimationFrame(updateReadingProgress);
   if (updateHistory) {
     pushAppHistory({
       view: "page",
@@ -2109,6 +2114,7 @@ async function toggleEdit() {
     content.hidden = true;
     el("toc-button").hidden = true;
     closeTocPanel();
+    updateReadingProgress();
     setPageEditorStatus(draft === null ? "" : "Draft restored.");
     setButtonIcon(button, "save", "Save");
     return;
@@ -2141,6 +2147,7 @@ async function toggleEdit() {
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     content.hidden = false;
+    updateReadingProgress();
     restoreReadingPositionAfterEdit(restoreFile, restoreY);
     setPageEditorStatus("");
     showToast("Page synced to file.");
@@ -2160,6 +2167,7 @@ async function toggleEdit() {
         updatePageOutline();
         editor.hidden = true;
         content.hidden = false;
+        updateReadingProgress();
         restoreReadingPositionAfterEdit(restoreFile, restoreY);
         setPageEditorStatus("");
         showToast("Page waiting to sync.");
@@ -2299,8 +2307,30 @@ function setPageEditorStatus(message) {
 
 function handleWindowScroll() {
   updateActiveOutline();
+  updateReadingProgress();
   window.clearTimeout(state.scrollTimer);
   state.scrollTimer = window.setTimeout(saveCurrentScrollPosition, SCROLL_SAVE_MS);
+}
+
+function updateReadingProgress() {
+  const progress = el("reading-progress");
+  const bar = progress?.firstElementChild;
+  if (!progress || !bar) return;
+  if (state.view !== "page" || !el("page-editor").hidden) {
+    progress.hidden = true;
+    bar.style.transform = "scaleX(0)";
+    return;
+  }
+  const scrollable =
+    document.documentElement.scrollHeight - window.innerHeight;
+  if (scrollable <= 24) {
+    progress.hidden = true;
+    bar.style.transform = "scaleX(0)";
+    return;
+  }
+  const value = clamp(window.scrollY / scrollable, 0, 1);
+  progress.hidden = false;
+  bar.style.transform = `scaleX(${value})`;
 }
 
 function saveCurrentScrollPosition() {

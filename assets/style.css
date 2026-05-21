@@ -227,6 +227,26 @@ nav {
   box-shadow: 0 10px 28px rgb(23 32 38 / 18%);
 }
 
+.reading-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 95;
+  height: 3px;
+  pointer-events: none;
+}
+
+.reading-progress span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--green);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 80ms linear;
+}
+
 .outbox-panel {
   position: fixed;
   top: 74px;
