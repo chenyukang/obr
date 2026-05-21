@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260521-61";
+const CACHE_VERSION = "obr-offline-20260521-62";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = `${CACHE_VERSION}:images`;
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260521-image-preview-cache",
-  "/assets/app.js?v=20260521-image-preview-cache",
+  "/assets/style.css?v=20260521-image-routes",
+  "/assets/app.js?v=20260521-image-routes",
 ];
 
 self.addEventListener("install", (event) => {
@@ -73,10 +73,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (
-    url.pathname.startsWith("/assets/image-preview/") ||
-    url.pathname.startsWith("/assets/images/")
-  ) {
+  if (url.pathname.startsWith("/image-preview/") || url.pathname.startsWith("/images/")) {
     event.respondWith(cacheFirst(request, IMAGE_CACHE, IMAGE_CACHE_LIMIT));
     return;
   }

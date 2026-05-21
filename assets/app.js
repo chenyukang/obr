@@ -3012,12 +3012,13 @@ function renderEditorObsidianEmbed(raw) {
   const [targetPart, sizePart] = String(raw || "").split("|");
   const target = targetPart.trim();
   if (!target) return escapeHtml(raw);
-  const src = `/assets/images/${percentEncodePath(target)}`;
+  const fullSrc = `/images/${percentEncodePath(target)}`;
   if (isEditorPdfTarget(target)) {
-    return `<span class="pdf-embed"><span class="pdf-icon" aria-hidden="true">PDF</span><span class="pdf-meta"><strong>${escapeHtml(target)}</strong><span>Open PDF</span></span><a class="pdf-link" href="${escapeHtmlAttr(src)}" target="_blank">Open PDF</a></span>`;
+    return `<span class="pdf-embed"><span class="pdf-icon" aria-hidden="true">PDF</span><span class="pdf-meta"><strong>${escapeHtml(target)}</strong><span>Open PDF</span></span><a class="pdf-link" href="${escapeHtmlAttr(fullSrc)}" target="_blank">Open PDF</a></span>`;
   }
+  const previewSrc = `/image-preview/${percentEncodePath(target)}?w=900`;
   const attrs = editorImageSizeAttrs(sizePart);
-  return `<img data-src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(target)}" loading="lazy" decoding="async" fetchpriority="low"${attrs}>`;
+  return `<img data-src="${escapeHtmlAttr(previewSrc)}" data-full-src="${escapeHtmlAttr(fullSrc)}" alt="${escapeHtmlAttr(target)}" loading="lazy" decoding="async" fetchpriority="low"${attrs}>`;
 }
 
 function renderEditorMarkdownImage(src, alt = "") {

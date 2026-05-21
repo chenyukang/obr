@@ -854,7 +854,7 @@ fn obsidian_embed_html(raw: &str) -> String {
     }
 
     let encoded_target = percent_encode_path(target);
-    let full_src = format!("/assets/images/{encoded_target}");
+    let full_src = format!("/images/{encoded_target}");
     if is_pdf_embed_target(target) {
         return format!(
             r#"<div class="pdf-embed"><div class="pdf-icon" aria-hidden="true">PDF</div><div class="pdf-meta"><strong>{}</strong><span>Preview may be blocked by mobile WebViews.</span></div><a class="pdf-link" href="{}" target="_blank">Open PDF</a></div>"#,
@@ -875,7 +875,7 @@ fn obsidian_embed_html(raw: &str) -> String {
             let _ = write!(attrs, r#" height="{height}""#);
         }
     }
-    let preview_src = format!("/assets/image-preview/{encoded_target}?w={preview_width}");
+    let preview_src = format!("/image-preview/{encoded_target}?w={preview_width}");
 
     format!(
         r#"<img src="{}" data-full-src="{}" alt="{}" loading="lazy" decoding="async"{}>"#,
@@ -1450,8 +1450,8 @@ mod tests {
         assert!(rendered.contains(r##"href="#"##));
         assert!(rendered.contains(r#"data-page="People/可可""#));
         assert!(rendered.contains(">可可</a>"));
-        assert!(rendered.contains(r#"<img src="/assets/image-preview/hello%20world.jpg?w=500""#));
-        assert!(rendered.contains(r#"data-full-src="/assets/images/hello%20world.jpg""#));
+        assert!(rendered.contains(r#"<img src="/image-preview/hello%20world.jpg?w=500""#));
+        assert!(rendered.contains(r#"data-full-src="/images/hello%20world.jpg""#));
         assert!(rendered.contains(r#"loading="lazy""#));
         assert!(rendered.contains(r#"decoding="async""#));
         assert!(rendered.contains(r#"width="250""#));
@@ -1466,7 +1466,7 @@ mod tests {
         assert!(rendered.contains(">PDF</div>"));
         assert!(rendered.contains(r#"<div class="pdf-meta">"#));
         assert!(rendered.contains(r#"Reilly_Invoice_Annual Plan_2-18-2024.pdf"#));
-        assert!(rendered.contains(r#"<a class="pdf-link" href="/assets/images/O%27Reilly_Invoice_Annual%20Plan_2-18-2024.pdf" target="_blank""#));
+        assert!(rendered.contains(r#"<a class="pdf-link" href="/images/O%27Reilly_Invoice_Annual%20Plan_2-18-2024.pdf" target="_blank""#));
         assert!(!rendered.contains("<iframe"));
         assert!(!rendered.contains("<img"));
     }

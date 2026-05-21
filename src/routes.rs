@@ -760,7 +760,11 @@ pub(crate) async fn post_entry(
 ) -> AppResult<Response> {
     let now = Local::now();
     let date = now.format("%Y-%m-%d").to_string();
-    if entry_already_synced(&state, &body.page, body.sync_id.as_deref(), &date)? {
+    let dedupe = body
+        .sync_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
+    if dedupe && entry_already_contains_body(&state, &body.page, &body.links, &body.text, &date)? {
         return Ok("ok".into_response());
     }
     let image_name = if body.image.trim().is_empty() {
@@ -775,7 +779,7 @@ pub(crate) async fn post_entry(
     write_entry(
         state,
         EntryPayload {
-            sync_id: body.sync_id,
+            dedupe,
             page: body.page,
             links: body.links,
             text: body.text,
@@ -797,12 +801,19 @@ pub(crate) async fn post_entry_multipart(
     let mut image_data = None;
     let mut image_bytes = 0usize;
     let mut image_type = String::new();
-    let mut sync_id = None;
+    let mut dedupe = false;
 
     while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
-            "sync_id" => sync_id = Some(field.text().await.map_err(anyhow::Error::from)?),
+            "sync_id" => {
+                dedupe = !field
+                    .text()
+                    .await
+                    .map_err(anyhow::Error::from)?
+                    .trim()
+                    .is_empty()
+            }
             "page" => page = field.text().await.map_err(anyhow::Error::from)?,
             "links" => links = field.text().await.map_err(anyhow::Error::from)?,
             "text" => text = field.text().await.map_err(anyhow::Error::from)?,
@@ -834,7 +845,7 @@ pub(crate) async fn post_entry_multipart(
         }
     }
 
-    if entry_already_synced(&state, &page, sync_id.as_deref(), &date)? {
+    if dedupe && entry_already_contains_body(&state, &page, &links, &text, &date)? {
         info!(
             api = "entry_multipart",
             page = %page,
@@ -861,7 +872,7 @@ pub(crate) async fn post_entry_multipart(
     let response = write_entry(
         state,
         EntryPayload {
-            sync_id,
+            dedupe,
             page: page.clone(),
             links,
             text,
@@ -880,7 +891,7 @@ pub(crate) async fn post_entry_multipart(
 }
 
 struct EntryPayload {
-    sync_id: Option<String>,
+    dedupe: bool,
     page: String,
     links: String,
     text: String,
@@ -901,51 +912,24 @@ fn normalize_multipart_image_type(content_type: &str, file_name: Option<&str>) -
     }
 }
 
-fn entry_sync_marker(sync_id: Option<&str>) -> Option<String> {
-    let sync_id = sync_id?.trim();
-    if sync_id.is_empty() || sync_id.len() > 96 {
-        return None;
-    }
-    if !sync_id
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-    {
-        return None;
-    }
-    Some(format!("<!-- obr-entry:{sync_id} -->"))
-}
-
-fn entry_already_synced(
+fn entry_already_contains_body(
     state: &AppState,
     page: &str,
-    sync_id: Option<&str>,
+    links: &str,
+    text: &str,
     date: &str,
 ) -> AppResult<bool> {
-    let Some(marker) = entry_sync_marker(sync_id) else {
-        return Ok(false);
-    };
-    let page = page.trim();
-    let path = if page.is_empty() {
-        state
-            .config
-            .vault_path
-            .join("Daily")
-            .join(format!("{date}.md"))
-    } else {
-        let rel = normalize_markdown_rel(&format!("Zero/{page}"), true)?;
-        state.config.vault_path.join(rel)
-    };
+    let path = entry_path(state, page, date)?;
     ensure_inside(&state.config.vault_path, &path)?;
-    Ok(fs::read_to_string(&path)
-        .map(|content| content.contains(&marker))
-        .unwrap_or(false))
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let body = entry_body_markdown(&state.config.vault_path, page, links, text)?;
+    Ok(entry_body_already_exists(&existing, &body))
 }
 
 fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> {
     let now = Local::now();
     let date = now.format("%Y-%m-%d").to_string();
     let time = now.format("%H:%M").to_string();
-    let sync_marker = entry_sync_marker(body.sync_id.as_deref());
 
     let page = body.page.trim();
     if page.is_empty()
@@ -956,26 +940,15 @@ fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> 
         return Ok((StatusCode::BAD_REQUEST, "empty post").into_response());
     }
 
-    let path = if page.is_empty() {
-        state
-            .config
-            .vault_path
-            .join("Daily")
-            .join(format!("{date}.md"))
-    } else {
-        let rel = normalize_markdown_rel(&format!("Zero/{page}"), true)?;
-        state.config.vault_path.join(rel)
-    };
+    let path = entry_path(&state, page, &date)?;
     ensure_inside(&state.config.vault_path, &path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let mut existing = fs::read_to_string(&path).unwrap_or_default();
-    if sync_marker
-        .as_ref()
-        .is_some_and(|marker| existing.contains(marker))
-    {
+    let entry_body = entry_body_markdown(&state.config.vault_path, page, &body.links, &body.text)?;
+    if body.dedupe && entry_body_already_exists(&existing, &entry_body) {
         return Ok("ok".into_response());
     }
     if page.is_empty() && existing.is_empty() {
@@ -988,34 +961,11 @@ fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> 
         format!("\n### {date} {time}")
     };
 
-    if !body.links.trim().is_empty() {
-        let links = body
-            .links
-            .split(',')
-            .map(str::trim)
-            .filter(|link| !link.is_empty())
-            .map(|link| format!("[[{link}]]"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !links.is_empty() {
-            appended.push_str(&format!("\nLinks: {links}"));
-        }
-    }
-
-    let linked_text = auto_link_note_titles(&state.config.vault_path, body.text.trim())?;
-    let text = if page == "todo" {
-        format!("- [ ] {linked_text}")
-    } else {
-        linked_text
-    };
     appended.push('\n');
-    appended.push_str(&text);
+    appended.push_str(&entry_body);
 
     if let Some(image_name) = body.image_name {
         appended.push_str(&format!("\n\n![[{image_name}|250]]\n"));
-    }
-    if let Some(marker) = sync_marker {
-        appended.push_str(&format!("\n{marker}"));
     }
 
     let content = if page == "todo" {
@@ -1029,24 +979,67 @@ fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> 
     Ok("ok".into_response())
 }
 
+fn entry_path(state: &AppState, page: &str, date: &str) -> AppResult<PathBuf> {
+    let page = page.trim();
+    if page.is_empty() {
+        return Ok(state
+            .config
+            .vault_path
+            .join("Daily")
+            .join(format!("{date}.md")));
+    }
+    let rel = normalize_markdown_rel(&format!("Zero/{page}"), true)?;
+    Ok(state.config.vault_path.join(rel))
+}
+
+fn entry_body_markdown(
+    vault_path: &Path,
+    page: &str,
+    links: &str,
+    text: &str,
+) -> AppResult<String> {
+    let mut body = String::new();
+    let links = links
+        .split(',')
+        .map(str::trim)
+        .filter(|link| !link.is_empty())
+        .map(|link| format!("[[{link}]]"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !links.is_empty() {
+        body.push_str(&format!("Links: {links}\n"));
+    }
+
+    let linked_text = auto_link_note_titles(vault_path, text.trim())?;
+    let text = if page.trim() == "todo" {
+        format!("- [ ] {linked_text}")
+    } else {
+        linked_text
+    };
+    body.push_str(&text);
+    Ok(body)
+}
+
+fn entry_body_already_exists(existing: &str, body: &str) -> bool {
+    let body = body.trim();
+    !body.is_empty() && existing.contains(body)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use super::{ensure_image_preview, entry_sync_marker};
+    use super::{ensure_image_preview, entry_body_already_exists};
 
     #[test]
-    fn entry_sync_marker_accepts_queue_ids() {
-        assert_eq!(
-            entry_sync_marker(Some("1779372323121-abcd_ef")),
-            Some("<!-- obr-entry:1779372323121-abcd_ef -->".to_string())
-        );
-    }
-
-    #[test]
-    fn entry_sync_marker_rejects_comment_breakout() {
-        assert_eq!(entry_sync_marker(Some("bad-->id")), None);
-        assert_eq!(entry_sync_marker(Some("")), None);
+    fn entry_body_duplicate_check_uses_visible_content() {
+        let existing = "\n## 12:30\nLinks: [[A]] [[B]]\nhello world\n";
+        assert!(entry_body_already_exists(
+            existing,
+            "Links: [[A]] [[B]]\nhello world"
+        ));
+        assert!(!entry_body_already_exists(existing, ""));
+        assert!(!entry_body_already_exists(existing, "different"));
     }
 
     #[test]

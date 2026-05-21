@@ -271,8 +271,8 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/entry", post(routes::post_entry))
         .route("/api/entry/multipart", post(routes::post_entry_multipart))
         .route("/api/mark", post(routes::mark_todo))
-        .route("/assets/image-preview/{*path}", get(routes::image_preview))
-        .route("/assets/images/{*path}", get(routes::image))
+        .route("/image-preview/{*path}", get(routes::image_preview))
+        .route("/images/{*path}", get(routes::image))
         .route_layer(middleware::from_fn(require_auth));
 
     public
@@ -338,7 +338,7 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
 }
 
 fn is_pdf_attachment_path(path: &str) -> bool {
-    path.starts_with("/assets/images/") && path.to_ascii_lowercase().ends_with(".pdf")
+    path.starts_with("/images/") && path.to_ascii_lowercase().ends_with(".pdf")
 }
 
 impl AppState {
