@@ -417,7 +417,7 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin: 0 0 10px;
+  margin: 10px 0 0;
   border: 1px solid #f0d8a8;
   border-radius: 12px;
   background: #fff8e8;
@@ -1478,6 +1478,59 @@ a {
 
 .image-lightbox-img.is-dragging {
   cursor: grabbing;
+}
+
+.confirm-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: end center;
+  padding: 20px;
+  background: rgb(16 24 29 / 18%);
+  backdrop-filter: blur(2px);
+}
+
+.confirm-panel[hidden] {
+  display: none;
+}
+
+.confirm-sheet {
+  width: min(460px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: 0 18px 60px rgb(27 37 43 / 20%);
+  padding: 18px;
+}
+
+.confirm-sheet h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.confirm-sheet p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.confirm-actions button {
+  min-height: 40px;
+  padding: 8px 14px;
+}
+
+.confirm-actions .danger {
+  border-color: #f0c5bd;
+  background: #fff2ef;
+  color: #9d2d1d;
 }
 
 .toast {

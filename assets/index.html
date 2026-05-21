@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260521-discard-draft">
+    <link rel="stylesheet" href="/assets/style.css?v=20260521-draft-bottom">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -147,13 +147,13 @@
             <h2 id="page-title"></h2>
             <div id="page-content" class="markdown"></div>
             <div id="page-editor-shell" class="page-editor-shell" hidden>
+              <div id="page-block-editor" class="page-block-editor markdown" aria-label="Markdown block editor"></div>
+              <label class="sr-only" for="page-editor">Page editor source</label>
+              <textarea id="page-editor" rows="22" aria-describedby="page-editor-status" hidden></textarea>
               <div id="page-draft-banner" class="page-draft-banner" role="status" hidden>
                 <span>Restored an unsaved draft for this page.</span>
                 <button id="discard-page-draft" type="button" data-icon="trash-2">Discard draft</button>
               </div>
-              <div id="page-block-editor" class="page-block-editor markdown" aria-label="Markdown block editor"></div>
-              <label class="sr-only" for="page-editor">Page editor source</label>
-              <textarea id="page-editor" rows="22" aria-describedby="page-editor-status" hidden></textarea>
             </div>
             <p id="page-editor-status" class="status" role="status" aria-live="polite" hidden></p>
           </article>
@@ -185,7 +185,18 @@
       </div>
     </div>
 
+    <div id="confirm-panel" class="confirm-panel" hidden>
+      <div class="confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+        <h2 id="confirm-title">Unsaved edits</h2>
+        <p id="confirm-message">You have unsaved page edits.</p>
+        <div class="confirm-actions">
+          <button id="confirm-cancel" type="button">Keep editing</button>
+          <button id="confirm-ok" class="danger" type="button">Leave without saving</button>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260521-discard-draft"></script>
+    <script src="/assets/app.js?v=20260521-draft-bottom"></script>
   </body>
 </html>

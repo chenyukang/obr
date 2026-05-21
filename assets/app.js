@@ -53,11 +53,10 @@ const state = {
   pagePrefetchSeen: new Set(),
   pageOutline: [],
   currentOutlineId: "",
+  confirmResolve: null,
 };
 
 const el = (id) => document.getElementById(id);
-const PAGE_EDITOR_LEAVE_MESSAGE =
-  "You have unsaved page edits. Leave this page?";
 const MAX_IMAGE_DATA_URL_BYTES = 6 * 1024 * 1024;
 const MAX_IMAGE_DIMENSIONS = [1920, 1440, 1080];
 const IMAGE_JPEG_QUALITIES = [0.82, 0.72, 0.62];
@@ -193,6 +192,7 @@ function bindEvents() {
   el("page-block-editor").addEventListener("click", handlePageBlockEditorClick);
   el("page-block-editor").addEventListener("focusout", handlePageBlockEditorFocusOut);
   el("discard-page-draft").addEventListener("click", discardRestoredPageDraft);
+  bindConfirmPanelEvents();
 
   el("search-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -346,7 +346,7 @@ async function handleAppPopState(event) {
   const target = event.state;
   if (!target?.obr) return;
 
-  if (!prepareToLeavePageEditor()) {
+  if (!(await prepareToLeavePageEditor())) {
     pushAppHistory(currentAppHistoryEntry());
     return;
   }
@@ -1327,7 +1327,7 @@ function uint8ArrayToBase64url(bytes) {
 }
 
 async function logout() {
-  if (!prepareToLeavePageEditor()) return;
+  if (!(await prepareToLeavePageEditor())) return;
   await fetch("/api/logout", {
     method: "POST",
     credentials: "same-origin",
@@ -1375,7 +1375,7 @@ async function refreshPasskeyRegisterButton() {
 }
 
 async function showView(name, options = {}) {
-  if (!prepareToLeavePageEditor()) return;
+  if (!(await prepareToLeavePageEditor())) return;
   const { focusSearch = true, restoreScroll = true, updateHistory = true } = options;
   saveCurrentScrollPosition();
   state.view = name;
@@ -1837,7 +1837,7 @@ async function fetchPage(
   highlightKeyword = "",
   options = {},
 ) {
-  if (!prepareToLeavePageEditor()) return;
+  if (!(await prepareToLeavePageEditor())) return;
   const { updateHistory = true, queryType = "" } = options;
   state.pageController?.abort();
   const requestId = state.pageRequestId + 1;
@@ -2645,6 +2645,43 @@ function percentEncodePath(path) {
     .join("/");
 }
 
+function bindConfirmPanelEvents() {
+  el("confirm-cancel").addEventListener("click", () => resolveConfirmPanel(false));
+  el("confirm-ok").addEventListener("click", () => resolveConfirmPanel(true));
+  el("confirm-panel").addEventListener("click", (event) => {
+    if (event.target === el("confirm-panel")) resolveConfirmPanel(false);
+  });
+}
+
+function showConfirmPanel({
+  title,
+  message,
+  cancelText = "Cancel",
+  confirmText = "OK",
+  danger = false,
+}) {
+  if (state.confirmResolve) resolveConfirmPanel(false);
+  el("confirm-title").textContent = title;
+  el("confirm-message").textContent = message;
+  el("confirm-cancel").textContent = cancelText;
+  const ok = el("confirm-ok");
+  ok.textContent = confirmText;
+  ok.classList.toggle("danger", danger);
+  el("confirm-panel").hidden = false;
+  window.setTimeout(() => el("confirm-cancel").focus(), 0);
+  return new Promise((resolve) => {
+    state.confirmResolve = resolve;
+  });
+}
+
+function resolveConfirmPanel(value) {
+  const resolve = state.confirmResolve;
+  if (!resolve) return;
+  state.confirmResolve = null;
+  el("confirm-panel").hidden = true;
+  resolve(value);
+}
+
 function handleBeforeUnload(event) {
   saveCurrentScrollPosition();
   pauseConnectionMonitor();
@@ -2653,14 +2690,20 @@ function handleBeforeUnload(event) {
   event.returnValue = "";
 }
 
-function prepareToLeavePageEditor() {
-  if (!confirmDiscardUnsavedPageEdit()) return false;
+async function prepareToLeavePageEditor() {
+  if (!(await confirmDiscardUnsavedPageEdit())) return false;
   closePageEditor();
   return true;
 }
 
-function confirmDiscardUnsavedPageEdit() {
-  return !hasUnsavedPageEdit() || window.confirm(PAGE_EDITOR_LEAVE_MESSAGE);
+async function confirmDiscardUnsavedPageEdit() {
+  if (!hasUnsavedPageEdit()) return true;
+  return showConfirmPanel({
+    title: "Unsaved edits",
+    message: "You have unsaved page edits. Leave without saving?",
+    cancelText: "Keep editing",
+    confirmText: "Leave",
+  });
 }
 
 function hasUnsavedPageEdit() {
@@ -2703,13 +2746,18 @@ function clearPageDraft(file) {
   localStorage.removeItem(pageDraftKey(file));
 }
 
-function discardRestoredPageDraft() {
+async function discardRestoredPageDraft() {
   if (!state.currentFile) return;
   const editor = el("page-editor");
   if (editor.hidden) return;
-  if (!window.confirm("Discard the restored draft and reload the saved page source?")) {
-    return;
-  }
+  const discard = await showConfirmPanel({
+    title: "Discard draft?",
+    message: "Discard this restored draft and reload the saved page source?",
+    cancelText: "Keep draft",
+    confirmText: "Discard draft",
+    danger: true,
+  });
+  if (!discard) return;
   clearPageDraft(state.currentFile);
   editor.value = state.currentContent;
   showPageDraftBanner(false);
@@ -2863,6 +2911,11 @@ async function goBackToLastList() {
 function handleGlobalKeydown(event) {
   if (el("app").hidden) return;
   if (event.defaultPrevented) return;
+  if (!el("confirm-panel").hidden && event.key === "Escape") {
+    event.preventDefault();
+    resolveConfirmPanel(false);
+    return;
+  }
   if (!el("image-lightbox").hidden) {
     if (event.key === "Escape") {
       event.preventDefault();
