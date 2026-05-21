@@ -44,6 +44,7 @@ const state = {
   imageQueue: [],
   imageActiveLoads: 0,
   pageOutline: [],
+  currentOutlineId: "",
 };
 
 const el = (id) => document.getElementById(id);
@@ -1881,6 +1882,7 @@ function showPage(title, html, sourceView, options = {}) {
 
 function clearPageOutline() {
   state.pageOutline = [];
+  state.currentOutlineId = "";
   el("toc-button").hidden = true;
   closeTocPanel();
 }
@@ -1910,10 +1912,12 @@ function updatePageOutline() {
   const show = state.pageOutline.length >= 2;
   el("toc-button").hidden = !show || state.view !== "page" || !el("page-editor").hidden;
   if (!show) closeTocPanel();
+  updateActiveOutline();
 }
 
 function openTocPanel() {
   if (!state.pageOutline.length) return;
+  updateActiveOutline();
   renderTocPanel();
   el("toc-panel").hidden = false;
 }
@@ -1927,12 +1931,47 @@ function renderTocPanel() {
   el("toc-list").innerHTML = state.pageOutline
     .map(
       (item) => `
-        <button class="toc-item toc-level-${item.level}" type="button" data-heading-id="${escapeHtmlAttr(item.id)}">
+        <button class="toc-item toc-level-${item.level}${item.id === state.currentOutlineId ? " is-active" : ""}" type="button" data-heading-id="${escapeHtmlAttr(item.id)}"${item.id === state.currentOutlineId ? ' aria-current="location"' : ""}>
           <span>${escapeHtml(item.text)}</span>
         </button>
       `,
     )
     .join("");
+}
+
+function updateActiveOutline() {
+  if (state.view !== "page" || !state.pageOutline.length || !el("page-editor").hidden) {
+    setActiveOutline("");
+    return;
+  }
+  const markerY = stickyHeaderOffset() + 8;
+  let activeId = state.pageOutline[0]?.id || "";
+  for (const item of state.pageOutline) {
+    const heading = document.getElementById(item.id);
+    if (!heading) continue;
+    if (heading.getBoundingClientRect().top <= markerY) {
+      activeId = item.id;
+    } else {
+      break;
+    }
+  }
+  setActiveOutline(activeId);
+}
+
+function setActiveOutline(id) {
+  if (state.currentOutlineId === id) return;
+  state.currentOutlineId = id;
+  el("toc-list")
+    ?.querySelectorAll("[data-heading-id]")
+    .forEach((button) => {
+      const active = button.dataset.headingId === id;
+      button.classList.toggle("is-active", active);
+      if (active) {
+        button.setAttribute("aria-current", "location");
+      } else {
+        button.removeAttribute("aria-current");
+      }
+    });
 }
 
 function handleTocPanelClick(event) {
@@ -2183,6 +2222,7 @@ function setPageEditorStatus(message) {
 }
 
 function handleWindowScroll() {
+  updateActiveOutline();
   window.clearTimeout(state.scrollTimer);
   state.scrollTimer = window.setTimeout(saveCurrentScrollPosition, SCROLL_SAVE_MS);
 }

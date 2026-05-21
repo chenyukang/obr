@@ -912,6 +912,13 @@ a {
   background: #edf1f3;
 }
 
+.toc-item.is-active,
+.toc-item[aria-current="location"] {
+  background: #e9f2ee;
+  color: #163f2c;
+  font-weight: 850;
+}
+
 .toc-item span {
   display: block;
   overflow: hidden;
