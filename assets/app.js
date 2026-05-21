@@ -49,6 +49,7 @@ const state = {
   imageLightboxY: 0,
   imageLightboxDrag: null,
   imageLightboxLastTap: null,
+  imageLightboxLoadId: 0,
   imageLightboxSuppressZoomUntil: 0,
   imageObserver: null,
   imageQueue: [],
@@ -3663,11 +3664,15 @@ function handleImageTriggerPointerUp(event) {
 
 function openImageLightbox(sourceImg) {
   const src = sourceImg.currentSrc || sourceImg.src;
+  const fullSrc = sourceImg.dataset.fullSrc || src;
   if (!src) return;
   const preview = el("image-lightbox-img");
+  const loadId = state.imageLightboxLoadId + 1;
+  state.imageLightboxLoadId = loadId;
   preview.src = src;
   preview.alt = sourceImg.alt || "Image preview";
   preview.classList.remove("is-dragging");
+  preview.classList.toggle("is-loading-full", Boolean(fullSrc && fullSrc !== src));
   state.imageLightboxScale = 1;
   state.imageLightboxX = 0;
   state.imageLightboxY = 0;
@@ -3677,14 +3682,51 @@ function openImageLightbox(sourceImg) {
   applyImageLightboxTransform();
   el("image-lightbox").hidden = false;
   document.body.classList.add("lightbox-open");
+  if (fullSrc && fullSrc !== src) {
+    loadFullLightboxImage(fullSrc, loadId);
+  } else {
+    setImageLightboxStatus("");
+  }
   window.requestAnimationFrame(() => el("image-lightbox-close").focus());
 }
 
 function closeImageLightbox() {
+  state.imageLightboxLoadId += 1;
   el("image-lightbox").hidden = true;
   document.body.classList.remove("lightbox-open");
   el("image-lightbox-img").removeAttribute("src");
+  el("image-lightbox-img").classList.remove("is-loading-full");
+  setImageLightboxStatus("");
   state.imageLightboxDrag = null;
+}
+
+function loadFullLightboxImage(src, loadId) {
+  setImageLightboxStatus("Loading original...");
+  const full = new Image();
+  full.decoding = "async";
+  full.onload = () => {
+    if (state.imageLightboxLoadId !== loadId || el("image-lightbox").hidden) return;
+    const preview = el("image-lightbox-img");
+    preview.src = src;
+    preview.classList.remove("is-loading-full");
+    setImageLightboxStatus("");
+    clampImageLightboxPan();
+    applyImageLightboxTransform();
+  };
+  full.onerror = () => {
+    if (state.imageLightboxLoadId !== loadId || el("image-lightbox").hidden) return;
+    el("image-lightbox-img").classList.remove("is-loading-full");
+    setImageLightboxStatus("Original unavailable. Showing preview.");
+    scheduleConnectivityRetry(0);
+  };
+  full.src = src;
+}
+
+function setImageLightboxStatus(message) {
+  const status = el("image-lightbox-status");
+  if (!status) return;
+  status.textContent = message;
+  status.hidden = !message;
 }
 
 function handleImageLightboxBackdropClick(event) {

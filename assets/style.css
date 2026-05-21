@@ -1486,6 +1486,7 @@ a {
 }
 
 .image-lightbox-stage {
+  position: relative;
   min-height: 0;
   display: grid;
   place-items: center;
@@ -1511,6 +1512,27 @@ a {
 
 .image-lightbox-img.is-dragging {
   cursor: grabbing;
+}
+
+.image-lightbox-img.is-loading-full {
+  filter: saturate(0.92);
+}
+
+.image-lightbox-status {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  max-width: min(86vw, 360px);
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 999px;
+  background: rgb(16 24 29 / 82%);
+  color: #fff;
+  padding: 7px 12px;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+  box-shadow: 0 12px 36px rgb(0 0 0 / 24%);
 }
 
 .confirm-panel {

@@ -853,29 +853,34 @@ fn obsidian_embed_html(raw: &str) -> String {
         return escape_html(raw);
     }
 
-    let src = format!("/assets/images/{}", percent_encode_path(target));
+    let encoded_target = percent_encode_path(target);
+    let full_src = format!("/assets/images/{encoded_target}");
     if is_pdf_embed_target(target) {
         return format!(
             r#"<div class="pdf-embed"><div class="pdf-icon" aria-hidden="true">PDF</div><div class="pdf-meta"><strong>{}</strong><span>Preview may be blocked by mobile WebViews.</span></div><a class="pdf-link" href="{}" target="_blank">Open PDF</a></div>"#,
             escape_html(target),
-            escape_html_attr(&src)
+            escape_html_attr(&full_src)
         );
     }
 
     let mut attrs = String::new();
+    let mut preview_width = 900;
     if let Some(size) = size {
         let (width, height) = split_embed_size(size);
         if let Some(width) = width {
             let _ = write!(attrs, r#" width="{width}""#);
+            preview_width = width.saturating_mul(2).clamp(480, 1200);
         }
         if let Some(height) = height {
             let _ = write!(attrs, r#" height="{height}""#);
         }
     }
+    let preview_src = format!("/assets/image-preview/{encoded_target}?w={preview_width}");
 
     format!(
-        r#"<img src="{}" alt="{}" loading="lazy" decoding="async"{}>"#,
-        escape_html_attr(&src),
+        r#"<img src="{}" data-full-src="{}" alt="{}" loading="lazy" decoding="async"{}>"#,
+        escape_html_attr(&preview_src),
+        escape_html_attr(&full_src),
         escape_html_attr(target),
         attrs
     )
@@ -941,7 +946,7 @@ fn sanitize_rendered_html(rendered: &str) -> String {
         .add_tag_attributes("a", &["class", "data-page", "target"])
         .add_tag_attributes("div", &["class", "aria-hidden"])
         .add_tag_attributes("span", &["class"])
-        .add_tag_attributes("img", &["loading", "decoding"])
+        .add_tag_attributes("img", &["loading", "decoding", "data-full-src"])
         .add_tag_attributes("input", &["type", "checked", "disabled", "data-task-index"])
         .set_tag_attribute_value("img", "loading", "lazy")
         .set_tag_attribute_value("img", "decoding", "async");
@@ -1445,7 +1450,8 @@ mod tests {
         assert!(rendered.contains(r##"href="#"##));
         assert!(rendered.contains(r#"data-page="People/可可""#));
         assert!(rendered.contains(">可可</a>"));
-        assert!(rendered.contains(r#"<img src="/assets/images/hello%20world.jpg""#));
+        assert!(rendered.contains(r#"<img src="/assets/image-preview/hello%20world.jpg?w=500""#));
+        assert!(rendered.contains(r#"data-full-src="/assets/images/hello%20world.jpg""#));
         assert!(rendered.contains(r#"loading="lazy""#));
         assert!(rendered.contains(r#"decoding="async""#));
         assert!(rendered.contains(r#"width="250""#));

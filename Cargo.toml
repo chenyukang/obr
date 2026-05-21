@@ -10,6 +10,7 @@ argon2 = { version = "0.5", features = ["std"] }
 axum = { version = "0.8", features = ["macros", "multipart"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 libc = "0.2"
 mime_guess = "2.0"
 notify = "8.2"

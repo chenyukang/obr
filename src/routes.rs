@@ -1,5 +1,9 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     fs,
+    hash::{Hash, Hasher},
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Instant, UNIX_EPOCH},
 };
@@ -17,7 +21,7 @@ use axum::{
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
-use tracing::info;
+use tracing::{info, warn};
 use webauthn_rs::prelude::{
     PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
 };
@@ -32,6 +36,13 @@ use crate::{
         save_data_url_image, save_image_bytes,
     },
 };
+
+const IMAGE_PREVIEW_WIDTH: u32 = 900;
+const IMAGE_PREVIEW_QUALITY: u8 = 72;
+const IMAGE_PREVIEW_MIN_WIDTH: u32 = 240;
+const IMAGE_PREVIEW_MAX_WIDTH: u32 = 1600;
+const IMAGE_PREVIEW_MIN_QUALITY: u8 = 45;
+const IMAGE_PREVIEW_MAX_QUALITY: u8 = 86;
 
 #[derive(Deserialize)]
 pub(crate) struct LoginRequest {
@@ -49,6 +60,12 @@ pub(crate) struct PageQuery {
 pub(crate) struct SearchQuery {
     keyword: Option<String>,
     page: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ImagePreviewQuery {
+    w: Option<u32>,
+    q: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -481,47 +498,260 @@ pub(crate) async fn image(
     headers: HeaderMap,
     AxumPath(path): AxumPath<String>,
 ) -> AppResult<Response> {
+    let Some((path, metadata)) = resolve_image_file(&state, &path)? else {
+        return Ok((StatusCode::NOT_FOUND, "not found").into_response());
+    };
+    image_file_response(&path, &metadata, &headers, original_image_cache_control())
+}
+
+pub(crate) async fn image_preview(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ImagePreviewQuery>,
+    AxumPath(path): AxumPath<String>,
+) -> AppResult<Response> {
+    let started = Instant::now();
+    let Some((source_path, source_metadata)) = resolve_image_file(&state, &path)? else {
+        return Ok((StatusCode::NOT_FOUND, "not found").into_response());
+    };
+    if !can_preview_image(&source_path) {
+        return image_file_response(
+            &source_path,
+            &source_metadata,
+            &headers,
+            preview_image_cache_control(),
+        );
+    }
+
+    let width = query
+        .w
+        .unwrap_or(IMAGE_PREVIEW_WIDTH)
+        .clamp(IMAGE_PREVIEW_MIN_WIDTH, IMAGE_PREVIEW_MAX_WIDTH);
+    let quality = query
+        .q
+        .unwrap_or(IMAGE_PREVIEW_QUALITY)
+        .clamp(IMAGE_PREVIEW_MIN_QUALITY, IMAGE_PREVIEW_MAX_QUALITY);
+    let etag_value = image_etag("preview", &source_metadata, Some((width, quality)));
+    let cache_control = preview_image_cache_control();
+    if request_etag_matches(&headers, &etag_value) {
+        return Ok(not_modified_response(cache_control, &etag_value)?);
+    }
+
+    let cache_path = image_preview_cache_path(&source_path, &source_metadata, width, quality);
+    let cache_hit = cache_path.is_file();
+    if !cache_hit {
+        let source_path_for_task = source_path.clone();
+        let cache_path_for_task = cache_path.clone();
+        let generated = tokio::task::spawn_blocking(move || {
+            ensure_image_preview(&source_path_for_task, &cache_path_for_task, width, quality)
+        })
+        .await;
+        match generated {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(
+                    path = %source_path.display(),
+                    error = %error,
+                    "image preview generation failed; falling back to original"
+                );
+                return image_file_response(
+                    &source_path,
+                    &source_metadata,
+                    &headers,
+                    preview_image_cache_control(),
+                );
+            }
+            Err(error) => {
+                warn!(
+                    path = %source_path.display(),
+                    error = %error,
+                    "image preview generation task failed; falling back to original"
+                );
+                return image_file_response(
+                    &source_path,
+                    &source_metadata,
+                    &headers,
+                    preview_image_cache_control(),
+                );
+            }
+        }
+    }
+
+    let preview_bytes = fs::read(&cache_path)
+        .with_context(|| format!("read image preview {}", cache_path.display()))?;
+    info!(
+        api = "image_preview",
+        path = %source_path.display(),
+        source_bytes = source_metadata.len(),
+        preview_bytes = preview_bytes.len(),
+        width,
+        quality,
+        cache_hit,
+        elapsed_ms = started.elapsed().as_millis(),
+        "api timing"
+    );
+    image_bytes_response(
+        preview_bytes,
+        "image/jpeg",
+        cache_control,
+        Some(&etag_value),
+    )
+}
+
+fn resolve_image_file(state: &AppState, path: &str) -> AppResult<Option<(PathBuf, fs::Metadata)>> {
     let rel = normalize_rel_path(&path)?;
     let images_root = state.config.vault_path.join("Pics").canonicalize()?;
     let path = images_root.join(rel);
     ensure_inside(&images_root, &path)?;
     if !path.is_file() {
-        return Ok((StatusCode::NOT_FOUND, "not found").into_response());
+        return Ok(None);
     }
 
     let metadata = fs::metadata(&path).with_context(|| format!("stat image {}", path.display()))?;
-    let modified = metadata
+    Ok(Some((path, metadata)))
+}
+
+fn image_file_response(
+    path: &Path,
+    metadata: &fs::Metadata,
+    headers: &HeaderMap,
+    cache_control: HeaderValue,
+) -> AppResult<Response> {
+    let etag_value = image_etag("original", metadata, None);
+    if request_etag_matches(headers, &etag_value) {
+        return not_modified_response(cache_control, &etag_value);
+    }
+
+    let bytes = fs::read(path).with_context(|| format!("read image {}", path.display()))?;
+    let content_type = mime_guess::from_path(path).first_or_octet_stream();
+    image_bytes_response(
+        bytes,
+        content_type.as_ref(),
+        cache_control,
+        Some(&etag_value),
+    )
+}
+
+fn image_bytes_response(
+    bytes: Vec<u8>,
+    content_type: &str,
+    cache_control: HeaderValue,
+    etag_value: Option<&str>,
+) -> AppResult<Response> {
+    let mut response = bytes.into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_str(content_type)?);
+    response.headers_mut().insert(CACHE_CONTROL, cache_control);
+    if let Some(etag_value) = etag_value {
+        response
+            .headers_mut()
+            .insert(ETAG, HeaderValue::from_str(etag_value)?);
+    }
+    Ok(response)
+}
+
+fn not_modified_response(cache_control: HeaderValue, etag_value: &str) -> AppResult<Response> {
+    let mut response = StatusCode::NOT_MODIFIED.into_response();
+    response.headers_mut().insert(CACHE_CONTROL, cache_control);
+    response
+        .headers_mut()
+        .insert(ETAG, HeaderValue::from_str(etag_value)?);
+    Ok(response)
+}
+
+fn request_etag_matches(headers: &HeaderMap, etag_value: &str) -> bool {
+    headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag_value))
+}
+
+fn image_etag(kind: &str, metadata: &fs::Metadata, preview: Option<(u32, u8)>) -> String {
+    let modified = metadata_modified_nanos(metadata);
+    if let Some((width, quality)) = preview {
+        return format!(
+            r#""{kind}-{}-{modified}-w{width}-q{quality}""#,
+            metadata.len()
+        );
+    }
+    format!(r#""{kind}-{}-{modified}""#, metadata.len())
+}
+
+fn metadata_modified_nanos(metadata: &fs::Metadata) -> u128 {
+    metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let etag_value = format!(r#""{}-{}""#, metadata.len(), modified);
-    let cache_control = HeaderValue::from_static("private, max-age=2592000, immutable");
-    if headers
-        .get(IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag_value))
-    {
-        let mut response = StatusCode::NOT_MODIFIED.into_response();
-        response.headers_mut().insert(CACHE_CONTROL, cache_control);
-        response
-            .headers_mut()
-            .insert(ETAG, HeaderValue::from_str(&etag_value)?);
-        return Ok(response);
-    }
+        .unwrap_or_default()
+}
 
-    let bytes = fs::read(&path).with_context(|| format!("read image {}", path.display()))?;
-    let content_type = mime_guess::from_path(&path).first_or_octet_stream();
-    let mut response = bytes.into_response();
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_str(content_type.as_ref())?);
-    response.headers_mut().insert(CACHE_CONTROL, cache_control);
-    response
-        .headers_mut()
-        .insert(ETAG, HeaderValue::from_str(&etag_value)?);
-    Ok(response)
+fn original_image_cache_control() -> HeaderValue {
+    HeaderValue::from_static("private, max-age=2592000, immutable")
+}
+
+fn preview_image_cache_control() -> HeaderValue {
+    HeaderValue::from_static("private, max-age=86400")
+}
+
+fn can_preview_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp"))
+}
+
+fn image_preview_cache_path(
+    source_path: &Path,
+    metadata: &fs::Metadata,
+    width: u32,
+    quality: u8,
+) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    source_path.to_string_lossy().hash(&mut hasher);
+    metadata.len().hash(&mut hasher);
+    metadata_modified_nanos(metadata).hash(&mut hasher);
+    width.hash(&mut hasher);
+    quality.hash(&mut hasher);
+    PathBuf::from("cache")
+        .join("image-preview")
+        .join(format!("{:016x}-w{width}-q{quality}.jpg", hasher.finish()))
+}
+
+fn ensure_image_preview(
+    source_path: &Path,
+    cache_path: &Path,
+    width: u32,
+    quality: u8,
+) -> anyhow::Result<()> {
+    if cache_path.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let source = ::image::ImageReader::open(source_path)?
+        .with_guessed_format()?
+        .decode()?;
+    let preview = source.thumbnail(width, width).to_rgb8();
+    let temp_path = cache_path.with_extension(format!(
+        "jpg.{}.{}.tmp",
+        std::process::id(),
+        Local::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let file = fs::File::create(&temp_path)?;
+    let mut writer = BufWriter::new(file);
+    let mut encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality);
+    encoder.encode(
+        &preview,
+        preview.width(),
+        preview.height(),
+        ::image::ColorType::Rgb8.into(),
+    )?;
+    writer.flush()?;
+    fs::rename(&temp_path, cache_path)?;
+    Ok(())
 }
 
 pub(crate) async fn post_entry(
@@ -801,7 +1031,9 @@ fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> 
 
 #[cfg(test)]
 mod tests {
-    use super::entry_sync_marker;
+    use std::fs;
+
+    use super::{ensure_image_preview, entry_sync_marker};
 
     #[test]
     fn entry_sync_marker_accepts_queue_ids() {
@@ -815,6 +1047,25 @@ mod tests {
     fn entry_sync_marker_rejects_comment_breakout() {
         assert_eq!(entry_sync_marker(Some("bad-->id")), None);
         assert_eq!(entry_sync_marker(Some("")), None);
+    }
+
+    #[test]
+    fn ensure_image_preview_writes_smaller_jpeg() {
+        let dir = std::env::temp_dir().join(format!("obr-preview-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.png");
+        let preview = dir.join("preview.jpg");
+        let image = ::image::RgbImage::from_fn(1200, 800, |x, y| {
+            ::image::Rgb([(x % 255) as u8, (y % 255) as u8, 120])
+        });
+        image.save(&source).unwrap();
+
+        ensure_image_preview(&source, &preview, 600, 72).unwrap();
+
+        let generated = ::image::open(&preview).unwrap();
+        assert_eq!(generated.width(), 600);
+        assert_eq!(generated.height(), 400);
+        let _ = fs::remove_dir_all(dir);
     }
 }
 
