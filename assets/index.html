@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260521-mobile-command">
+    <link rel="stylesheet" href="/assets/style.css?v=20260521-softbreak-fix">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -48,7 +48,7 @@
               <span class="connection-dot" aria-hidden="true"></span>
               <span id="connection-label" class="connection-label">Offline</span>
             </div>
-            <button id="command-button" type="button" aria-label="Open command palette" title="Command" data-icon="command"></button>
+            <button id="random-note-button" type="button" aria-label="Open random note" title="Random note" data-icon="shuffle"></button>
             <button id="outbox-button" class="outbox-button" type="button" data-icon="list-checks" aria-label="Show pending sync items" title="Pending sync items" hidden>0</button>
             <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key" hidden></button>
             <button id="logout-button" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
@@ -72,15 +72,6 @@
         </div>
         <div id="outbox-list" class="outbox-list"></div>
       </section>
-      <div id="command-palette" class="command-palette" hidden>
-        <div class="command-dialog" role="dialog" aria-modal="true" aria-labelledby="command-title">
-          <h2 id="command-title">Command</h2>
-          <label class="sr-only" for="command-input">Command</label>
-          <input id="command-input" type="search" placeholder="Type a command" autocomplete="off">
-          <div id="command-list" class="command-list" role="listbox"></div>
-        </div>
-      </div>
-
       <main>
         <section id="day-view" class="view">
           <form id="entry-form" class="panel">
@@ -155,8 +146,11 @@
           <article class="panel">
             <h2 id="page-title"></h2>
             <div id="page-content" class="markdown"></div>
-            <label class="sr-only" for="page-editor">Page editor</label>
-            <textarea id="page-editor" rows="22" aria-describedby="page-editor-status" hidden></textarea>
+            <div id="page-editor-shell" class="page-editor-shell" hidden>
+              <div id="page-block-editor" class="page-block-editor markdown" aria-label="Markdown block editor"></div>
+              <label class="sr-only" for="page-editor">Page editor source</label>
+              <textarea id="page-editor" rows="22" aria-describedby="page-editor-status" hidden></textarea>
+            </div>
             <p id="page-editor-status" class="status" role="status" aria-live="polite" hidden></p>
           </article>
         </section>
@@ -188,6 +182,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260521-mobile-command"></script>
+    <script src="/assets/app.js?v=20260521-softbreak-fix"></script>
   </body>
 </html>

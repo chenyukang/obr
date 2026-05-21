@@ -47,10 +47,6 @@ body.lightbox-open {
   overflow: hidden;
 }
 
-body.command-open {
-  overflow: hidden;
-}
-
 button,
 input,
 textarea {
@@ -349,82 +345,6 @@ nav {
   padding: 5px 9px;
 }
 
-.command-palette {
-  position: fixed;
-  inset: 0;
-  z-index: 120;
-  display: grid;
-  align-items: start;
-  justify-items: center;
-  background: rgb(23 32 38 / 24%);
-  padding: max(72px, 12vh) 14px 24px;
-}
-
-.command-dialog {
-  width: min(560px, 100%);
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 24px 70px rgb(27 37 43 / 24%);
-}
-
-.command-dialog h2 {
-  margin: 0;
-  padding: 14px 16px 0;
-  color: var(--muted);
-  font-size: 13px;
-  text-transform: uppercase;
-}
-
-#command-input {
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  padding: 14px 16px;
-  font-size: 18px;
-  outline: none;
-}
-
-.command-list {
-  max-height: min(420px, 55vh);
-  overflow: auto;
-  padding: 8px;
-}
-
-.command-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  width: 100%;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  padding: 10px;
-  text-align: left;
-}
-
-.command-item[aria-selected="true"],
-.command-item:hover {
-  background: #edf1f3;
-}
-
-.command-item span,
-.command-item small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.command-item span {
-  font-weight: 800;
-}
-
-.command-item small {
-  color: var(--muted);
-}
-
 .auth-actions button {
   width: 34px;
   height: 34px;
@@ -482,6 +402,99 @@ main {
   border-radius: 0;
   background: transparent;
   padding: 0;
+}
+
+.page-editor-shell {
+  display: block;
+}
+
+.page-editor-shell[hidden] {
+  display: none;
+}
+
+.page-block-editor {
+  min-height: 58vh;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 10px;
+  color: #1f2f37;
+  font-size: 16px;
+}
+
+.editor-block {
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 8px;
+  cursor: text;
+}
+
+.editor-block:hover,
+.editor-block:focus {
+  border-color: #dfe7e4;
+  background: #fbfcfc;
+  outline: none;
+}
+
+.editor-block.is-active {
+  border-color: #9fbdb2;
+  background: #f8fbfa;
+  box-shadow: 0 8px 24px rgb(27 37 43 / 7%);
+}
+
+.editor-block > :first-child {
+  margin-top: 0;
+}
+
+.editor-block > :last-child {
+  margin-bottom: 0;
+}
+
+.editor-block-source {
+  min-height: 46px;
+  overflow: hidden;
+  resize: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px;
+  line-height: 1.55;
+  outline: none;
+}
+
+.editor-preview-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.editor-preview-task-list {
+  padding-left: 0;
+  list-style: none;
+}
+
+.editor-preview-task {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.editor-preview-task input[type="checkbox"] {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.editor-preview-wikilink {
+  border-radius: 999px;
+  background: #e7f2f8;
+  color: var(--blue);
+  padding: 1px 7px;
+  font-weight: 700;
+}
+
+#page-editor {
+  display: none;
 }
 
 .recent-panel {
@@ -1564,50 +1577,6 @@ a {
     top: 132px;
     right: 14px;
     max-height: calc(100vh - 150px);
-  }
-
-  .command-palette {
-    align-items: end;
-    padding: 0;
-    background: rgb(23 32 38 / 34%);
-  }
-
-  .command-dialog {
-    width: 100%;
-    max-height: min(82vh, calc(100dvh - 18px));
-    display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr);
-    border-right: 0;
-    border-bottom: 0;
-    border-left: 0;
-    border-radius: 10px 10px 0 0;
-  }
-
-  .command-dialog h2 {
-    padding: 16px 18px 2px;
-    font-size: 12px;
-  }
-
-  #command-input {
-    padding: 14px 18px;
-    font-size: 16px;
-  }
-
-  .command-list {
-    max-height: none;
-    min-height: 0;
-    padding: 8px 10px max(12px, env(safe-area-inset-bottom));
-  }
-
-  .command-item {
-    min-height: 52px;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 3px;
-    padding: 11px 10px;
-  }
-
-  .command-item small {
-    font-size: 12px;
   }
 
   .metadata-panel {

@@ -636,6 +636,7 @@ pub(crate) fn render_markdown_html(raw: &str) -> String {
                 ));
                 task_index += 1;
             }
+            Event::SoftBreak => events.push(Event::Html("<br>\n".into())),
             other => events.push(other),
         }
     }
@@ -1460,6 +1461,14 @@ mod tests {
         assert!(rendered.contains(r#"<img src="photo.jpg" alt="Alt text""#));
         assert!(rendered.contains(r#"loading="lazy""#));
         assert!(rendered.contains(r#"decoding="async""#));
+    }
+
+    #[test]
+    fn render_markdown_html_preserves_soft_line_breaks() {
+        let rendered = render_markdown_html("我说你你你好\n你好");
+
+        assert!(rendered.contains("我说你你你好<br>\n你好"));
+        assert!(!rendered.contains("我说你你你好 你好"));
     }
 
     #[test]

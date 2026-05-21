@@ -7,6 +7,12 @@ const state = {
   currentHighlightKeyword: "",
   image: "",
   searchTimer: 0,
+  editorPreviewTimer: 0,
+  activeEditorBlock: -1,
+  activeEditorBlockStart: -1,
+  activeEditorBlockTextEnd: -1,
+  lastReadBlockIndex: -1,
+  lastReadBlockFile: "",
   searchController: null,
   searchRequestId: 0,
   searchPage: 0,
@@ -32,8 +38,6 @@ const state = {
   applyingHistory: false,
   updateWorker: null,
   refreshingForUpdate: false,
-  commandItems: [],
-  commandIndex: 0,
   imageLightboxScale: 1,
   imageLightboxX: 0,
   imageLightboxY: 0,
@@ -91,8 +95,6 @@ const ICONS = {
     '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"></path><circle cx="12" cy="13" r="3"></circle>',
   image:
     '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
-  command:
-    '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0 0-6"></path>',
   list: '<path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>',
   "list-checks":
     '<path d="m3 7 2 2 4-4"></path><path d="m3 17 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path>',
@@ -112,6 +114,8 @@ const ICONS = {
   save: '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"></path><path d="M17 21v-7H7v7"></path><path d="M7 3v5h8"></path>',
   search:
     '<circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path>',
+  shuffle:
+    '<path d="m18 14 4 4-4 4"></path><path d="m18 2 4 4-4 4"></path><path d="M2 18h1.9a6 6 0 0 0 5.2-3l5.8-10A6 6 0 0 1 20.1 2H22"></path><path d="M2 6h1.9a6 6 0 0 1 5.2 3l.7 1.2"></path><path d="M14.9 19a6 6 0 0 0 5.2 3H22"></path>',
   x: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
 };
 
@@ -150,16 +154,12 @@ function bindEvents() {
   window.addEventListener("popstate", handleAppPopState);
   window.addEventListener("scroll", handleWindowScroll, { passive: true });
   document.addEventListener("keydown", handleGlobalKeydown);
-  el("command-button").addEventListener("click", openCommandPalette);
+  el("random-note-button").addEventListener("click", openRandomNote);
   el("update-banner").addEventListener("click", applyServiceWorkerUpdate);
   el("outbox-button").addEventListener("click", toggleOutboxPanel);
   el("outbox-close").addEventListener("click", hideOutboxPanel);
   el("outbox-retry").addEventListener("click", retryOutbox);
   el("outbox-list").addEventListener("click", handleOutboxListClick);
-  el("command-palette").addEventListener("click", handleCommandBackdropClick);
-  el("command-input").addEventListener("input", renderCommandPalette);
-  el("command-input").addEventListener("keydown", handleCommandInputKeydown);
-  el("command-list").addEventListener("click", handleCommandListClick);
   el("recent-panel").addEventListener("click", handleRecentPanelClick);
   el("toc-button").addEventListener("click", openTocPanel);
   el("toc-close").addEventListener("click", closeTocPanel);
@@ -188,6 +188,8 @@ function bindEvents() {
   el("entry-image-file").addEventListener("change", handleImageFile);
   el("entry-camera-file").addEventListener("change", handleImageFile);
   el("page-editor").addEventListener("input", handlePageEditorInput);
+  el("page-block-editor").addEventListener("click", handlePageBlockEditorClick);
+  el("page-block-editor").addEventListener("focusout", handlePageBlockEditorFocusOut);
 
   el("search-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -237,6 +239,7 @@ function bindEvents() {
   el("back-button").addEventListener("click", goBackToLastList);
   el("edit-button").addEventListener("click", toggleEdit);
 
+  el("page-content").addEventListener("pointerup", rememberReadBlockFromPointer);
   el("page-content").addEventListener("click", async (event) => {
     const task = event.target.closest("input[data-task-index]");
     if (task && state.currentFile === "Zero/todo.md") {
@@ -1906,12 +1909,16 @@ function displayPageData(
     state.currentFile = requestedPath.endsWith(".md")
       ? requestedPath
       : `${requestedPath}.md`;
+    state.lastReadBlockIndex = -1;
+    state.lastReadBlockFile = state.currentFile;
     state.currentContent = "";
     state.currentContentLoaded = true;
     showPage("NoPage", "No page yet.", sourceView, options);
     return;
   }
   state.currentFile = file;
+  state.lastReadBlockIndex = -1;
+  state.lastReadBlockFile = file;
   state.currentContent =
     pendingPageContent(file) ?? data.source ?? cachedPageSource(file) ?? "";
   state.currentContentLoaded = Boolean(state.currentContent);
@@ -1941,6 +1948,8 @@ function showPage(title, html, sourceView, options = {}) {
   highlightPageContent(state.currentHighlightKeyword);
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
+  el("page-editor-shell").hidden = true;
+  el("page-block-editor").innerHTML = "";
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
@@ -2088,8 +2097,44 @@ function stickyHeaderOffset() {
   return Math.ceil(bottom + 12);
 }
 
+function rememberReadBlockFromPointer(event) {
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+  if (el("page-content").hidden || !state.currentContent) return;
+  const index = estimateEditorBlockIndexFromViewportY(event.clientY, state.currentContent);
+  if (index < 0) return;
+  state.lastReadBlockIndex = index;
+  state.lastReadBlockFile = state.currentFile;
+}
+
+function initialEditorBlockIndex(source) {
+  const blocks = splitMarkdownBlocks(source);
+  if (!blocks.length) return 0;
+  if (state.lastReadBlockFile === state.currentFile && state.lastReadBlockIndex >= 0) {
+    return Math.min(state.lastReadBlockIndex, blocks.length - 1);
+  }
+  return estimateEditorBlockIndexFromViewportY(stickyHeaderOffset() + 24, source);
+}
+
+function estimateEditorBlockIndexFromViewportY(clientY, source) {
+  const content = el("page-content");
+  const blocks = splitMarkdownBlocks(source);
+  if (!content || !blocks.length) return 0;
+  const rect = content.getBoundingClientRect();
+  const height = Math.max(rect.height, 1);
+  const relativeY = clamp(clientY - rect.top, 0, height);
+  const contentOffset = (relativeY / height) * String(source || "").length;
+  let bestIndex = 0;
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (contentOffset >= block.start) bestIndex = index;
+    if (contentOffset < block.end) return index;
+  }
+  return bestIndex;
+}
+
 async function toggleEdit() {
   const editor = el("page-editor");
+  const editorShell = el("page-editor-shell");
   const content = el("page-content");
   const button = el("edit-button");
   if (editor.hidden) {
@@ -2110,7 +2155,10 @@ async function toggleEdit() {
     button.disabled = false;
     const draft = loadPageDraft(state.currentFile);
     editor.value = draft ?? state.currentContent;
+    const initialBlockIndex = initialEditorBlockIndex(editor.value);
     editor.hidden = false;
+    editorShell.hidden = false;
+    renderBlockEditor({ activeIndex: initialBlockIndex });
     content.hidden = true;
     el("toc-button").hidden = true;
     closeTocPanel();
@@ -2119,6 +2167,7 @@ async function toggleEdit() {
     setButtonIcon(button, "save", "Save");
     return;
   }
+  commitActiveEditorBlock();
   setPageEditorStatus("Local draft saved. Syncing...");
   button.disabled = true;
   setButtonIcon(button, "save", "Saving...");
@@ -2146,6 +2195,8 @@ async function toggleEdit() {
     updatePageOutline();
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
+    editorShell.hidden = true;
+    el("page-block-editor").innerHTML = "";
     content.hidden = false;
     updateReadingProgress();
     restoreReadingPositionAfterEdit(restoreFile, restoreY);
@@ -2166,6 +2217,8 @@ async function toggleEdit() {
         content.innerHTML = offlineSourcePreview(payload.content);
         updatePageOutline();
         editor.hidden = true;
+        editorShell.hidden = true;
+        el("page-block-editor").innerHTML = "";
         content.hidden = false;
         updateReadingProgress();
         restoreReadingPositionAfterEdit(restoreFile, restoreY);
@@ -2240,6 +2293,327 @@ async function warmPageSource(file) {
 function handlePageEditorInput() {
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
+  renderBlockEditor({ activeIndex: state.activeEditorBlock });
+}
+
+function handlePageBlockEditorClick(event) {
+  const block = event.target.closest(".editor-block");
+  if (!block) return;
+  activateEditorBlock(Number(block.dataset.blockIndex || 0));
+}
+
+function handlePageBlockEditorFocusOut(event) {
+  const shell = el("page-editor-shell");
+  if (shell.hidden || shell.contains(event.relatedTarget)) return;
+  commitActiveEditorBlock();
+}
+
+function renderBlockEditor(options = {}) {
+  const editor = el("page-editor");
+  const blockEditor = el("page-block-editor");
+  if (!editor || !blockEditor || editor.hidden) return;
+  const blocks = splitMarkdownBlocks(editor.value);
+  const activeIndex = Math.min(
+    Math.max(Number(options.activeIndex ?? state.activeEditorBlock ?? -1), -1),
+    blocks.length - 1,
+  );
+  state.activeEditorBlock = activeIndex;
+  const activeBlock = blocks[activeIndex];
+  state.activeEditorBlockStart = activeBlock ? activeBlock.start : -1;
+  state.activeEditorBlockTextEnd = activeBlock ? activeBlock.textEnd : -1;
+  blockEditor.innerHTML = blocks
+    .map((block, index) => editorBlockHtml(block, index, index === activeIndex))
+    .join("");
+  enhanceMarkdownImages(blockEditor);
+  if (activeIndex >= 0) {
+    const active = blockEditor.querySelector(`[data-block-index="${activeIndex}"] textarea`);
+    if (active && options.focus !== false) {
+      active.addEventListener("input", () => updateActiveBlockFromTextarea(active));
+      active.addEventListener("keydown", handleBlockTextareaKeydown);
+      window.requestAnimationFrame(() => {
+        active.focus();
+        if (options.placeCursorAtEnd) {
+          active.selectionStart = active.value.length;
+          active.selectionEnd = active.value.length;
+        }
+        autoResizeBlockTextarea(active);
+      });
+    }
+  }
+}
+
+function activateEditorBlock(index) {
+  if (index === state.activeEditorBlock) return;
+  commitActiveEditorBlock();
+  renderBlockEditor({ activeIndex: index, placeCursorAtEnd: true });
+}
+
+function commitActiveEditorBlock() {
+  const blockEditor = el("page-block-editor");
+  const active = blockEditor?.querySelector(".editor-block.is-active textarea");
+  if (!active) return;
+  replaceSourceBlock(Number(active.dataset.blockIndex || 0), active.value);
+  persistPageDraft();
+  setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
+  state.activeEditorBlock = -1;
+  renderBlockEditor({ activeIndex: -1, focus: false });
+}
+
+function updateActiveBlockFromTextarea(textarea) {
+  replaceSourceBlock(Number(textarea.dataset.blockIndex || 0), textarea.value);
+  persistPageDraft();
+  setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
+  autoResizeBlockTextarea(textarea);
+}
+
+function replaceSourceBlock(index, value) {
+  const editor = el("page-editor");
+  const source = String(editor.value || "").replace(/\r\n?/g, "\n");
+  const normalizedValue = String(value || "").replace(/\r\n?/g, "\n");
+  let start = state.activeEditorBlockStart;
+  let textEnd = state.activeEditorBlockTextEnd;
+
+  if (index !== state.activeEditorBlock || start < 0 || textEnd < start || textEnd > source.length) {
+    const blocks = splitMarkdownBlocks(source);
+    const block = blocks[index];
+    if (!block) return;
+    start = block.start;
+    textEnd = block.textEnd;
+  }
+
+  editor.value = `${source.slice(0, start)}${normalizedValue}${source.slice(textEnd)}`;
+  state.activeEditorBlock = index;
+  state.activeEditorBlockStart = start;
+  state.activeEditorBlockTextEnd = start + normalizedValue.length;
+}
+
+function handleBlockTextareaKeydown(event) {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    event.preventDefault();
+    commitActiveEditorBlock();
+  }
+}
+
+function autoResizeBlockTextarea(textarea) {
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.max(46, textarea.scrollHeight)}px`;
+}
+
+function splitMarkdownBlocks(source) {
+  const text = String(source || "").replace(/\r\n?/g, "\n");
+  if (!text.trim()) return [{ text: "", separator: "", start: 0, textEnd: 0, end: 0 }];
+  const blocks = [];
+  const separatorPattern = /\n{2,}/g;
+  let start = 0;
+  let match;
+  while ((match = separatorPattern.exec(text)) !== null) {
+    blocks.push({
+      text: text.slice(start, match.index),
+      separator: match[0],
+      start,
+      textEnd: match.index,
+      end: match.index + match[0].length,
+    });
+    start = match.index + match[0].length;
+  }
+  blocks.push({
+    text: text.slice(start),
+    separator: "",
+    start,
+    textEnd: text.length,
+    end: text.length,
+  });
+  return blocks.length ? blocks : [{ text: "", separator: "", start: 0, textEnd: 0, end: 0 }];
+}
+
+function joinMarkdownBlocks(blocks) {
+  return blocks.map((block) => `${block.text}${block.separator || ""}`).join("");
+}
+
+function editorBlockHtml(block, index, active) {
+  if (active) {
+    return `<div class="editor-block is-active" data-block-index="${index}"><textarea class="editor-block-source" data-block-index="${index}" rows="1">${escapeTextarea(block.text)}</textarea></div>`;
+  }
+  const rendered = renderMarkdownBlock(block.text);
+  return `<div class="editor-block" data-block-index="${index}" tabindex="0">${rendered}</div>`;
+}
+
+function escapeTextarea(value) {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
+function renderMarkdownBlock(source) {
+  const sourceText = String(source || "");
+  if (!sourceText.trim()) {
+    return '<p class="editor-preview-empty">Empty block</p>';
+  }
+  return renderMarkdownLines(sourceText);
+}
+
+function renderMarkdownLines(source) {
+  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+  const html = [];
+  let paragraph = [];
+  let listType = "";
+  let listClass = "";
+  let codeLines = null;
+
+  const closeParagraph = () => {
+    if (!paragraph.length) return;
+    const renderedLines = paragraph
+      .map((line) => renderInlineMarkdown(line.trim()))
+      .filter((line) => line.length > 0);
+    html.push(`<p>${renderedLines.join("<br>\n")}</p>`);
+    paragraph = [];
+  };
+  const closeList = () => {
+    if (!listType) return;
+    html.push(`</${listType}>`);
+    listType = "";
+    listClass = "";
+  };
+  const openList = (type, className = "") => {
+    if (listType === type && listClass === className) return;
+    closeParagraph();
+    closeList();
+    html.push(`<${type}${className ? ` class="${className}"` : ""}>`);
+    listType = type;
+    listClass = className;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s+$/g, "");
+    if (/^\s*```/.test(line)) {
+      if (codeLines) {
+        html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        codeLines = null;
+      } else {
+        closeParagraph();
+        closeList();
+        codeLines = [];
+      }
+      continue;
+    }
+    if (codeLines) {
+      codeLines.push(rawLine);
+      continue;
+    }
+    if (!line.trim()) {
+      closeParagraph();
+      closeList();
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      closeParagraph();
+      closeList();
+      const level = heading[1].length;
+      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+    const task = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/);
+    if (task) {
+      openList("ul", "editor-preview-task-list");
+      const checked = task[1].toLowerCase() === "x" ? " checked" : "";
+      html.push(`<li class="editor-preview-task"><input type="checkbox" disabled${checked}>${renderInlineMarkdown(task[2])}</li>`);
+      continue;
+    }
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (unordered) {
+      openList("ul");
+      html.push(`<li>${renderInlineMarkdown(unordered[1])}</li>`);
+      continue;
+    }
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (ordered) {
+      openList("ol");
+      html.push(`<li>${renderInlineMarkdown(ordered[1])}</li>`);
+      continue;
+    }
+    const quote = line.match(/^\s*>\s?(.+)$/);
+    if (quote) {
+      closeParagraph();
+      closeList();
+      html.push(`<blockquote><p>${renderInlineMarkdown(quote[1])}</p></blockquote>`);
+      continue;
+    }
+    closeList();
+    paragraph.push(line);
+  }
+  closeParagraph();
+  closeList();
+  if (codeLines) html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+  return html.join("\n");
+}
+
+function renderInlineMarkdown(text) {
+  const tokens = [];
+  const token = (html) => {
+    const marker = `\u0000${tokens.length}\u0000`;
+    tokens.push(html);
+    return marker;
+  };
+  let value = String(text || "")
+    .replace(/`([^`]+)`/g, (_, code) => token(`<code>${escapeHtml(code)}</code>`))
+    .replace(/!\[\[([^\]]+)\]\]/g, (_, raw) => token(renderEditorObsidianEmbed(raw)))
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) =>
+      token(renderEditorMarkdownImage(src, alt)),
+    );
+  value = escapeHtml(value)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/_([^_]+)_/g, "<em>$1</em>")
+    .replace(/\[\[([^\]]+)\]\]/g, '<span class="editor-preview-wikilink">$1</span>');
+  tokens.forEach((html, index) => {
+    value = value.replace(`\u0000${index}\u0000`, html);
+  });
+  return value;
+}
+
+function renderEditorObsidianEmbed(raw) {
+  const [targetPart, sizePart] = String(raw || "").split("|");
+  const target = targetPart.trim();
+  if (!target) return escapeHtml(raw);
+  const src = `/assets/images/${percentEncodePath(target)}`;
+  if (isEditorPdfTarget(target)) {
+    return `<span class="pdf-embed"><span class="pdf-icon" aria-hidden="true">PDF</span><span class="pdf-meta"><strong>${escapeHtml(target)}</strong><span>Open PDF</span></span><a class="pdf-link" href="${escapeHtmlAttr(src)}" target="_blank">Open PDF</a></span>`;
+  }
+  const attrs = editorImageSizeAttrs(sizePart);
+  return `<img data-src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(target)}" loading="lazy" decoding="async" fetchpriority="low"${attrs}>`;
+}
+
+function renderEditorMarkdownImage(src, alt = "") {
+  const cleanSrc = String(src || "").trim().replace(/^<|>$/g, "");
+  if (!cleanSrc) return "";
+  const attr = cleanSrc.startsWith("data:") ? "src" : "data-src";
+  return `<img ${attr}="${escapeHtmlAttr(cleanSrc)}" alt="${escapeHtmlAttr(alt)}" loading="lazy" decoding="async" fetchpriority="low">`;
+}
+
+function isEditorPdfTarget(target) {
+  return String(target || "")
+    .split("#")[0]
+    .split("?")[0]
+    .toLowerCase()
+    .endsWith(".pdf");
+}
+
+function editorImageSizeAttrs(size) {
+  const value = String(size || "").trim();
+  if (!value) return "";
+  const [width, height] = value.split(/[xX]/).map((part) => part.trim());
+  let attrs = "";
+  if (/^\d+$/.test(width || "")) attrs += ` width="${width}"`;
+  if (/^\d+$/.test(height || "")) attrs += ` height="${height}"`;
+  return attrs;
+}
+
+function percentEncodePath(path) {
+  return String(path || "")
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
 }
 
 function handleBeforeUnload(event) {
@@ -2269,6 +2643,9 @@ function closePageEditor() {
   const editor = el("page-editor");
   if (editor.hidden) return;
   editor.hidden = true;
+  el("page-editor-shell").hidden = true;
+  el("page-block-editor").innerHTML = "";
+  window.clearTimeout(state.editorPreviewTimer);
   el("page-content").hidden = false;
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   setPageEditorStatus("");
@@ -2459,16 +2836,6 @@ function handleGlobalKeydown(event) {
       return;
     }
   }
-  if (event.key === "Escape" && !el("command-palette").hidden) {
-    event.preventDefault();
-    closeCommandPalette();
-    return;
-  }
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" && !event.altKey) {
-    event.preventDefault();
-    openCommandPalette();
-    return;
-  }
   if (isEditableTarget(event.target) || event.key !== "/" || event.altKey) return;
   event.preventDefault();
   void showView("find", { restoreScroll: false }).then(() =>
@@ -2476,174 +2843,8 @@ function handleGlobalKeydown(event) {
   );
 }
 
-function openCommandPalette() {
-  state.commandIndex = 0;
-  el("command-input").value = "";
-  el("command-palette").hidden = false;
-  document.body.classList.add("command-open");
-  renderCommandPalette();
-  window.requestAnimationFrame(() => el("command-input").focus());
-}
-
-function closeCommandPalette() {
-  el("command-palette").hidden = true;
-  document.body.classList.remove("command-open");
-}
-
-function handleCommandBackdropClick(event) {
-  if (event.target === el("command-palette")) closeCommandPalette();
-}
-
-function handleCommandInputKeydown(event) {
-  if (event.key === "Escape") {
-    event.preventDefault();
-    closeCommandPalette();
-    return;
-  }
-  if (event.key === "ArrowDown") {
-    event.preventDefault();
-    moveCommandSelection(1);
-    return;
-  }
-  if (event.key === "ArrowUp") {
-    event.preventDefault();
-    moveCommandSelection(-1);
-    return;
-  }
-  if (event.key === "Enter") {
-    event.preventDefault();
-    const command = state.commandItems[state.commandIndex];
-    if (command) void runCommand(command.id);
-  }
-}
-
-function handleCommandListClick(event) {
-  const button = event.target.closest("button[data-command-id]");
-  if (!button) return;
-  void runCommand(button.dataset.commandId);
-}
-
-function renderCommandPalette() {
-  const query = el("command-input").value.trim().toLowerCase();
-  const commands = buildCommandItems();
-  state.commandItems = commands.filter((command) => {
-    const haystack = `${command.label} ${command.hint || ""}`.toLowerCase();
-    return !query || haystack.includes(query);
-  });
-  state.commandIndex = Math.min(
-    state.commandIndex,
-    Math.max(0, state.commandItems.length - 1),
-  );
-  if (!state.commandItems.length) {
-    el("command-list").innerHTML = '<p class="empty">No commands.</p>';
-    return;
-  }
-  el("command-list").innerHTML = state.commandItems
-    .map((command, index) => commandItemHtml(command, index))
-    .join("");
-}
-
-function commandItemHtml(command, index) {
-  return `
-    <button class="command-item" type="button" role="option" data-command-id="${escapeHtmlAttr(command.id)}" aria-selected="${index === state.commandIndex}">
-      <span>${escapeHtml(command.label)}</span>
-      <small>${escapeHtml(command.hint || "")}</small>
-    </button>
-  `;
-}
-
-function moveCommandSelection(delta) {
-  if (!state.commandItems.length) return;
-  const length = state.commandItems.length;
-  state.commandIndex = (state.commandIndex + delta + length) % length;
-  renderCommandPalette();
-  const selected = el("command-list").querySelector('[aria-selected="true"]');
-  selected?.scrollIntoView({ block: "nearest" });
-}
-
-function buildCommandItems() {
-  const commands = [
-    {
-      id: "new-memo",
-      label: "New memo",
-      hint: "Day",
-      run: async () => {
-        await showView("day", { restoreScroll: false });
-        window.requestAnimationFrame(() => el("entry-text").focus());
-      },
-    },
-    {
-      id: "find",
-      label: "Find",
-      hint: "/",
-      run: async () => {
-        await showView("find", { restoreScroll: false });
-        focusSearchInput({ select: true });
-      },
-    },
-    {
-      id: "todo",
-      label: "Todo",
-      hint: "Open todo",
-      run: () => showView("todo", { restoreScroll: false }),
-    },
-    {
-      id: "random",
-      label: "Random page",
-      hint: "Open a random note",
-      run: () => fetchPage("", state.lastListView, "", { queryType: "rand" }),
-    },
-  ];
-  if (state.currentFile && state.currentFile !== "NoPage") {
-    commands.push({
-      id: "copy-current-page",
-      label: "Copy current page link",
-      hint: pageLinkText(state.currentFile),
-      run: copyCurrentPageLink,
-    });
-  }
-  for (const page of readRecentPages().slice(0, 6)) {
-    commands.push({
-      id: `recent:${page.file}`,
-      label: page.file,
-      hint: "Recent page",
-      run: () => fetchPage(page.file, "find"),
-    });
-  }
-  for (const page of readRecentEdits().slice(0, 6)) {
-    commands.push({
-      id: `recent-edit:${page.file}`,
-      label: page.file,
-      hint: "Recent edit",
-      run: () => fetchPage(page.file, "find"),
-    });
-  }
-  return commands;
-}
-
-async function runCommand(id) {
-  const command = state.commandItems.find((item) => item.id === id);
-  if (!command) return;
-  closeCommandPalette();
-  await command.run();
-}
-
-async function copyCurrentPageLink() {
-  if (!state.currentFile || state.currentFile === "NoPage") {
-    showToast("No page open.");
-    return;
-  }
-  try {
-    await copyText(pageLinkText(state.currentFile));
-    showToast("Page link copied.");
-  } catch (error) {
-    console.error(error);
-    showToast("Copy failed.");
-  }
-}
-
-function pageLinkText(file) {
-  return `[[${String(file).replace(/\.md$/, "")}]]`;
+function openRandomNote() {
+  void fetchPage("", state.lastListView, "", { queryType: "rand" });
 }
 
 function isEditableTarget(target) {
