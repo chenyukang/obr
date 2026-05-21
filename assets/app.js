@@ -191,6 +191,8 @@ function bindEvents() {
   el("entry-links").addEventListener("input", handleEntryInput);
   el("entry-meta").addEventListener("toggle", updateEntryMetaSummary);
   el("entry-text").addEventListener("paste", handlePaste);
+  el("entry-image-file").addEventListener("click", clearFileInputBeforePick);
+  el("entry-camera-file").addEventListener("click", clearFileInputBeforePick);
   el("entry-image-file").addEventListener("change", handleImageFile);
   el("entry-camera-file").addEventListener("change", handleImageFile);
   el("page-editor").addEventListener("input", handlePageEditorInput);
@@ -1605,13 +1607,20 @@ function handlePaste(event) {
   }
 }
 
+function clearFileInputBeforePick(event) {
+  event.currentTarget.value = "";
+}
+
 function handleImageFile(event) {
   const file = event.target.files[0];
   if (file) void readImage(file);
 }
 
 async function readImage(file) {
-  if (!file || !file.type.startsWith("image/")) return;
+  if (!isLikelyImageFile(file)) {
+    setEntryStatus("Selected file is not an image.");
+    return;
+  }
   const readId = state.imageReadId + 1;
   state.imageReadId = readId;
   state.image = "";
@@ -1621,7 +1630,10 @@ async function readImage(file) {
   updateEntrySaveState();
   setEntryStatus("Preparing image...");
   try {
-    const prepared = await prepareImage(file, previewUrl);
+    const prepared = await prepareImage(file, previewUrl, (previewBlob) => {
+      if (readId !== state.imageReadId) return;
+      setEntryPreviewBlob(previewBlob);
+    });
     if (readId !== state.imageReadId) return;
     state.image = prepared;
     setEntryPreviewBlob(prepared);
@@ -1641,7 +1653,7 @@ async function readImage(file) {
   }
 }
 
-async function prepareImage(file, previewUrl) {
+async function prepareImage(file, previewUrl, onPreview) {
   if (file.type === "image/gif") {
     if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
       throw new Error("GIF is too large to upload.");
@@ -1661,6 +1673,7 @@ async function prepareImage(file, previewUrl) {
 
   try {
     let smallest = null;
+    let previewSent = false;
     for (const maxDimension of MAX_IMAGE_DIMENSIONS) {
       const { width, height } = scaledDimensions(
         image.width,
@@ -1679,6 +1692,10 @@ async function prepareImage(file, previewUrl) {
       for (const quality of IMAGE_JPEG_QUALITIES) {
         const compressed = await canvasToBlob(canvas, "image/jpeg", quality);
         if (!smallest || compressed.size < smallest.size) smallest = compressed;
+        if (!previewSent && compressed.size <= MAX_IMAGE_UPLOAD_BYTES) {
+          previewSent = true;
+          onPreview?.(compressed);
+        }
         if (compressed.size <= TARGET_IMAGE_UPLOAD_BYTES) {
           return compressed;
         }
@@ -1703,6 +1720,17 @@ function scaledDimensions(width, height, maxDimension) {
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
   };
+}
+
+function isLikelyImageFile(file) {
+  if (!file) return false;
+  const type = (file.type || "").toLowerCase();
+  const name = (file.name || "").toLowerCase();
+  return (
+    type.startsWith("image/") ||
+    /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(name) ||
+    (!type && file.size > 0)
+  );
 }
 
 function isHeicImage(file) {
@@ -1794,8 +1822,11 @@ function clearEntryPreview() {
     URL.revokeObjectURL(state.imagePreviewUrl);
     state.imagePreviewUrl = "";
   }
-  el("entry-preview").removeAttribute("src");
-  el("entry-preview").hidden = true;
+  const preview = el("entry-preview");
+  preview.onload = null;
+  preview.onerror = null;
+  preview.removeAttribute("src");
+  preview.hidden = true;
 }
 
 function setEntryPreviewBlob(blob) {
@@ -1805,6 +1836,22 @@ function setEntryPreviewBlob(blob) {
   const previewUrl = URL.createObjectURL(blob);
   state.imagePreviewUrl = previewUrl;
   const preview = el("entry-preview");
+  preview.onload = () => {
+    preview.hidden = false;
+  };
+  preview.onerror = () => {
+    if (state.imagePreviewUrl !== previewUrl) return;
+    URL.revokeObjectURL(previewUrl);
+    state.imagePreviewUrl = "";
+    preview.onerror = null;
+    if (blob.size > MAX_IMAGE_UPLOAD_BYTES) return;
+    void blobToDataUrl(blob)
+      .then((dataUrl) => {
+        preview.src = dataUrl;
+        preview.hidden = false;
+      })
+      .catch(() => {});
+  };
   preview.src = previewUrl;
   preview.alt = "Selected image preview";
   preview.hidden = false;
