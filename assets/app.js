@@ -59,8 +59,11 @@ const state = {
 
 const el = (id) => document.getElementById(id);
 const MAX_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
-const MAX_IMAGE_DIMENSIONS = [1920, 1440, 1080];
-const IMAGE_JPEG_QUALITIES = [0.82, 0.72, 0.62];
+const TARGET_IMAGE_UPLOAD_BYTES = 1200 * 1024;
+const MAX_ORIGINAL_IMAGE_UPLOAD_BYTES = 1536 * 1024;
+const MAX_IMAGE_DIMENSIONS = [1600, 1280, 1024, 800];
+const IMAGE_JPEG_QUALITIES = [0.82, 0.74, 0.66, 0.58, 0.5];
+const ENTRY_SAVE_TIMEOUT_MS = 30000;
 const LONG_PRESS_COPY_MS = 650;
 const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
@@ -1019,19 +1022,41 @@ function offlineSourcePreview(source) {
 }
 
 async function request(path, options = {}) {
+  const { timeoutMs = 0, ...fetchOptions } = options;
+  let timeout = 0;
+  let timedOut = false;
+  let signal = fetchOptions.signal;
+  if (timeoutMs) {
+    const controller = new AbortController();
+    signal = controller.signal;
+    if (fetchOptions.signal) {
+      if (fetchOptions.signal.aborted) {
+        controller.abort();
+      } else {
+        fetchOptions.signal.addEventListener("abort", () => controller.abort(), {
+          once: true,
+        });
+      }
+    }
+    timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
   let response;
   try {
-    const headers = { ...(options.headers || {}) };
+    const headers = { ...(fetchOptions.headers || {}) };
     const hasContentType = Object.keys(headers).some(
       (key) => key.toLowerCase() === "content-type",
     );
-    if (options.body && !(options.body instanceof FormData) && !hasContentType) {
+    if (fetchOptions.body && !(fetchOptions.body instanceof FormData) && !hasContentType) {
       headers["content-type"] = "application/json";
     }
     response = await fetch(path, {
       credentials: "same-origin",
-      ...options,
+      ...fetchOptions,
       headers,
+      signal,
     });
     const fromOfflineCache = response.headers.get("x-obr-offline-cache") === "1";
     if (fromOfflineCache) {
@@ -1040,8 +1065,15 @@ async function request(path, options = {}) {
       setConnectionStatus(true);
     }
   } catch (error) {
+    if (timedOut) {
+      const timeoutError = new Error("Upload timed out. Draft kept.");
+      timeoutError.name = "TimeoutError";
+      throw timeoutError;
+    }
     if (error?.name !== "AbortError") setConnectionStatus(false);
     throw error;
+  } finally {
+    if (timeout) window.clearTimeout(timeout);
   }
   if (response.status === 401) {
     await refreshAuthOptions();
@@ -1435,11 +1467,13 @@ async function saveEntry() {
   };
   const formData = entryFormData(payload);
   setEntrySaving(true);
-  setEntryStatus("Local draft saved. Syncing...");
+  const imageSize = state.image ? ` (${formatBytes(state.image.size)})` : "";
+  setEntryStatus(`Local draft saved. Syncing${imageSize}...`);
   try {
     const response = await request("/api/entry/multipart", {
       method: "POST",
       body: formData,
+      timeoutMs: ENTRY_SAVE_TIMEOUT_MS,
     });
     const text = await response.text();
     if (text !== "ok") throw new Error(text);
@@ -1588,7 +1622,7 @@ async function readImage(file) {
   try {
     state.image = await prepareImage(file, previewUrl);
     updateEntrySaveState();
-    setEntryStatus(usesOriginalImageUpload(file) ? "Using original image for upload." : "");
+    setEntryStatus(imagePreparationStatus(file, state.image));
   } catch (error) {
     console.error(error);
     state.image = "";
@@ -1611,36 +1645,50 @@ async function prepareImage(file, previewUrl) {
 
   let image;
   try {
-    image = await loadImage(previewUrl);
+    image = await loadImageForCompression(file, previewUrl);
   } catch (error) {
-    if (file.size <= MAX_IMAGE_UPLOAD_BYTES) {
+    if (!isHeicImage(file) && file.size <= MAX_ORIGINAL_IMAGE_UPLOAD_BYTES) {
       return file;
     }
-    throw new Error("This image cannot be compressed here and is larger than 5 MB. Please choose a smaller image.");
+    throw new Error("This image cannot be compressed here. Please choose a smaller JPEG/PNG image.");
   }
 
-  for (const maxDimension of MAX_IMAGE_DIMENSIONS) {
-    const { width, height } = scaledDimensions(
-      image.naturalWidth,
-      image.naturalHeight,
-      maxDimension,
-    );
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Could not process image.");
-    context.drawImage(image, 0, 0, width, height);
+  try {
+    let smallest = null;
+    for (const maxDimension of MAX_IMAGE_DIMENSIONS) {
+      const { width, height } = scaledDimensions(
+        image.width,
+        image.height,
+        maxDimension,
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("Could not process image.");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, width, height);
+      image.draw(context, width, height);
 
-    for (const quality of IMAGE_JPEG_QUALITIES) {
-      const compressed = await canvasToBlob(canvas, "image/jpeg", quality);
-      if (compressed.size <= MAX_IMAGE_UPLOAD_BYTES) {
-        return compressed;
+      for (const quality of IMAGE_JPEG_QUALITIES) {
+        const compressed = await canvasToBlob(canvas, "image/jpeg", quality);
+        if (!smallest || compressed.size < smallest.size) smallest = compressed;
+        if (compressed.size <= TARGET_IMAGE_UPLOAD_BYTES) {
+          return compressed;
+        }
       }
     }
-  }
 
-  throw new Error("Image is too large after compression.");
+    if (smallest && smallest.size <= MAX_IMAGE_UPLOAD_BYTES) {
+      return smallest;
+    }
+    if (file.size <= MAX_ORIGINAL_IMAGE_UPLOAD_BYTES) {
+      return file;
+    }
+    throw new Error("Image is too large after compression.");
+  } finally {
+    image.close?.();
+  }
 }
 
 function scaledDimensions(width, height, maxDimension) {
@@ -1657,8 +1705,21 @@ function isHeicImage(file) {
   return type === "image/heic" || type === "image/heif" || name.endsWith(".heic") || name.endsWith(".heif");
 }
 
-function usesOriginalImageUpload(file) {
-  return state.image === file && file.type !== "image/gif";
+function imagePreparationStatus(file, prepared) {
+  if (!prepared) return "";
+  if (prepared === file) {
+    if (file.type === "image/gif") {
+      return `GIF ready: ${formatBytes(file.size)}.`;
+    }
+    return `Image ready: ${formatBytes(file.size)} original.`;
+  }
+  return `Image ready: ${formatBytes(prepared.size)} (was ${formatBytes(file.size)}).`;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
 function blobToDataUrl(blob) {
@@ -1678,6 +1739,48 @@ function canvasToBlob(canvas, type, quality) {
       quality,
     );
   });
+}
+
+async function loadImageForCompression(file, previewUrl) {
+  if ("createImageBitmap" in window) {
+    try {
+      const bitmap = await createImageBitmapForCompression(file);
+      if (bitmap.width > 0 && bitmap.height > 0) {
+        return {
+          width: bitmap.width,
+          height: bitmap.height,
+          draw: (context, width, height) => {
+            context.drawImage(bitmap, 0, 0, width, height);
+          },
+          close: () => bitmap.close?.(),
+        };
+      }
+      bitmap.close?.();
+    } catch {
+      // Fall back to HTMLImageElement decoding below.
+    }
+  }
+
+  const image = await loadImage(previewUrl);
+  if (image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+    throw new Error("This image format cannot be processed.");
+  }
+  return {
+    width: image.naturalWidth,
+    height: image.naturalHeight,
+    draw: (context, width, height) => {
+      context.drawImage(image, 0, 0, width, height);
+    },
+    close: () => {},
+  };
+}
+
+async function createImageBitmapForCompression(file) {
+  try {
+    return await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch {
+    return createImageBitmap(file);
+  }
 }
 
 function clearEntryPreview() {

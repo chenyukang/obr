@@ -551,11 +551,14 @@ pub(crate) async fn post_entry_multipart(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> AppResult<Response> {
+    let started = Instant::now();
     let now = Local::now();
     let mut page = String::new();
     let mut links = String::new();
     let mut text = String::new();
     let mut image_name = None;
+    let mut image_bytes = 0usize;
+    let mut image_type = String::new();
 
     while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
         let name = field.name().unwrap_or_default().to_string();
@@ -569,9 +572,18 @@ pub(crate) async fn post_entry_multipart(
                     .map(str::to_owned)
                     .unwrap_or_else(|| "image/jpeg".to_string());
                 let file_name = field.file_name().map(str::to_owned);
-                let image_type = normalize_multipart_image_type(&content_type, file_name.as_deref());
+                image_type = normalize_multipart_image_type(&content_type, file_name.as_deref());
                 let bytes = field.bytes().await.map_err(anyhow::Error::from)?;
+                image_bytes = bytes.len();
                 if bytes.len() > MAX_ENTRY_IMAGE_BYTES {
+                    info!(
+                        api = "entry_multipart",
+                        image_bytes = image_bytes,
+                        image_type = %image_type,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        status = "payload_too_large",
+                        "api timing"
+                    );
                     return Ok((StatusCode::PAYLOAD_TOO_LARGE, "image too large").into_response());
                 }
                 if !bytes.is_empty() {
@@ -587,15 +599,24 @@ pub(crate) async fn post_entry_multipart(
         }
     }
 
-    write_entry(
+    let response = write_entry(
         state,
         EntryPayload {
-            page,
+            page: page.clone(),
             links,
             text,
             image_name,
         },
-    )
+    )?;
+    info!(
+        api = "entry_multipart",
+        page = %page,
+        image_bytes = image_bytes,
+        image_type = %image_type,
+        elapsed_ms = started.elapsed().as_millis(),
+        "api timing"
+    );
+    Ok(response)
 }
 
 struct EntryPayload {
@@ -611,7 +632,10 @@ fn normalize_multipart_image_type(content_type: &str, file_name: Option<&str>) -
             content_type.to_string()
         }
         _ => file_name
-            .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()))
+            .and_then(|name| {
+                name.rsplit_once('.')
+                    .map(|(_, ext)| ext.to_ascii_lowercase())
+            })
             .unwrap_or_else(|| "jpg".to_string()),
     }
 }
