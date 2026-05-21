@@ -116,6 +116,8 @@ const ICONS = {
     '<circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path>',
   shuffle:
     '<path d="m18 14 4 4-4 4"></path><path d="m18 2 4 4-4 4"></path><path d="M2 18h1.9a6 6 0 0 0 5.2-3l5.8-10A6 6 0 0 1 20.1 2H22"></path><path d="M2 6h1.9a6 6 0 0 1 5.2 3l.7 1.2"></path><path d="M14.9 19a6 6 0 0 0 5.2 3H22"></path>',
+  "trash-2":
+    '<path d="M3 6h18"></path><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path>',
   x: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
 };
 
@@ -190,6 +192,7 @@ function bindEvents() {
   el("page-editor").addEventListener("input", handlePageEditorInput);
   el("page-block-editor").addEventListener("click", handlePageBlockEditorClick);
   el("page-block-editor").addEventListener("focusout", handlePageBlockEditorFocusOut);
+  el("discard-page-draft").addEventListener("click", discardRestoredPageDraft);
 
   el("search-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2163,7 +2166,8 @@ async function toggleEdit() {
     el("toc-button").hidden = true;
     closeTocPanel();
     updateReadingProgress();
-    setPageEditorStatus(draft === null ? "" : "Draft restored.");
+    showPageDraftBanner(draft !== null);
+    setPageEditorStatus("");
     setButtonIcon(button, "save", "Save");
     return;
   }
@@ -2670,6 +2674,7 @@ function closePageEditor() {
   editor.hidden = true;
   el("page-editor-shell").hidden = true;
   el("page-block-editor").innerHTML = "";
+  showPageDraftBanner(false);
   window.clearTimeout(state.editorPreviewTimer);
   el("page-content").hidden = false;
   setButtonIcon(el("edit-button"), "pencil", "Edit");
@@ -2696,6 +2701,25 @@ function loadPageDraft(file) {
 function clearPageDraft(file) {
   if (!file) return;
   localStorage.removeItem(pageDraftKey(file));
+}
+
+function discardRestoredPageDraft() {
+  if (!state.currentFile) return;
+  const editor = el("page-editor");
+  if (editor.hidden) return;
+  if (!window.confirm("Discard the restored draft and reload the saved page source?")) {
+    return;
+  }
+  clearPageDraft(state.currentFile);
+  editor.value = state.currentContent;
+  showPageDraftBanner(false);
+  setPageEditorStatus("");
+  renderBlockEditor({ activeIndex: initialEditorBlockIndex(editor.value) });
+  showToast("Draft discarded.");
+}
+
+function showPageDraftBanner(show) {
+  el("page-draft-banner").hidden = !show;
 }
 
 function pageDraftKey(file) {

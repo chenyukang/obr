@@ -412,6 +412,32 @@ main {
   display: none;
 }
 
+.page-draft-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 10px;
+  border: 1px solid #f0d8a8;
+  border-radius: 12px;
+  background: #fff8e8;
+  color: #6f4a09;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.page-draft-banner[hidden] {
+  display: none;
+}
+
+.page-draft-banner button {
+  flex: 0 0 auto;
+  border-color: #e8c47c;
+  background: #fffdf8;
+  color: #6f4a09;
+  padding: 6px 10px;
+}
+
 .page-block-editor {
   min-height: 58vh;
   border: 1px solid var(--line);
