@@ -477,11 +477,12 @@ fn normalize_rel(input: &str, extension: Option<&str>) -> Result<PathBuf> {
     if trimmed.contains('\0') {
         bail!("path contains null byte");
     }
-    if let Some(extension) = extension {
-        if !trimmed.ends_with(extension) {
-            trimmed.push_str(extension);
-        }
+    if let Some(extension) = extension
+        && !trimmed.ends_with(extension)
+    {
+        trimmed.push_str(extension);
     }
+
     let path = Path::new(&trimmed);
     if path.is_absolute() {
         bail!("absolute paths are not allowed");
