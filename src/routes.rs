@@ -7,7 +7,7 @@ use std::{
 use anyhow::Context;
 use axum::{
     Json,
-    extract::{Path as AxumPath, Query, State},
+    extract::{Multipart, Path as AxumPath, Query, State},
     http::{
         HeaderMap, StatusCode,
         header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, HeaderValue, IF_NONE_MATCH},
@@ -29,7 +29,7 @@ use crate::{
     markdown::{
         auto_link_note_titles, ensure_inside, escape_html, escape_html_attr, mark_todo_content,
         normalize_markdown_rel, normalize_rel_path, rel_to_vault, render_markdown_html,
-        save_data_url_image,
+        save_data_url_image, save_image_bytes,
     },
 };
 
@@ -100,6 +100,7 @@ struct PingResponse {
 
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
 const PASSKEY_AUTHENTICATION_SESSION_KEY: &str = "passkey_authentication";
+const MAX_ENTRY_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 pub(crate) async fn index() -> Html<&'static str> {
     Html(include_str!("../assets/index.html"))
@@ -495,7 +496,7 @@ pub(crate) async fn image(
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     let etag_value = format!(r#""{}-{}""#, metadata.len(), modified);
-    let cache_control = HeaderValue::from_static("private, max-age=604800");
+    let cache_control = HeaderValue::from_static("private, max-age=2592000, immutable");
     if headers
         .get(IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -526,6 +527,83 @@ pub(crate) async fn post_entry(
     State(state): State<Arc<AppState>>,
     Json(body): Json<EntryRequest>,
 ) -> AppResult<Response> {
+    let image_name = if body.image.trim().is_empty() {
+        None
+    } else {
+        Some(save_data_url_image(
+            &state.config.vault_path,
+            &body.image,
+            &Local::now(),
+        )?)
+    };
+    write_entry(
+        state,
+        EntryPayload {
+            page: body.page,
+            links: body.links,
+            text: body.text,
+            image_name,
+        },
+    )
+}
+
+pub(crate) async fn post_entry_multipart(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> AppResult<Response> {
+    let now = Local::now();
+    let mut page = String::new();
+    let mut links = String::new();
+    let mut text = String::new();
+    let mut image_name = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "page" => page = field.text().await.map_err(anyhow::Error::from)?,
+            "links" => links = field.text().await.map_err(anyhow::Error::from)?,
+            "text" => text = field.text().await.map_err(anyhow::Error::from)?,
+            "image" => {
+                let content_type = field
+                    .content_type()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "image/jpeg".to_string());
+                let bytes = field.bytes().await.map_err(anyhow::Error::from)?;
+                if bytes.len() > MAX_ENTRY_IMAGE_BYTES {
+                    return Ok((StatusCode::PAYLOAD_TOO_LARGE, "image too large").into_response());
+                }
+                if !bytes.is_empty() {
+                    image_name = Some(save_image_bytes(
+                        &state.config.vault_path,
+                        &bytes,
+                        &content_type,
+                        &now,
+                    )?);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    write_entry(
+        state,
+        EntryPayload {
+            page,
+            links,
+            text,
+            image_name,
+        },
+    )
+}
+
+struct EntryPayload {
+    page: String,
+    links: String,
+    text: String,
+    image_name: Option<String>,
+}
+
+fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> {
     let now = Local::now();
     let date = now.format("%Y-%m-%d").to_string();
     let time = now.format("%H:%M").to_string();
@@ -534,7 +612,7 @@ pub(crate) async fn post_entry(
     if page.is_empty()
         && body.links.trim().is_empty()
         && body.text.trim().is_empty()
-        && body.image.trim().is_empty()
+        && body.image_name.is_none()
     {
         return Ok((StatusCode::BAD_REQUEST, "empty post").into_response());
     }
@@ -588,8 +666,7 @@ pub(crate) async fn post_entry(
     appended.push('\n');
     appended.push_str(&text);
 
-    if !body.image.trim().is_empty() {
-        let image_name = save_data_url_image(&state.config.vault_path, &body.image, &now)?;
+    if let Some(image_name) = body.image_name {
         appended.push_str(&format!("\n\n![[{image_name}|250]]\n"));
     }
 

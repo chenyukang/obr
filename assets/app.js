@@ -6,6 +6,7 @@ const state = {
   currentContentLoaded: false,
   currentHighlightKeyword: "",
   image: "",
+  imagePreviewUrl: "",
   searchTimer: 0,
   editorPreviewTimer: 0,
   activeEditorBlock: -1,
@@ -57,7 +58,7 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
-const MAX_IMAGE_DATA_URL_BYTES = 6 * 1024 * 1024;
+const MAX_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGE_DIMENSIONS = [1920, 1440, 1080];
 const IMAGE_JPEG_QUALITIES = [0.82, 0.72, 0.62];
 const LONG_PRESS_COPY_MS = 650;
@@ -1020,13 +1021,17 @@ function offlineSourcePreview(source) {
 async function request(path, options = {}) {
   let response;
   try {
+    const headers = { ...(options.headers || {}) };
+    const hasContentType = Object.keys(headers).some(
+      (key) => key.toLowerCase() === "content-type",
+    );
+    if (options.body && !(options.body instanceof FormData) && !hasContentType) {
+      headers["content-type"] = "application/json";
+    }
     response = await fetch(path, {
       credentials: "same-origin",
       ...options,
-      headers: {
-        ...(options.body ? { "content-type": "application/json" } : {}),
-        ...(options.headers || {}),
-      },
+      headers,
     });
     const fromOfflineCache = response.headers.get("x-obr-offline-cache") === "1";
     if (fromOfflineCache) {
@@ -1426,14 +1431,15 @@ async function saveEntry() {
     page: el("entry-page").value,
     links: el("entry-links").value,
     text: el("entry-text").value,
-    image: state.image,
+    image: "",
   };
+  const formData = entryFormData(payload);
   setEntrySaving(true);
   setEntryStatus("Local draft saved. Syncing...");
   try {
-    const response = await request("/api/entry", {
+    const response = await request("/api/entry/multipart", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: formData,
     });
     const text = await response.text();
     if (text !== "ok") throw new Error(text);
@@ -1444,6 +1450,7 @@ async function saveEntry() {
     console.error(error);
     if (shouldQueueOffline(error)) {
       try {
+        payload.image = state.image ? await blobToDataUrl(state.image) : "";
         queueOfflineMutation("entry", payload);
         resetEntry();
         setEntryStatus("");
@@ -1460,6 +1467,28 @@ async function saveEntry() {
   } finally {
     setEntrySaving(false);
   }
+}
+
+function entryFormData(payload) {
+  const formData = new FormData();
+  formData.append("page", payload.page);
+  formData.append("links", payload.links);
+  formData.append("text", payload.text);
+  if (state.image) {
+    formData.append("image", state.image, entryImageFileName(state.image));
+  }
+  return formData;
+}
+
+function entryImageFileName(blob) {
+  const ext = blob.type === "image/png"
+    ? "png"
+    : blob.type === "image/gif"
+      ? "gif"
+      : blob.type === "image/webp"
+        ? "webp"
+        : "jpg";
+  return `entry-image.${ext}`;
 }
 
 function hasEntryContent() {
@@ -1495,7 +1524,7 @@ function resetEntry() {
   el("entry-image-file").value = "";
   el("entry-camera-file").value = "";
   state.image = "";
-  el("entry-preview").hidden = true;
+  clearEntryPreview();
   localStorage.removeItem("obr.entry.text");
   localStorage.removeItem("obr.entry.page");
   localStorage.removeItem("obr.entry.links");
@@ -1544,20 +1573,22 @@ function handleImageFile(event) {
 async function readImage(file) {
   if (!file || !file.type.startsWith("image/")) return;
   state.image = "";
+  clearEntryPreview();
+  const previewUrl = URL.createObjectURL(file);
+  state.imagePreviewUrl = previewUrl;
+  el("entry-preview").src = previewUrl;
+  el("entry-preview").hidden = false;
   state.entryImagePreparing = true;
-  el("entry-preview").hidden = true;
   updateEntrySaveState();
   setEntryStatus("Preparing image...");
   try {
-    state.image = await prepareImage(file);
-    el("entry-preview").src = state.image;
-    el("entry-preview").hidden = false;
+    state.image = await prepareImage(file, previewUrl);
     updateEntrySaveState();
-    setEntryStatus("Image ready.");
+    setEntryStatus("");
   } catch (error) {
     console.error(error);
     state.image = "";
-    el("entry-preview").hidden = true;
+    clearEntryPreview();
     updateEntrySaveState();
     setEntryStatus(error.message || "Could not prepare image.");
   } finally {
@@ -1566,16 +1597,15 @@ async function readImage(file) {
   }
 }
 
-async function prepareImage(file) {
-  const dataUrl = await readFileAsDataUrl(file);
+async function prepareImage(file, previewUrl) {
   if (file.type === "image/gif") {
-    if (dataUrl.length > MAX_IMAGE_DATA_URL_BYTES) {
+    if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
       throw new Error("GIF is too large to upload.");
     }
-    return dataUrl;
+    return file;
   }
 
-  const image = await loadImage(dataUrl);
+  const image = await loadImage(previewUrl);
   for (const maxDimension of MAX_IMAGE_DIMENSIONS) {
     const { width, height } = scaledDimensions(
       image.naturalWidth,
@@ -1590,8 +1620,8 @@ async function prepareImage(file) {
     context.drawImage(image, 0, 0, width, height);
 
     for (const quality of IMAGE_JPEG_QUALITIES) {
-      const compressed = canvas.toDataURL("image/jpeg", quality);
-      if (compressed.length <= MAX_IMAGE_DATA_URL_BYTES) {
+      const compressed = await canvasToBlob(canvas, "image/jpeg", quality);
+      if (compressed.size <= MAX_IMAGE_UPLOAD_BYTES) {
         return compressed;
       }
     }
@@ -1608,22 +1638,41 @@ function scaledDimensions(width, height, maxDimension) {
   };
 }
 
-function readFileAsDataUrl(file) {
+function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("Could not read image."));
     reader.onload = () => resolve(reader.result);
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
 }
 
-function loadImage(dataUrl) {
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error("Could not process image."))),
+      type,
+      quality,
+    );
+  });
+}
+
+function clearEntryPreview() {
+  if (state.imagePreviewUrl) {
+    URL.revokeObjectURL(state.imagePreviewUrl);
+    state.imagePreviewUrl = "";
+  }
+  el("entry-preview").removeAttribute("src");
+  el("entry-preview").hidden = true;
+}
+
+function loadImage(url) {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
     image.onerror = () =>
       reject(new Error("This image format cannot be processed."));
-    image.src = dataUrl;
+    image.src = url;
   });
 }
 

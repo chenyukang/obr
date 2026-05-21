@@ -578,14 +578,23 @@ pub(crate) fn save_data_url_image(
     let mime = meta
         .trim_start_matches("data:image/")
         .trim_end_matches(";base64");
+    let bytes = STANDARD.decode(data)?;
+    save_image_bytes(vault, &bytes, mime, now)
+}
+
+pub(crate) fn save_image_bytes(
+    vault: &Path,
+    bytes: &[u8],
+    mime: &str,
+    now: &chrono::DateTime<Local>,
+) -> Result<String> {
     let ext = match mime {
-        "jpeg" | "jpg" => "jpg",
-        "png" => "png",
-        "gif" => "gif",
-        "webp" => "webp",
+        "image/jpeg" | "jpeg" | "jpg" => "jpg",
+        "image/png" | "png" => "png",
+        "image/gif" | "gif" => "gif",
+        "image/webp" | "webp" => "webp",
         other => bail!("unsupported image type: {other}"),
     };
-    let bytes = STANDARD.decode(data)?;
     fs::create_dir_all(vault.join("Pics"))?;
     for _ in 0..16 {
         let suffix = Uuid::new_v4().simple().to_string();
@@ -599,7 +608,7 @@ pub(crate) fn save_data_url_image(
         ensure_inside(vault, &path)?;
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
-                file.write_all(&bytes)?;
+                file.write_all(bytes)?;
                 return Ok(name);
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}

@@ -7,7 +7,7 @@ edition = "2024"
 ammonia = "4.1.2"
 anyhow = "1.0"
 argon2 = { version = "0.5", features = ["std"] }
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 libc = "0.2"

@@ -269,6 +269,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/page", get(routes::get_page).post(routes::post_page))
         .route("/api/search", get(routes::search))
         .route("/api/entry", post(routes::post_entry))
+        .route("/api/entry/multipart", post(routes::post_entry_multipart))
         .route("/api/mark", post(routes::mark_todo))
         .route("/assets/images/{*path}", get(routes::image))
         .route_layer(middleware::from_fn(require_auth));
