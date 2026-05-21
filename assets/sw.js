@@ -1,9 +1,9 @@
-const CACHE_VERSION = "obr-offline-20260521-62";
+const CACHE_VERSION = "obr-offline-20260521-63";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
-const IMAGE_CACHE = `${CACHE_VERSION}:images`;
+const IMAGE_CACHE = "obr-images-v1";
 const PAGE_CACHE_LIMIT = 40;
-const IMAGE_CACHE_LIMIT = 300;
+const IMAGE_CACHE_LIMIT = 600;
 const NAVIGATION_FALLBACK_TIMEOUT_MS = 800;
 const PAGE_API_FALLBACK_TIMEOUT_MS = 1500;
 
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260521-image-routes",
-  "/assets/app.js?v=20260521-image-routes",
+  "/assets/style.css?v=20260521-stable-image-cache",
+  "/assets/app.js?v=20260521-stable-image-cache",
 ];
 
 self.addEventListener("install", (event) => {
@@ -28,13 +28,14 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) =>
-        Promise.all(
+      .then(async (keys) => {
+        await migrateLegacyImageCaches(keys);
+        await Promise.all(
           keys
             .filter((key) => key.startsWith("obr-offline-") && !key.startsWith(CACHE_VERSION))
             .map((key) => caches.delete(key)),
-        ),
-      )
+        );
+      })
       .then(() => self.clients.claim()),
   );
 });
@@ -172,6 +173,24 @@ async function trimCache(cache, limit) {
   const keys = await cache.keys();
   if (keys.length <= limit) return;
   await Promise.all(keys.slice(0, keys.length - limit).map((key) => cache.delete(key)));
+}
+
+async function migrateLegacyImageCaches(keys) {
+  const legacyImageCaches = keys.filter(
+    (key) => key.startsWith("obr-offline-") && key.endsWith(":images"),
+  );
+  if (!legacyImageCaches.length) return;
+
+  const imageCache = await caches.open(IMAGE_CACHE);
+  for (const cacheName of legacyImageCaches) {
+    const legacy = await caches.open(cacheName);
+    for (const request of await legacy.keys()) {
+      if (await imageCache.match(request)) continue;
+      const response = await legacy.match(request);
+      if (response) await imageCache.put(request, response.clone());
+    }
+  }
+  await trimCache(imageCache, IMAGE_CACHE_LIMIT);
 }
 
 async function offlineResponse(response) {

@@ -1307,6 +1307,11 @@ a {
   display: none;
 }
 
+.markdown .image-frame.image-seen .image-placeholder {
+  background: #eef3f1;
+  animation: none;
+}
+
 .markdown .image-placeholder {
   position: absolute;
   inset: 0;

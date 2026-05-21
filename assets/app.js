@@ -54,6 +54,7 @@ const state = {
   imageObserver: null,
   imageQueue: [],
   imageActiveLoads: 0,
+  loadedImageUrls: new Set(),
   pagePrefetchQueue: [],
   pagePrefetching: false,
   pagePrefetchScheduled: false,
@@ -93,6 +94,8 @@ const SEARCH_CACHE_KEY = "obr.search-cache";
 const SEARCH_CACHE_LIMIT = 24;
 const OUTBOX_KEY = "obr.offline.outbox";
 const CLIENT_ID_KEY = "obr.client-id";
+const LOADED_IMAGE_URLS_KEY = "obr.loaded-image-urls";
+const LOADED_IMAGE_URLS_LIMIT = 600;
 
 const ICONS = {
   "arrow-left": '<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>',
@@ -132,6 +135,7 @@ const ICONS = {
 
 document.addEventListener("DOMContentLoaded", async () => {
   installIcons();
+  restoreLoadedImageUrls();
   bindEvents();
   initializeAppHistory({ view: "day" });
   void registerServiceWorker();
@@ -3547,12 +3551,37 @@ function finishMarkdownImageLoad(img) {
   }
 }
 
+function restoreLoadedImageUrls() {
+  const urls = readJson(LOADED_IMAGE_URLS_KEY, []);
+  state.loadedImageUrls = new Set(
+    urls.filter((url) => typeof url === "string" && url).slice(-LOADED_IMAGE_URLS_LIMIT),
+  );
+}
+
+function imageUrlWasLoaded(url) {
+  return Boolean(url && state.loadedImageUrls.has(url));
+}
+
+function rememberLoadedImageUrl(url) {
+  if (!url || state.loadedImageUrls.has(url)) return;
+  state.loadedImageUrls.add(url);
+  const urls = [...state.loadedImageUrls].slice(-LOADED_IMAGE_URLS_LIMIT);
+  state.loadedImageUrls = new Set(urls);
+  try {
+    localStorage.setItem(LOADED_IMAGE_URLS_KEY, JSON.stringify(urls));
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 function enhanceMarkdownImages(root) {
   if (!root) return;
   for (const img of root.querySelectorAll("img")) {
     if (img.closest(".image-frame")) continue;
     const frame = document.createElement("span");
-    frame.className = "image-frame image-loading";
+    const imageUrl = img.dataset.src || img.currentSrc || img.src;
+    const seenBefore = imageUrlWasLoaded(imageUrl);
+    frame.className = `image-frame image-loading${seenBefore ? " image-seen" : ""}`;
     frame.setAttribute("aria-busy", "true");
     const width = parseImageDimension(img.getAttribute("width"));
     const height = parseImageDimension(img.getAttribute("height"));
@@ -3569,7 +3598,7 @@ function enhanceMarkdownImages(root) {
     const placeholder = document.createElement("span");
     placeholder.className = "image-placeholder";
     placeholder.setAttribute("aria-hidden", "true");
-    placeholder.textContent = "Loading image";
+    placeholder.textContent = seenBefore ? "" : "Loading image";
 
     img.parentNode.insertBefore(frame, img);
     frame.append(placeholder, img);
@@ -3577,13 +3606,14 @@ function enhanceMarkdownImages(root) {
 
     const finish = () => {
       finishMarkdownImageLoad(img);
-      frame.classList.remove("image-loading", "image-error");
+      rememberLoadedImageUrl(img.dataset.src || img.currentSrc || img.src);
+      frame.classList.remove("image-loading", "image-error", "image-seen");
       frame.classList.add("image-loaded");
       frame.removeAttribute("aria-busy");
     };
     const fail = () => {
       finishMarkdownImageLoad(img);
-      frame.classList.remove("image-loading", "image-loaded");
+      frame.classList.remove("image-loading", "image-loaded", "image-seen");
       frame.classList.add("image-error");
       frame.removeAttribute("aria-busy");
       placeholder.textContent = "Image unavailable";
