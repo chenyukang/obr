@@ -28,6 +28,7 @@ struct SearchHit {
 
 const RECENT_SEARCH_LIMIT: usize = 20;
 const SEARCH_PAGE_SIZE: usize = 50;
+const METADATA_EMPTY_HTML: &str = r#"<span class="metadata-empty">empty</span>"#;
 
 #[derive(Clone, Debug)]
 struct CachedMarkdown {
@@ -705,14 +706,11 @@ fn render_frontmatter_mapping(mapping: &yaml_serde::Mapping) -> String {
     }
     body.push_str("</dl>");
 
-    render_metadata_panel(
-        &format!(
-            "{} {}",
-            mapping.len(),
-            if mapping.len() == 1 { "item" } else { "items" }
-        ),
-        &body,
-    )
+    render_metadata_panel(&metadata_count_label(mapping.len()), &body)
+}
+
+fn metadata_count_label(count: usize) -> String {
+    format!("{count} {}", if count == 1 { "item" } else { "items" })
 }
 
 fn render_metadata_panel(count_label: &str, body: &str) -> String {
@@ -776,7 +774,6 @@ fn render_pdf_embed(target: &str, full_src: &str) -> String {
     html.push_str(r#"<div class="pdf-icon" aria-hidden="true">PDF</div>"#);
     html.push_str(r#"<div class="pdf-meta">"#);
     let _ = write!(html, "<strong>{}</strong>", escape_html(target));
-    html.push_str("<span>Preview may be blocked by mobile WebViews.</span>");
     html.push_str("</div>");
     let _ = write!(
         html,
@@ -803,7 +800,7 @@ fn render_raw_frontmatter(frontmatter: &str) -> String {
 
 fn render_property_value(value: &YamlValue) -> String {
     match value {
-        YamlValue::Null => r#"<span class="metadata-empty">empty</span>"#.to_string(),
+        YamlValue::Null => METADATA_EMPTY_HTML.to_string(),
         YamlValue::Bool(value) => escape_html(&value.to_string()),
         YamlValue::Number(value) => escape_html(&value.to_string()),
         YamlValue::String(value) => render_property_scalar(value),
@@ -815,7 +812,7 @@ fn render_property_value(value: &YamlValue) -> String {
 
 fn render_property_scalar(value: &str) -> String {
     if value.trim().is_empty() {
-        return r#"<span class="metadata-empty">empty</span>"#.to_string();
+        return METADATA_EMPTY_HTML.to_string();
     }
     if is_http_url(value) {
         return render_link(value, value);
@@ -825,7 +822,7 @@ fn render_property_scalar(value: &str) -> String {
 
 fn render_property_sequence(values: &[YamlValue]) -> String {
     if values.is_empty() {
-        return r#"<span class="metadata-empty">empty</span>"#.to_string();
+        return METADATA_EMPTY_HTML.to_string();
     }
     if values.iter().all(is_scalar_yaml_value) {
         return render_metadata_chips(values);
@@ -918,21 +915,28 @@ fn obsidian_embed_html(raw: &str) -> String {
         return render_pdf_embed(target, &full_src);
     }
 
-    let mut attrs = String::new();
-    let mut preview_width = 900;
-    if let Some(size) = size {
-        let (width, height) = split_embed_size(size);
-        if let Some(width) = width {
-            let _ = write!(attrs, r#" width="{width}""#);
-            preview_width = width.saturating_mul(2).clamp(480, 1200);
-        }
-        if let Some(height) = height {
-            let _ = write!(attrs, r#" height="{height}""#);
-        }
-    }
+    let (attrs, preview_width) = image_embed_attrs(size);
     let preview_src = format!("/image-preview/{encoded_target}?w={preview_width}");
 
     render_image_embed(target, &preview_src, &full_src, &attrs)
+}
+
+fn image_embed_attrs(size: Option<&str>) -> (String, u32) {
+    let Some(size) = size else {
+        return (String::new(), 900);
+    };
+    let (width, height) = split_embed_size(size);
+    let mut attrs = String::new();
+    if let Some(width) = width {
+        let _ = write!(attrs, r#" width="{width}""#);
+    }
+    if let Some(height) = height {
+        let _ = write!(attrs, r#" height="{height}""#);
+    }
+    let preview_width = width
+        .map(|width| width.saturating_mul(2).clamp(480, 1200))
+        .unwrap_or(900);
+    (attrs, preview_width)
 }
 
 fn is_pdf_embed_target(target: &str) -> bool {
@@ -1516,6 +1520,7 @@ mod tests {
         assert!(rendered.contains(r#"<div class="pdf-meta">"#));
         assert!(rendered.contains(r#"Reilly_Invoice_Annual Plan_2-18-2024.pdf"#));
         assert!(rendered.contains(r#"<a class="pdf-link" href="/images/O%27Reilly_Invoice_Annual%20Plan_2-18-2024.pdf" target="_blank""#));
+        assert!(!rendered.contains("Preview may be blocked by mobile WebViews."));
         assert!(!rendered.contains("<iframe"));
         assert!(!rendered.contains("<img"));
     }

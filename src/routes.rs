@@ -1,5 +1,6 @@
 use std::{
     collections::hash_map::DefaultHasher,
+    fmt::Write as FmtWrite,
     fs,
     hash::{Hash, Hasher},
     io::{BufWriter, Write},
@@ -459,21 +460,14 @@ pub(crate) async fn search(
     let render_started = Instant::now();
     let mut body = String::new();
     for path in results.paths {
-        let mut rel = rel_to_vault(&state.config.vault_path, &path)?;
-        if let Some(stripped) = rel.strip_suffix(".md") {
-            rel = stripped.to_string();
-        }
-        body.push_str(&format!(
-            "<li><a id=\"{}\" href=\"#\">{}</a></li>",
-            escape_html_attr(&rel),
-            escape_html(&rel)
-        ));
+        body.push_str(&render_search_result_item(&state.config.vault_path, &path)?);
     }
     let shown = offset.saturating_add(returned_hits);
     if shown < total_matches {
-        body.push_str(&format!(
-            "<li class=\"search-more-row\"><button class=\"search-more\" type=\"button\" data-search-page=\"{}\">More <span>{} / {}</span></button></li>",
-            page.saturating_add(1), shown, total_matches
+        body.push_str(&render_search_more_item(
+            page.saturating_add(1),
+            shown,
+            total_matches,
         ));
     }
     info!(
@@ -491,6 +485,30 @@ pub(crate) async fn search(
         "api timing"
     );
     Ok(Html(body).into_response())
+}
+
+fn render_search_result_item(vault_path: &Path, path: &Path) -> AppResult<String> {
+    let mut rel = rel_to_vault(vault_path, path)?;
+    if let Some(stripped) = rel.strip_suffix(".md") {
+        rel = stripped.to_string();
+    }
+    Ok(format!(
+        r##"<li><a id="{}" href="#">{}</a></li>"##,
+        escape_html_attr(&rel),
+        escape_html(&rel)
+    ))
+}
+
+fn render_search_more_item(next_page: usize, shown: usize, total_matches: usize) -> String {
+    let mut html = String::new();
+    html.push_str(r#"<li class="search-more-row">"#);
+    let _ = write!(
+        html,
+        r#"<button class="search-more" type="button" data-search-page="{next_page}">"#
+    );
+    let _ = write!(html, "More <span>{shown} / {total_matches}</span>");
+    html.push_str("</button></li>");
+    html
 }
 
 pub(crate) async fn image(
