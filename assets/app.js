@@ -2331,7 +2331,8 @@ async function fetchPage(
   options = {},
 ) {
   if (!(await prepareToLeavePageEditor())) return;
-  const { updateHistory = true, queryType = "" } = options;
+  const { updateHistory = true, queryType = "", saveScroll = true } = options;
+  if (saveScroll) saveCurrentScrollPosition();
   state.pageController?.abort();
   const requestId = state.pageRequestId + 1;
   state.pageRequestId = requestId;
@@ -2344,6 +2345,7 @@ async function fetchPage(
     if (cachedPage) {
       displayPageData(cachedPage, path, sourceView, highlightKeyword, {
         updateHistory,
+        saveScroll: false,
       });
       renderedCachedPage = true;
     }
@@ -2387,7 +2389,7 @@ async function fetchPage(
   }
   displayPageData(data, path, sourceView, highlightKeyword, {
     updateHistory: updateHistory && !renderedCachedPage,
-    saveScroll: !renderedCachedPage,
+    saveScroll: false,
     restoreReading: !renderedCachedPage,
   });
 }
