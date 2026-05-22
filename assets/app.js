@@ -25,6 +25,8 @@ const state = {
   passwordLoginAllowed: true,
   connectionOnline: true,
   connectionPingController: null,
+  connectionHeartbeatTimer: 0,
+  connectionLastPingAt: 0,
   connectionRetryTimer: 0,
   connectionWindowFocused: true,
   entrySaving: false,
@@ -76,6 +78,8 @@ const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
 const TOAST_MS = 1800;
 const PING_TIMEOUT_MS = 5000;
+const CONNECTION_HEARTBEAT_MS = 10000;
+const CONNECTION_MIN_PING_GAP_MS = 9000;
 const CONNECTION_RETRY_MS = 5000;
 const STARTUP_VERIFY_TIMEOUT_MS = 1200;
 const AUTH_OPTIONS_TIMEOUT_MS = 1200;
@@ -390,6 +394,7 @@ async function handleAppPopState(event) {
 function startConnectionMonitor() {
   state.connectionWindowFocused = document.hasFocus?.() ?? true;
   setConnectionStatus(true);
+  startConnectionHeartbeat();
   window.addEventListener("online", () => resumeConnectionMonitor());
   window.addEventListener("offline", () => {
     // Mobile browsers/WebViews can briefly report offline after subresource failures
@@ -433,20 +438,40 @@ function startConnectionMonitor() {
 
 function resumeConnectionMonitor() {
   if (!isForegroundPage()) return;
+  if (state.connectionPingController) return;
+  if (!canStartConnectivityPing()) return;
   void checkConnectivity({ sync: true });
 }
 
 function pauseConnectionMonitor() {
   abortConnectivityCheck();
+  window.clearTimeout(state.connectionRetryTimer);
+  state.connectionRetryTimer = 0;
+}
+
+function startConnectionHeartbeat() {
+  window.clearInterval(state.connectionHeartbeatTimer);
+  state.connectionHeartbeatTimer = window.setInterval(() => {
+    if (!isForegroundPage()) return;
+    if (state.connectionPingController) return;
+    if (!canStartConnectivityPing()) return;
+    void checkConnectivity({ sync: true });
+  }, CONNECTION_HEARTBEAT_MS);
 }
 
 function scheduleConnectivityRetry(delay = CONNECTION_RETRY_MS) {
   window.clearTimeout(state.connectionRetryTimer);
   state.connectionRetryTimer = window.setTimeout(async () => {
     state.connectionRetryTimer = 0;
-    const online = await checkConnectivity({ sync: true, allowHidden: true });
-    if (!online && !document.hidden) scheduleConnectivityRetry();
+    if (!isForegroundPage()) return;
+    if (!canStartConnectivityPing()) return;
+    const online = await checkConnectivity({ sync: true });
+    if (!online && isForegroundPage()) scheduleConnectivityRetry();
   }, delay);
+}
+
+function canStartConnectivityPing() {
+  return Date.now() - state.connectionLastPingAt >= CONNECTION_MIN_PING_GAP_MS;
 }
 
 function abortConnectivityCheck() {
@@ -460,6 +485,7 @@ async function checkConnectivity(options = {}) {
   }
   const controller = new AbortController();
   state.connectionPingController = controller;
+  state.connectionLastPingAt = Date.now();
   const timeout = window.setTimeout(() => controller.abort(), PING_TIMEOUT_MS);
   try {
     const response = await fetch(pingUrl(), {
@@ -472,7 +498,7 @@ async function checkConnectivity(options = {}) {
     if (online && options.sync) void syncOutbox();
     return online;
   } catch {
-    if (!document.hidden) {
+    if (isForegroundPage()) {
       setConnectionStatus(false);
       scheduleConnectivityRetry();
     }
@@ -1235,7 +1261,7 @@ async function request(path, options = {}) {
     });
     const fromOfflineCache = response.headers.get("x-obr-offline-cache") === "1";
     if (fromOfflineCache) {
-      void checkConnectivity({ sync: true, allowHidden: true });
+      void checkConnectivity({ sync: true });
     } else if (response.ok) {
       setConnectionStatus(true);
     }

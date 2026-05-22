@@ -4,6 +4,7 @@ use std::{
     net::SocketAddr,
     process::{Command, Stdio},
     sync::Arc,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -21,12 +22,9 @@ use axum::{
 };
 use chrono::Local;
 use tokio::net::TcpListener;
-use tower_http::{
-    services::ServeDir,
-    trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer},
-};
+use tower_http::services::ServeDir;
 use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
-use tracing::{Level, info, warn};
+use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
 use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 
@@ -277,38 +275,47 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
 
     public
         .merge(protected)
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &Request<Body>| {
-                    let remote_addr = request
-                        .extensions()
-                        .get::<ConnectInfo<SocketAddr>>()
-                        .map(|ConnectInfo(addr)| addr.to_string())
-                        .unwrap_or_else(|| "-".to_string());
-                    let user_agent = request
-                        .headers()
-                        .get(USER_AGENT)
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("-");
-                    let client = classify_user_agent(user_agent);
-
-                    tracing::info_span!(
-                        "request",
-                        method = %request.method(),
-                        uri = %request.uri(),
-                        version = ?request.version(),
-                        remote_addr = %remote_addr,
-                        client = %client,
-                        user_agent = %user_agent,
-                    )
-                })
-                .on_request(DefaultOnRequest::new().level(Level::INFO))
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
-        )
+        .layer(middleware::from_fn(log_request))
         .layer(middleware::from_fn(security_headers))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(session_layer)
         .with_state(state)
+}
+
+async fn log_request(request: Request<Body>, next: Next) -> Response {
+    let started = Instant::now();
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let version = request.version();
+    let remote_addr = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let user_agent = request
+        .headers()
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+    let client = classify_user_agent(&user_agent);
+
+    let response = next.run(request).await;
+    let status = response.status();
+    let elapsed_ms = started.elapsed().as_millis();
+
+    info!(
+        method = %method,
+        uri = %uri,
+        version = ?version,
+        remote_addr = %remote_addr,
+        client = %client,
+        user_agent = %user_agent,
+        status = %status,
+        elapsed_ms,
+        "request"
+    );
+    response
 }
 
 async fn require_auth(session: Session, request: Request<Body>, next: Next) -> Response {

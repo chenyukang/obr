@@ -50,7 +50,6 @@ pub(crate) struct MarkdownSearchResults {
     pub(crate) paths: Vec<PathBuf>,
     pub(crate) total_matches: usize,
     pub(crate) offset: usize,
-    pub(crate) limit: usize,
 }
 
 pub(crate) struct MarkdownIndex {
@@ -117,7 +116,6 @@ impl MarkdownIndex {
                 .collect(),
             total_matches,
             offset,
-            limit,
         })
     }
 
@@ -1351,7 +1349,6 @@ mod tests {
         assert_eq!(results.paths.len(), SEARCH_PAGE_SIZE);
         assert_eq!(results.total_matches, SEARCH_PAGE_SIZE + 3);
         assert_eq!(results.offset, 0);
-        assert_eq!(results.limit, SEARCH_PAGE_SIZE);
     }
 
     #[test]
@@ -1367,7 +1364,6 @@ mod tests {
         assert_eq!(results.paths.len(), 3);
         assert_eq!(results.total_matches, SEARCH_PAGE_SIZE + 3);
         assert_eq!(results.offset, SEARCH_PAGE_SIZE);
-        assert_eq!(results.limit, SEARCH_PAGE_SIZE);
     }
 
     #[test]
@@ -1384,11 +1380,9 @@ mod tests {
         assert_eq!(first_page.paths.len(), RECENT_SEARCH_LIMIT);
         assert_eq!(first_page.total_matches, RECENT_SEARCH_LIMIT + 3);
         assert_eq!(first_page.offset, 0);
-        assert_eq!(first_page.limit, RECENT_SEARCH_LIMIT);
         assert_eq!(second_page.paths.len(), 3);
         assert_eq!(second_page.total_matches, RECENT_SEARCH_LIMIT + 3);
         assert_eq!(second_page.offset, RECENT_SEARCH_LIMIT);
-        assert_eq!(second_page.limit, RECENT_SEARCH_LIMIT);
         assert!(
             first_page
                 .paths

@@ -6,7 +6,7 @@ use std::{
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Instant, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::Context;
@@ -22,7 +22,7 @@ use axum::{
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
-use tracing::{info, warn};
+use tracing::warn;
 use webauthn_rs::prelude::{
     PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
 };
@@ -325,37 +325,14 @@ pub(crate) async fn get_page(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Response> {
-    let started = Instant::now();
-    let requested_path = query.path.clone().unwrap_or_default();
-    let query_type = query.query_type.clone().unwrap_or_default();
     let Some((rel, content)) = read_page_content(&state, query)? else {
-        info!(
-            api = "page",
-            path = %requested_path,
-            query_type = %query_type,
-            found = false,
-            elapsed_ms = started.elapsed().as_millis(),
-            "api timing"
-        );
         return Ok(Json(PageResponse {
             file: "NoPage".to_string(),
             html: String::new(),
         })
         .into_response());
     };
-    let render_started = Instant::now();
     let html = render_markdown_html(&content);
-    info!(
-        api = "page",
-        path = %requested_path,
-        query_type = %query_type,
-        file = %rel,
-        found = true,
-        bytes = content.len(),
-        render_ms = render_started.elapsed().as_millis(),
-        elapsed_ms = started.elapsed().as_millis(),
-        "api timing"
-    );
     Ok(Json(PageResponse { file: rel, html }).into_response())
 }
 
@@ -363,34 +340,13 @@ pub(crate) async fn get_page_source(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Response> {
-    let started = Instant::now();
-    let requested_path = query.path.clone().unwrap_or_default();
-    let query_type = query.query_type.clone().unwrap_or_default();
     let Some((rel, content)) = read_page_content(&state, query)? else {
-        info!(
-            api = "page_source",
-            path = %requested_path,
-            query_type = %query_type,
-            found = false,
-            elapsed_ms = started.elapsed().as_millis(),
-            "api timing"
-        );
         return Ok(Json(PageSourceResponse {
             file: "NoPage".to_string(),
             content: String::new(),
         })
         .into_response());
     };
-    info!(
-        api = "page_source",
-        path = %requested_path,
-        query_type = %query_type,
-        file = %rel,
-        found = true,
-        bytes = content.len(),
-        elapsed_ms = started.elapsed().as_millis(),
-        "api timing"
-    );
     Ok(Json(PageSourceResponse { file: rel, content }).into_response())
 }
 
@@ -444,20 +400,14 @@ pub(crate) async fn search(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Response> {
-    let started = Instant::now();
     state.maybe_git_pull();
-    let after_sync = Instant::now();
 
     let keyword = query.keyword.unwrap_or_default();
-    let search_started = Instant::now();
     let page = query.page.unwrap_or_default();
     let results = state.markdown_index.search_page(&keyword, page)?;
-    let search_ms = search_started.elapsed().as_millis();
     let total_matches = results.total_matches;
     let offset = results.offset;
-    let limit = results.limit;
     let returned_hits = results.paths.len();
-    let render_started = Instant::now();
     let mut body = String::new();
     for path in results.paths {
         body.push_str(&render_search_result_item(&state.config.vault_path, &path)?);
@@ -470,20 +420,6 @@ pub(crate) async fn search(
             total_matches,
         ));
     }
-    info!(
-        api = "search",
-        keyword = %keyword,
-        page,
-        offset,
-        limit,
-        hits = returned_hits,
-        total_matches,
-        sync_ms = after_sync.duration_since(started).as_millis(),
-        search_ms,
-        render_ms = render_started.elapsed().as_millis(),
-        elapsed_ms = started.elapsed().as_millis(),
-        "api timing"
-    );
     Ok(Html(body).into_response())
 }
 
@@ -528,7 +464,6 @@ pub(crate) async fn image_preview(
     Query(query): Query<ImagePreviewQuery>,
     AxumPath(path): AxumPath<String>,
 ) -> AppResult<Response> {
-    let started = Instant::now();
     let Some((source_path, source_metadata)) = resolve_image_file(&state, &path)? else {
         return Ok((StatusCode::NOT_FOUND, "not found").into_response());
     };
@@ -597,17 +532,6 @@ pub(crate) async fn image_preview(
 
     let preview_bytes = fs::read(&cache_path)
         .with_context(|| format!("read image preview {}", cache_path.display()))?;
-    info!(
-        api = "image_preview",
-        path = %source_path.display(),
-        source_bytes = source_metadata.len(),
-        preview_bytes = preview_bytes.len(),
-        width,
-        quality,
-        cache_hit,
-        elapsed_ms = started.elapsed().as_millis(),
-        "api timing"
-    );
     image_bytes_response(
         preview_bytes,
         "image/jpeg",
@@ -810,14 +734,12 @@ pub(crate) async fn post_entry_multipart(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> AppResult<Response> {
-    let started = Instant::now();
     let now = Local::now();
     let date = now.format("%Y-%m-%d").to_string();
     let mut page = String::new();
     let mut links = String::new();
     let mut text = String::new();
     let mut image_data = None;
-    let mut image_bytes = 0usize;
     let mut image_type = String::new();
     let mut dedupe = false;
 
@@ -843,16 +765,7 @@ pub(crate) async fn post_entry_multipart(
                 let file_name = field.file_name().map(str::to_owned);
                 image_type = normalize_multipart_image_type(&content_type, file_name.as_deref());
                 let bytes = field.bytes().await.map_err(anyhow::Error::from)?;
-                image_bytes = bytes.len();
                 if bytes.len() > MAX_ENTRY_IMAGE_BYTES {
-                    info!(
-                        api = "entry_multipart",
-                        image_bytes = image_bytes,
-                        image_type = %image_type,
-                        elapsed_ms = started.elapsed().as_millis(),
-                        status = "payload_too_large",
-                        "api timing"
-                    );
                     return Ok((StatusCode::PAYLOAD_TOO_LARGE, "image too large").into_response());
                 }
                 if !bytes.is_empty() {
@@ -864,15 +777,6 @@ pub(crate) async fn post_entry_multipart(
     }
 
     if dedupe && entry_already_contains_body(&state, &page, &links, &text, &date)? {
-        info!(
-            api = "entry_multipart",
-            page = %page,
-            image_bytes = image_bytes,
-            image_type = %image_type,
-            elapsed_ms = started.elapsed().as_millis(),
-            status = "duplicate",
-            "api timing"
-        );
         return Ok("ok".into_response());
     }
 
@@ -897,14 +801,6 @@ pub(crate) async fn post_entry_multipart(
             image_name,
         },
     )?;
-    info!(
-        api = "entry_multipart",
-        page = %page,
-        image_bytes = image_bytes,
-        image_type = %image_type,
-        elapsed_ms = started.elapsed().as_millis(),
-        "api timing"
-    );
     Ok(response)
 }
 
