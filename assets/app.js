@@ -1635,6 +1635,8 @@ async function saveEntry() {
     return;
   }
   const image = state.image;
+  formatTextareaCjkSpacing(el("entry-text"));
+  persistDraft();
   const payload = {
     sync_id: newOutboxId(),
     page: el("entry-page").value,
@@ -1703,10 +1705,64 @@ function updateEntrySaveState() {
   setButtonIcon(el("entry-save"), "save", state.entrySaving ? "Saving..." : "Save");
 }
 
-function handleEntryInput() {
+function handleEntryInput(event) {
+  if (event?.target?.id === "entry-text") {
+    formatTextareaCjkSpacing(event.target);
+  }
   persistDraft();
   updateEntrySaveState();
   updateEntryMetaSummary();
+}
+
+function formatTextareaCjkSpacing(textarea) {
+  if (!textarea) return false;
+  const before = textarea.value;
+  const after = addCjkSpacingToMarkdownText(before);
+  if (after === before) return false;
+  const selectionStart = textarea.selectionStart ?? before.length;
+  const selectionEnd = textarea.selectionEnd ?? selectionStart;
+  textarea.value = after;
+  textarea.selectionStart = addCjkSpacingToMarkdownText(before.slice(0, selectionStart)).length;
+  textarea.selectionEnd = addCjkSpacingToMarkdownText(before.slice(0, selectionEnd)).length;
+  return true;
+}
+
+function addCjkSpacingToMarkdownText(text) {
+  const source = String(text || "").replace(/\r\n?/g, "\n");
+  const lines = source.split("\n");
+  let inFence = false;
+  return lines
+    .map((line) => {
+      if (/^\s*```/.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence || /^\s*(?:>| {4}|\t)/.test(line)) return line;
+      return addCjkSpacingToInlineText(line);
+    })
+    .join("\n");
+}
+
+function addCjkSpacingToInlineText(text) {
+  const tokens = [];
+  const protect = (value) => {
+    const marker = `\u0000${tokens.length}\u0000`;
+    tokens.push(value);
+    return marker;
+  };
+  let value = String(text || "")
+    .replace(/`[^`]*`/g, protect)
+    .replace(/!\[\[[^\]]+\]\]/g, protect)
+    .replace(/!?\[[^\]]*\]\([^)]*\)/g, protect)
+    .replace(/<(?:https?:\/\/|mailto:)[^>\s]+>/g, protect)
+    .replace(/https?:\/\/\S+/g, protect);
+  value = value
+    .replace(/([\p{Script=Han}])([A-Za-z0-9])/gu, "$1 $2")
+    .replace(/([A-Za-z0-9])([\p{Script=Han}])/gu, "$1 $2");
+  tokens.forEach((token, index) => {
+    value = value.replace(`\u0000${index}\u0000`, token);
+  });
+  return value;
 }
 
 function setEntryStatus(message) {
@@ -2583,6 +2639,8 @@ async function toggleEdit() {
     return;
   }
   commitActiveEditorBlock();
+  editor.value = addCjkSpacingToMarkdownText(editor.value);
+  persistPageDraft();
   setPageEditorStatus("Local draft saved. Syncing...");
   button.disabled = true;
   setButtonIcon(button, "save", "Saving...");
@@ -2705,7 +2763,10 @@ async function warmPageSource(file) {
   }
 }
 
-function handlePageEditorInput() {
+function handlePageEditorInput(event) {
+  if (event?.target?.id === "page-editor") {
+    formatTextareaCjkSpacing(event.target);
+  }
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
   renderBlockEditor({ activeIndex: state.activeEditorBlock });
@@ -2775,6 +2836,7 @@ function commitActiveEditorBlock() {
 }
 
 function updateActiveBlockFromTextarea(textarea) {
+  formatTextareaCjkSpacing(textarea);
   replaceSourceBlock(Number(textarea.dataset.blockIndex || 0), textarea.value);
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
