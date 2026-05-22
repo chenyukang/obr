@@ -534,7 +534,7 @@ pub(crate) async fn image_preview(
     let etag_value = image_etag("preview", &source_metadata, Some((width, quality)));
     let cache_control = preview_image_cache_control();
     if request_etag_matches(&headers, &etag_value) {
-        return Ok(not_modified_response(cache_control, &etag_value)?);
+        return not_modified_response(cache_control, &etag_value);
     }
 
     let cache_path = image_preview_cache_path(&source_path, &source_metadata, width, quality);
@@ -599,7 +599,7 @@ pub(crate) async fn image_preview(
 }
 
 fn resolve_image_file(state: &AppState, path: &str) -> AppResult<Option<(PathBuf, fs::Metadata)>> {
-    let rel = normalize_rel_path(&path)?;
+    let rel = normalize_rel_path(path)?;
     let images_root = state.config.vault_path.join("Pics").canonicalize()?;
     let path = images_root.join(rel);
     ensure_inside(&images_root, &path)?;
@@ -1025,6 +1025,27 @@ fn entry_body_already_exists(existing: &str, body: &str) -> bool {
     !body.is_empty() && existing.contains(body)
 }
 
+pub(crate) async fn mark_todo(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<MarkQuery>,
+) -> AppResult<Response> {
+    let Some(index) = query.index else {
+        return Ok((StatusCode::BAD_REQUEST, "missing index").into_response());
+    };
+    let path = state.config.vault_path.join("Zero").join("todo.md");
+    ensure_inside(&state.config.vault_path, &path)?;
+    let content = fs::read_to_string(&path).unwrap_or_default();
+
+    if let Some(updated) = mark_todo_content(&content, index) {
+        fs::write(&path, &updated)?;
+        state.markdown_index.update_path(&path, updated)?;
+        state.maybe_git_sync();
+        Ok("done".into_response())
+    } else {
+        Ok((StatusCode::NOT_FOUND, "not found").into_response())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1059,26 +1080,5 @@ mod tests {
         assert_eq!(generated.width(), 600);
         assert_eq!(generated.height(), 400);
         let _ = fs::remove_dir_all(dir);
-    }
-}
-
-pub(crate) async fn mark_todo(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<MarkQuery>,
-) -> AppResult<Response> {
-    let Some(index) = query.index else {
-        return Ok((StatusCode::BAD_REQUEST, "missing index").into_response());
-    };
-    let path = state.config.vault_path.join("Zero").join("todo.md");
-    ensure_inside(&state.config.vault_path, &path)?;
-    let content = fs::read_to_string(&path).unwrap_or_default();
-
-    if let Some(updated) = mark_todo_content(&content, index) {
-        fs::write(&path, &updated)?;
-        state.markdown_index.update_path(&path, updated)?;
-        state.maybe_git_sync();
-        Ok("done".into_response())
-    } else {
-        Ok((StatusCode::NOT_FOUND, "not found").into_response())
     }
 }
