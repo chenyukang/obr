@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn local_password_login_rejects_public_hosts() {
         let mut headers = HeaderMap::new();
-        headers.insert(HOST, HeaderValue::from_static("ob.taild09124.ts.net"));
+        headers.insert(HOST, HeaderValue::from_static("obr.example.com"));
 
         assert!(!allows_local_password_login(&headers));
     }
