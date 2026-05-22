@@ -698,31 +698,107 @@ fn render_frontmatter_mapping(mapping: &yaml_serde::Mapping) -> String {
         return String::new();
     }
 
-    let mut html = String::new();
-    let _ = write!(
-        html,
-        r#"<details class="metadata-panel"><summary><span>Properties</span><span class="metadata-count">{} {}</span></summary><dl class="metadata-list">"#,
-        mapping.len(),
-        if mapping.len() == 1 { "item" } else { "items" }
-    );
+    let mut body = String::from(r#"<dl class="metadata-list">"#);
     for (key, value) in mapping {
         let key = yaml_value_plain_text(key);
-        let _ = write!(
-            html,
-            r#"<dt class="metadata-key">{}</dt><dd class="metadata-value">{}</dd>"#,
-            escape_html(&key),
-            render_property_value(value)
-        );
+        write_metadata_property(&mut body, &key, &render_property_value(value));
     }
-    html.push_str("</dl></details>");
+    body.push_str("</dl>");
+
+    render_metadata_panel(
+        &format!(
+            "{} {}",
+            mapping.len(),
+            if mapping.len() == 1 { "item" } else { "items" }
+        ),
+        &body,
+    )
+}
+
+fn render_metadata_panel(count_label: &str, body: &str) -> String {
+    let mut html = String::new();
+    html.push_str(r#"<details class="metadata-panel">"#);
+    html.push_str("<summary>");
+    html.push_str("<span>Properties</span>");
+    let _ = write!(
+        html,
+        r#"<span class="metadata-count">{}</span>"#,
+        escape_html(count_label)
+    );
+    html.push_str("</summary>");
+    html.push_str(body);
+    html.push_str("</details>");
     html
 }
 
-fn render_raw_frontmatter(frontmatter: &str) -> String {
+fn write_metadata_property(html: &mut String, key: &str, value_html: &str) {
+    let _ = write!(
+        html,
+        r#"<dt class="metadata-key">{}</dt>"#,
+        escape_html(key)
+    );
+    let _ = write!(html, r#"<dd class="metadata-value">{value_html}</dd>"#);
+}
+
+fn render_metadata_raw_code(content: &str) -> String {
+    let mut html = String::new();
+    html.push_str(r#"<pre class="metadata-raw"><code>"#);
+    html.push_str(&escape_html(content));
+    html.push_str("</code></pre>");
+    html
+}
+
+fn render_metadata_chips(values: &[YamlValue]) -> String {
+    let mut html = String::from(r#"<span class="metadata-chips">"#);
+    for value in values {
+        let text = yaml_value_plain_text(value);
+        let _ = write!(
+            html,
+            r#"<span class="metadata-chip">{}</span>"#,
+            escape_html(&text)
+        );
+    }
+    html.push_str("</span>");
+    html
+}
+
+fn render_link(url: &str, text: &str) -> String {
     format!(
-        r#"<details class="metadata-panel"><summary><span>Properties</span><span class="metadata-count">raw</span></summary><pre class="metadata-raw"><code>{}</code></pre></details>"#,
-        escape_html(frontmatter.trim())
+        r#"<a href="{}" target="_blank" rel="noreferrer">{}</a>"#,
+        escape_html_attr(url),
+        escape_html(text)
     )
+}
+
+fn render_pdf_embed(target: &str, full_src: &str) -> String {
+    let mut html = String::new();
+    html.push_str(r#"<div class="pdf-embed">"#);
+    html.push_str(r#"<div class="pdf-icon" aria-hidden="true">PDF</div>"#);
+    html.push_str(r#"<div class="pdf-meta">"#);
+    let _ = write!(html, "<strong>{}</strong>", escape_html(target));
+    html.push_str("<span>Preview may be blocked by mobile WebViews.</span>");
+    html.push_str("</div>");
+    let _ = write!(
+        html,
+        r#"<a class="pdf-link" href="{}" target="_blank">Open PDF</a>"#,
+        escape_html_attr(full_src)
+    );
+    html.push_str("</div>");
+    html
+}
+
+fn render_image_embed(target: &str, preview_src: &str, full_src: &str, attrs: &str) -> String {
+    format!(
+        r#"<img src="{}" data-full-src="{}" alt="{}" loading="lazy" decoding="async"{}>"#,
+        escape_html_attr(preview_src),
+        escape_html_attr(full_src),
+        escape_html_attr(target),
+        attrs
+    )
+}
+
+fn render_raw_frontmatter(frontmatter: &str) -> String {
+    render_metadata_panel("raw", &render_metadata_raw_code(frontmatter.trim()))
 }
 
 fn render_property_value(value: &YamlValue) -> String {
@@ -742,11 +818,7 @@ fn render_property_scalar(value: &str) -> String {
         return r#"<span class="metadata-empty">empty</span>"#.to_string();
     }
     if is_http_url(value) {
-        return format!(
-            r#"<a href="{}" target="_blank" rel="noreferrer">{}</a>"#,
-            escape_html_attr(value),
-            escape_html(value)
-        );
+        return render_link(value, value);
     }
     escape_html(value)
 }
@@ -756,17 +828,7 @@ fn render_property_sequence(values: &[YamlValue]) -> String {
         return r#"<span class="metadata-empty">empty</span>"#.to_string();
     }
     if values.iter().all(is_scalar_yaml_value) {
-        let mut html = String::from(r#"<span class="metadata-chips">"#);
-        for value in values {
-            let text = yaml_value_plain_text(value);
-            let _ = write!(
-                html,
-                r#"<span class="metadata-chip">{}</span>"#,
-                escape_html(&text)
-            );
-        }
-        html.push_str("</span>");
-        return html;
+        return render_metadata_chips(values);
     }
     render_property_code(&YamlValue::Sequence(values.to_vec()))
 }
@@ -778,10 +840,7 @@ fn render_property_code(value: &YamlValue) -> String {
         .trim_start_matches("---\n")
         .trim()
         .to_string();
-    format!(
-        r#"<pre class="metadata-raw"><code>{}</code></pre>"#,
-        escape_html(&serialized)
-    )
+    render_metadata_raw_code(&serialized)
 }
 
 fn is_scalar_yaml_value(value: &YamlValue) -> bool {
@@ -856,11 +915,7 @@ fn obsidian_embed_html(raw: &str) -> String {
     let encoded_target = percent_encode_path(target);
     let full_src = format!("/images/{encoded_target}");
     if is_pdf_embed_target(target) {
-        return format!(
-            r#"<div class="pdf-embed"><div class="pdf-icon" aria-hidden="true">PDF</div><div class="pdf-meta"><strong>{}</strong><span>Preview may be blocked by mobile WebViews.</span></div><a class="pdf-link" href="{}" target="_blank">Open PDF</a></div>"#,
-            escape_html(target),
-            escape_html_attr(&full_src)
-        );
+        return render_pdf_embed(target, &full_src);
     }
 
     let mut attrs = String::new();
@@ -877,13 +932,7 @@ fn obsidian_embed_html(raw: &str) -> String {
     }
     let preview_src = format!("/image-preview/{encoded_target}?w={preview_width}");
 
-    format!(
-        r#"<img src="{}" data-full-src="{}" alt="{}" loading="lazy" decoding="async"{}>"#,
-        escape_html_attr(&preview_src),
-        escape_html_attr(&full_src),
-        escape_html_attr(target),
-        attrs
-    )
+    render_image_embed(target, &preview_src, &full_src, &attrs)
 }
 
 fn is_pdf_embed_target(target: &str) -> bool {
