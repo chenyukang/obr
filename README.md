@@ -31,7 +31,7 @@ ln -s /path/to/obsidian/vault vault
 To try Obr without touching a real vault, copy the demo vault:
 
 ```bash
-cp -R examples/demo-vault vault
+cp -R examples/vaul vault
 ```
 
 Before running Obr, generate a password hash and add it to `config/local.toml`
