@@ -7,6 +7,8 @@ and this project follows semantic versioning once versioned releases begin.
 
 ## Unreleased
 
+## 0.1.0 - 2026-05-24
+
 - Prepare the project for public open-source use.
 - Embed frontend assets into the release binary for single-binary deployment.
 - Add local-first mobile reading, editing, image preview, offline, and sync
