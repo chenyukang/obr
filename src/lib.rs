@@ -1,6 +1,7 @@
 mod app;
 mod auth;
 mod config;
+mod daemon;
 mod doctor;
 mod error;
 mod markdown;

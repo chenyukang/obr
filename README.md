@@ -148,8 +148,10 @@ For local passkey testing, use `http://localhost:8010`, not `http://127.0.0.1:80
 Run from the repo root so relative paths in `config/local.toml` resolve correctly:
 
 ```bash
-./target/release/obr daemon
+./target/release/obr daemon start
 ```
+
+`obr daemon` is an alias for `obr daemon start`.
 
 Logs are written to the configured path:
 
@@ -157,11 +159,15 @@ Logs are written to the configured path:
 log_path = "logs/obr.log"
 ```
 
-To stop the daemon, kill the process listening on the configured port:
+Manage the background process with:
 
 ```bash
-lsof -tiTCP:8010 -sTCP:LISTEN | xargs kill
+./target/release/obr daemon status
+./target/release/obr daemon reload
+./target/release/obr daemon stop
 ```
+
+Daemon mode writes its pid file under the gitignored `data` directory.
 
 ## Passkeys And HTTPS
 

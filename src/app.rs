@@ -1,11 +1,4 @@
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    net::SocketAddr,
-    process::{Command, Stdio},
-    sync::Arc,
-    time::Instant,
-};
+use std::{fs, net::SocketAddr, process::Command, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -20,7 +13,6 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use chrono::Local;
 use tokio::net::TcpListener;
 use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
 use tracing::{info, warn};
@@ -30,12 +22,21 @@ use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 use crate::{
     auth::{LoginLimiter, is_authenticated, print_password_hash, session_layer},
     config::Config,
+    daemon::{self, DaemonCommand},
     doctor,
     markdown::MarkdownIndex,
     origin,
     passkeys::PasskeyStore,
     routes,
 };
+
+#[derive(Debug, PartialEq, Eq)]
+enum CommandMode {
+    Run,
+    HashPassword,
+    Doctor,
+    Daemon(DaemonCommand),
+}
 
 pub(crate) struct AppState {
     pub(crate) config: Config,
@@ -62,21 +63,32 @@ const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
 );
 
 pub fn run() -> Result<()> {
-    match std::env::args().nth(1).as_deref() {
-        Some("hash-password") => {
+    match parse_command(std::env::args().skip(1))? {
+        CommandMode::HashPassword => {
             print_password_hash()?;
             return Ok(());
         }
-        Some("daemon") | Some("--daemon") => {
-            start_daemon()?;
+        CommandMode::Daemon(DaemonCommand::Start) => {
+            daemon::start()?;
             return Ok(());
         }
-        Some("doctor") | Some("check") => {
+        CommandMode::Daemon(DaemonCommand::Stop) => {
+            daemon::stop()?;
+            return Ok(());
+        }
+        CommandMode::Daemon(DaemonCommand::Reload) => {
+            daemon::reload()?;
+            return Ok(());
+        }
+        CommandMode::Daemon(DaemonCommand::Status) => {
+            daemon::status()?;
+            return Ok(());
+        }
+        CommandMode::Doctor => {
             doctor::run()?;
             return Ok(());
         }
-        Some("run") | None => {}
-        Some(command) => bail!("unknown command: {command}"),
+        CommandMode::Run => {}
     }
 
     tokio::runtime::Builder::new_multi_thread()
@@ -84,6 +96,47 @@ pub fn run() -> Result<()> {
         .build()
         .context("build tokio runtime")?
         .block_on(serve())
+}
+
+fn parse_command(args: impl IntoIterator<Item = String>) -> Result<CommandMode> {
+    let mut args = args.into_iter();
+    let command = args.next();
+    match command.as_deref() {
+        None | Some("run") => {
+            reject_extra_args(args)?;
+            Ok(CommandMode::Run)
+        }
+        Some("hash-password") => {
+            reject_extra_args(args)?;
+            Ok(CommandMode::HashPassword)
+        }
+        Some("doctor") | Some("check") => {
+            reject_extra_args(args)?;
+            Ok(CommandMode::Doctor)
+        }
+        Some("daemon") | Some("--daemon") => {
+            let subcommand = args.next();
+            let daemon_command = match subcommand.as_deref().unwrap_or("start") {
+                "start" => DaemonCommand::Start,
+                "stop" => DaemonCommand::Stop,
+                "reload" | "restart" => DaemonCommand::Reload,
+                "status" => DaemonCommand::Status,
+                other => bail!(
+                    "unknown daemon command `{other}`; expected start, stop, reload, restart, or status"
+                ),
+            };
+            reject_extra_args(args)?;
+            Ok(CommandMode::Daemon(daemon_command))
+        }
+        Some(command) => bail!("unknown command: {command}"),
+    }
+}
+
+fn reject_extra_args(mut args: impl Iterator<Item = String>) -> Result<()> {
+    if let Some(arg) = args.next() {
+        bail!("unexpected argument: {arg}");
+    }
+    Ok(())
 }
 
 async fn serve() -> Result<()> {
@@ -160,62 +213,6 @@ fn classify_user_agent(user_agent: &str) -> &'static str {
     } else {
         "browser-or-client"
     }
-}
-
-fn start_daemon() -> Result<()> {
-    let config = Config::load()?;
-    if let Some(parent) = config.log_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create log directory {}", parent.display()))?;
-    }
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&config.log_path)
-        .with_context(|| format!("open log file {}", config.log_path.display()))?;
-    let stderr = log.try_clone().context("clone daemon log file")?;
-    let mut parent_log = log
-        .try_clone()
-        .context("clone daemon log file for parent")?;
-
-    let mut command = Command::new(std::env::current_exe().context("resolve current executable")?);
-    command
-        .arg("run")
-        .current_dir(std::env::current_dir().context("resolve current directory")?)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr));
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-
-    let child = command.spawn().context("spawn obr daemon")?;
-    writeln!(
-        parent_log,
-        "{} started obr daemon pid {} listening on {}",
-        Local::now().to_rfc3339(),
-        child.id(),
-        config.listen
-    )
-    .with_context(|| format!("write daemon log {}", config.log_path.display()))?;
-    println!(
-        "started obr daemon pid {} log {}",
-        child.id(),
-        config.log_path.display()
-    );
-    Ok(())
 }
 
 pub(crate) fn runtime_data_dir() -> Result<std::path::PathBuf> {
@@ -411,5 +408,60 @@ impl AppState {
                 Err(err) => warn!("git {:?} failed to start: {err}", args),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommandMode, DaemonCommand, parse_command};
+
+    fn parse(args: &[&str]) -> anyhow::Result<CommandMode> {
+        parse_command(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    #[test]
+    fn parse_default_command_runs_foreground_server() {
+        assert_eq!(parse(&[]).unwrap(), CommandMode::Run);
+        assert_eq!(parse(&["run"]).unwrap(), CommandMode::Run);
+    }
+
+    #[test]
+    fn parse_daemon_commands() {
+        assert_eq!(
+            parse(&["daemon"]).unwrap(),
+            CommandMode::Daemon(DaemonCommand::Start)
+        );
+        assert_eq!(
+            parse(&["daemon", "start"]).unwrap(),
+            CommandMode::Daemon(DaemonCommand::Start)
+        );
+        assert_eq!(
+            parse(&["daemon", "stop"]).unwrap(),
+            CommandMode::Daemon(DaemonCommand::Stop)
+        );
+        assert_eq!(
+            parse(&["daemon", "reload"]).unwrap(),
+            CommandMode::Daemon(DaemonCommand::Reload)
+        );
+        assert_eq!(
+            parse(&["daemon", "restart"]).unwrap(),
+            CommandMode::Daemon(DaemonCommand::Reload)
+        );
+        assert_eq!(
+            parse(&["daemon", "status"]).unwrap(),
+            CommandMode::Daemon(DaemonCommand::Status)
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unknown_daemon_subcommand() {
+        let err = parse(&["daemon", "nope"]).unwrap_err().to_string();
+        assert!(err.contains("unknown daemon command"));
+    }
+
+    #[test]
+    fn parse_rejects_extra_arguments() {
+        let err = parse(&["daemon", "stop", "now"]).unwrap_err().to_string();
+        assert!(err.contains("unexpected argument"));
     }
 }

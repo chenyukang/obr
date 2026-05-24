@@ -15,3 +15,4 @@ and this project follows semantic versioning once versioned releases begin.
 - Add request Host/Origin protection for browser-originated writes.
 - Add `obr doctor` / `obr check` deployment diagnostics.
 - Add a disposable demo vault under `examples/demo-vault`.
+- Add real `obr daemon start|stop|reload|status` process control.
