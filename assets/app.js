@@ -7,6 +7,7 @@ const state = {
   currentHighlightKeyword: "",
   image: "",
   imagePreviewUrl: "",
+  imagePreviewLoadId: 0,
   imageReadId: 0,
   searchTimer: 0,
   editorPreviewTimer: 0,
@@ -2125,6 +2126,7 @@ async function createImageBitmapForCompression(file) {
 }
 
 function clearEntryPreview() {
+  state.imagePreviewLoadId += 1;
   if (state.imagePreviewUrl) {
     URL.revokeObjectURL(state.imagePreviewUrl);
     state.imagePreviewUrl = "";
@@ -2137,32 +2139,42 @@ function clearEntryPreview() {
 }
 
 function setEntryPreviewBlob(blob) {
+  const loadId = state.imagePreviewLoadId + 1;
+  state.imagePreviewLoadId = loadId;
   if (state.imagePreviewUrl) {
     URL.revokeObjectURL(state.imagePreviewUrl);
   }
   const previewUrl = URL.createObjectURL(blob);
   state.imagePreviewUrl = previewUrl;
   const preview = el("entry-preview");
-  preview.onload = () => {
-    preview.hidden = false;
-  };
-  preview.onerror = () => {
-    if (state.imagePreviewUrl !== previewUrl) return;
-    URL.revokeObjectURL(previewUrl);
-    state.imagePreviewUrl = "";
-    preview.onerror = null;
-    if (blob.size > MAX_IMAGE_UPLOAD_BYTES) return;
-    void blobToDataUrl(blob)
-      .then((dataUrl) => {
-        preview.src = dataUrl;
-        preview.hidden = false;
-      })
-      .catch(() => {});
-  };
-  preview.src = previewUrl;
+  preview.onload = null;
+  preview.onerror = null;
+  preview.removeAttribute("src");
   preview.alt = "Selected image preview";
-  preview.hidden = false;
+  preview.hidden = true;
+  void showEntryPreviewWhenReady(preview, blob, previewUrl, loadId);
   return previewUrl;
+}
+
+async function showEntryPreviewWhenReady(preview, blob, previewUrl, loadId) {
+  let src = previewUrl;
+  try {
+    await loadImage(src);
+  } catch {
+    if (state.imagePreviewLoadId !== loadId) return;
+    URL.revokeObjectURL(previewUrl);
+    if (state.imagePreviewUrl === previewUrl) state.imagePreviewUrl = "";
+    if (blob.size > MAX_IMAGE_UPLOAD_BYTES) return;
+    try {
+      src = await blobToDataUrl(blob);
+      await loadImage(src);
+    } catch {
+      return;
+    }
+  }
+  if (state.imagePreviewLoadId !== loadId) return;
+  preview.src = src;
+  preview.hidden = false;
 }
 
 function loadImage(url) {

@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260524-73";
+const CACHE_VERSION = "obr-offline-20260524-74";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = "obr-images-v1";
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260524-image-size",
-  "/assets/app.js?v=20260524-image-size",
+  "/assets/style.css?v=20260524-capture-preview",
+  "/assets/app.js?v=20260524-capture-preview",
 ];
 
 self.addEventListener("install", (event) => {
