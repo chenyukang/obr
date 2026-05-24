@@ -3654,7 +3654,7 @@ function markdownImageObserver() {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
         state.imageObserver.unobserve(entry.target);
-        enqueueMarkdownImage(entry.target);
+        enqueueMarkdownImage(deferredImageForObserverTarget(entry.target));
       }
     },
     { rootMargin: MARKDOWN_IMAGE_ROOT_MARGIN },
@@ -3662,13 +3662,18 @@ function markdownImageObserver() {
   return state.imageObserver;
 }
 
-function observeDeferredMarkdownImage(img) {
+function observeDeferredMarkdownImage(img, observerTarget = img) {
   const observer = markdownImageObserver();
   if (observer) {
-    observer.observe(img);
+    observer.observe(observerTarget);
   } else {
     enqueueMarkdownImage(img);
   }
+}
+
+function deferredImageForObserverTarget(target) {
+  if (target?.matches?.("img")) return target;
+  return target?.querySelector?.("img[data-src]") || null;
 }
 
 function enqueueMarkdownImage(img) {
@@ -3771,7 +3776,7 @@ function enhanceMarkdownImages(root) {
     img.addEventListener("load", finish, { once: true });
     img.addEventListener("error", fail, { once: true });
     if (img.dataset.src && !img.src) {
-      observeDeferredMarkdownImage(img);
+      observeDeferredMarkdownImage(img, frame);
     } else if (img.complete) {
       if (img.naturalWidth > 0 || img.naturalHeight > 0) {
         finish();
