@@ -26,37 +26,74 @@ const sandbox = {
   clearTimeout() {},
 };
 
-vm.runInNewContext(`${app}\nthis.__obrTest = { state, splitMarkdownBlocks, joinMarkdownBlocks, replaceSourceBlock };`, sandbox);
-const { state, splitMarkdownBlocks, joinMarkdownBlocks, replaceSourceBlock } = sandbox.__obrTest;
+vm.runInNewContext(
+  `${app}
+this.__obrTest = {
+  state,
+  setEditorSource,
+  joinEditorBlocks,
+  replaceEditorBlock,
+  insertEditorBlocks,
+  deleteEditorBlocks,
+  editorBlocksPayload,
+};`,
+  sandbox,
+);
 
-function blockTexts(source) {
-  return Array.from(splitMarkdownBlocks(source), (block) => block.text);
+const {
+  state,
+  setEditorSource,
+  joinEditorBlocks,
+  replaceEditorBlock,
+  insertEditorBlocks,
+  deleteEditorBlocks,
+  editorBlocksPayload,
+} = sandbox.__obrTest;
+
+function assertSource(expected) {
+  assert.strictEqual(joinEditorBlocks(state.editorBlocks), expected);
+  assert.strictEqual(pageEditor.value, expected);
 }
 
-function assertTexts(actual, expected) {
-  assert.strictEqual(JSON.stringify(actual), JSON.stringify(expected));
-}
+setEditorSource("one\n\ntwo\n\nthree", [
+  { source: "one", separator: "\n\n", html: "<p>one</p>" },
+  { source: "two", separator: "\n\n", html: "<p>two</p>" },
+  { source: "three", separator: "", html: "<p>three</p>" },
+]);
+assertSource("one\n\ntwo\n\nthree");
 
-assertTexts(blockTexts("one\n\ntwo\n\nthree"), ["one", "two", "three"]);
-assert.strictEqual(joinMarkdownBlocks(splitMarkdownBlocks("one\n\ntwo\n\nthree")), "one\n\ntwo\n\nthree");
+replaceEditorBlock(1, "");
+assertSource("one\n\n\n\nthree");
+assert.deepStrictEqual(
+  editorBlocksPayload().map((block) => block.source),
+  ["one", "", "three"],
+);
 
-// Regression: clearing a non-empty middle block creates a run of four newlines.
-// That empty block must stay represented so following block indices do not shift
-// and later edits/saves cannot accidentally target or hide the following content.
-assertTexts(blockTexts("one\n\n\n\nthree\n\nfour"), ["one", "", "three", "four"]);
-assert.strictEqual(joinMarkdownBlocks(splitMarkdownBlocks("one\n\n\n\nthree\n\nfour")), "one\n\n\n\nthree\n\nfour");
+deleteEditorBlocks(1, 1);
+assertSource("one\n\nthree");
 
-pageEditor.value = "one\n\ntwo\n\nthree\n\nfour";
-state.activeEditorBlock = 1;
-state.activeEditorBlockStart = 5;
-state.activeEditorBlockTextEnd = 8;
-replaceSourceBlock(1, "");
-assert.strictEqual(pageEditor.value, "one\n\n\n\nthree\n\nfour");
-assertTexts(blockTexts(pageEditor.value), ["one", "", "three", "four"]);
+insertEditorBlocks(0, [{ source: "zero", separator: "\n\n", html: "<p>zero</p>" }]);
+assertSource("zero\n\none\n\nthree");
 
-// The immediate following block is still index 2 after clearing block 1.
-const following = splitMarkdownBlocks(pageEditor.value)[2];
-assert.strictEqual(following.text, "three");
-assert.strictEqual(pageEditor.value.slice(following.start, following.textEnd), "three");
+insertEditorBlocks(2, [
+  { source: "middle-a", separator: "\n\n", html: "<p>middle-a</p>" },
+  { source: "middle-b", separator: "\n\n", html: "<p>middle-b</p>" },
+]);
+assertSource("zero\n\none\n\nmiddle-a\n\nmiddle-b\n\nthree");
+
+deleteEditorBlocks(2, 2);
+assertSource("zero\n\none\n\nthree");
+
+insertEditorBlocks(state.editorBlocks.length, [
+  { source: "tail", separator: "", html: "<p>tail</p>" },
+]);
+assertSource("zero\n\none\n\nthree\n\ntail");
+
+deleteEditorBlocks(state.editorBlocks.length - 1, 1);
+assertSource("zero\n\none\n\nthree");
+
+deleteEditorBlocks(0, state.editorBlocks.length);
+assertSource("");
+assert.strictEqual(state.editorBlocks.length, 1);
 
 console.log("editor block regression tests passed");

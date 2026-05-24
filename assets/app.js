@@ -3,6 +3,7 @@ const state = {
   lastListView: "day",
   currentFile: "",
   currentContent: "",
+  currentBlocks: [],
   currentContentLoaded: false,
   currentHighlightKeyword: "",
   image: "",
@@ -10,10 +11,9 @@ const state = {
   imagePreviewLoadId: 0,
   imageReadId: 0,
   searchTimer: 0,
-  editorPreviewTimer: 0,
+  editorBlocks: [],
+  editorRenderRequestId: 0,
   activeEditorBlock: -1,
-  activeEditorBlockStart: -1,
-  activeEditorBlockTextEnd: -1,
   lastReadBlockIndex: -1,
   lastReadBlockFile: "",
   searchController: null,
@@ -579,7 +579,12 @@ async function showOfflineStart() {
   const [recent] = readRecentPages();
   if (recent) {
     state.currentFile = recent.file;
-    state.currentContent = pendingPageContent(recent.file) ?? recent.source ?? "";
+    const pendingContent = pendingPageContent(recent.file);
+    state.currentContent = pendingContent ?? recent.source ?? "";
+    state.currentBlocks =
+      pendingContent !== null
+        ? []
+        : normalizeEditorBlocks(recent.blocks || [], { fallback: false });
     state.currentContentLoaded = Boolean(state.currentContent);
     showPage(
       recent.file,
@@ -617,7 +622,8 @@ function rememberPage(data, requestedPath = "", source = null) {
   const next = {
     file: data.file,
     html: data.html ?? existing?.html ?? "",
-    source: source ?? existing?.source ?? "",
+    source: source ?? data.source ?? existing?.source ?? "",
+    blocks: normalizeEditorBlocks(data.blocks || existing?.blocks || [], { fallback: false }),
     aliases: uniqueStrings([...(existing?.aliases || []), ...aliases]),
     savedAt: Date.now(),
   };
@@ -628,9 +634,12 @@ function rememberPage(data, requestedPath = "", source = null) {
   renderRecentPanel();
 }
 
-function rememberPageSource(file, source) {
+function rememberPageSource(file, source, blocks = null) {
   if (!file || file === "NoPage") return;
   const pages = readRecentPages();
+  const normalizedBlocks = Array.isArray(blocks) && blocks.length
+    ? normalizeEditorBlocks(blocks, { fallback: false })
+    : null;
   const index = pages.findIndex((page) => page.file === file);
   if (index === -1) {
     writeRecentPages([
@@ -638,6 +647,7 @@ function rememberPageSource(file, source) {
         file,
         html: "",
         source,
+        blocks: normalizedBlocks || [],
         aliases: pageAliases(file),
         savedAt: Date.now(),
       },
@@ -649,6 +659,7 @@ function rememberPageSource(file, source) {
   pages[index] = {
     ...pages[index],
     source,
+    blocks: normalizedBlocks || pages[index].blocks || [],
     savedAt: Date.now(),
   };
   writeRecentPages(pages);
@@ -686,6 +697,13 @@ function findCachedPage(path) {
 
 function cachedPageSource(file) {
   return findCachedPage(file)?.source || "";
+}
+
+function cachedPageBlocks(file) {
+  const blocks = findCachedPage(file)?.blocks;
+  return Array.isArray(blocks) && blocks.length
+    ? normalizeEditorBlocks(blocks, { fallback: false })
+    : [];
 }
 
 function cachedPageHtml(page) {
@@ -1216,12 +1234,14 @@ async function syncOutboxItem(item, options = {}) {
     rememberPage(data, item.payload.file, item.payload.content);
     if (state.currentFile === data.file) {
       state.currentContent = item.payload.content;
+      state.currentBlocks = normalizeEditorBlocks(data.blocks || [], { fallback: false });
       state.currentContentLoaded = true;
-      if (el("page-editor").value === item.payload.content) {
+      if (joinEditorBlocks(state.editorBlocks) === item.payload.content) {
         clearPageDraft(data.file);
       }
       if (el("page-editor").hidden) {
         setDeferredMarkdownHtml(el("page-content"), data.html || "");
+        updatePageOutline();
         highlightPageContent(state.currentHighlightKeyword);
       }
       setPageEditorStatus("");
@@ -2478,6 +2498,7 @@ function displayPageData(
     state.lastReadBlockIndex = -1;
     state.lastReadBlockFile = state.currentFile;
     state.currentContent = "";
+    state.currentBlocks = [];
     state.currentContentLoaded = true;
     showPage("NoPage", "No page yet.", sourceView, options);
     return;
@@ -2485,8 +2506,12 @@ function displayPageData(
   state.currentFile = file;
   state.lastReadBlockIndex = -1;
   state.lastReadBlockFile = file;
-  state.currentContent =
-    pendingPageContent(file) ?? data.source ?? cachedPageSource(file) ?? "";
+  const pendingContent = pendingPageContent(file);
+  state.currentContent = pendingContent ?? data.source ?? cachedPageSource(file) ?? "";
+  state.currentBlocks =
+    pendingContent !== null
+      ? []
+      : normalizeEditorBlocks(data.blocks || cachedPageBlocks(file) || [], { fallback: false });
   state.currentContentLoaded = Boolean(state.currentContent);
   const html = data.html || offlineSourcePreview(state.currentContent);
   showPage(file, html, sourceView, options);
@@ -2666,34 +2691,40 @@ function stickyHeaderOffset() {
 function rememberReadBlockFromPointer(event) {
   if (event.pointerType === "mouse" && event.button !== 0) return;
   if (el("page-content").hidden || !state.currentContent) return;
-  const index = estimateEditorBlockIndexFromViewportY(event.clientY, state.currentContent);
+  const index = estimateEditorBlockIndexFromViewportY(event.clientY);
   if (index < 0) return;
   state.lastReadBlockIndex = index;
   state.lastReadBlockFile = state.currentFile;
 }
 
-function initialEditorBlockIndex(source) {
-  const blocks = splitMarkdownBlocks(source);
+function initialEditorBlockIndex() {
+  const blocks = state.editorBlocks;
   if (!blocks.length) return 0;
   if (state.lastReadBlockFile === state.currentFile && state.lastReadBlockIndex >= 0) {
     return Math.min(state.lastReadBlockIndex, blocks.length - 1);
   }
-  return estimateEditorBlockIndexFromViewportY(stickyHeaderOffset() + 24, source);
+  return estimateEditorBlockIndexFromViewportY(stickyHeaderOffset() + 24);
 }
 
-function estimateEditorBlockIndexFromViewportY(clientY, source) {
+function estimateEditorBlockIndexFromViewportY(clientY) {
   const content = el("page-content");
-  const blocks = splitMarkdownBlocks(source);
+  const blocks = state.currentBlocks.length
+    ? state.currentBlocks
+    : normalizeEditorBlocks([{ source: state.currentContent, separator: "" }]);
   if (!content || !blocks.length) return 0;
   const rect = content.getBoundingClientRect();
   const height = Math.max(rect.height, 1);
   const relativeY = clamp(clientY - rect.top, 0, height);
-  const contentOffset = (relativeY / height) * String(source || "").length;
+  const totalLength = Math.max(joinEditorBlocks(blocks).length, 1);
+  const contentOffset = (relativeY / height) * totalLength;
   let bestIndex = 0;
+  let offset = 0;
   for (let index = 0; index < blocks.length; index += 1) {
     const block = blocks[index];
-    if (contentOffset >= block.start) bestIndex = index;
-    if (contentOffset < block.end) return index;
+    const end = offset + editorBlockText(block).length + editorBlockSeparator(block).length;
+    if (contentOffset >= offset) bestIndex = index;
+    if (contentOffset < end) return index;
+    offset = end;
   }
   return bestIndex;
 }
@@ -2720,11 +2751,13 @@ async function toggleEdit() {
     }
     button.disabled = false;
     const draft = loadPageDraft(state.currentFile);
-    editor.value = draft ?? state.currentContent;
-    const initialBlockIndex = initialEditorBlockIndex(editor.value);
+    const editSource = draft ?? state.currentContent;
+    setEditorSource(editSource, draft === null ? state.currentBlocks : []);
+    const initialBlockIndex = initialEditorBlockIndex();
     editor.hidden = false;
     editorShell.hidden = false;
     renderBlockEditor({ activeIndex: initialBlockIndex });
+    if (draft !== null) scheduleEditorBlockRender(editSource);
     content.hidden = true;
     el("toc-button").hidden = true;
     closeTocPanel();
@@ -2735,14 +2768,21 @@ async function toggleEdit() {
     return;
   }
   commitActiveEditorBlock();
-  editor.value = addCjkSpacingToMarkdownText(editor.value);
+  const currentEditorSource = joinEditorBlocks(state.editorBlocks);
+  const spacedEditorSource = addCjkSpacingToMarkdownText(currentEditorSource);
+  if (spacedEditorSource !== currentEditorSource) {
+    replaceEditorBlocksFromSource(spacedEditorSource);
+    renderBlockEditor({ activeIndex: -1, focus: false });
+    scheduleEditorBlockRender(spacedEditorSource);
+  }
   persistPageDraft();
   setPageEditorStatus("Local draft saved. Syncing...");
   button.disabled = true;
   setButtonIcon(button, "save", "Saving...");
   const payload = {
     file: state.currentFile,
-    content: editor.value,
+    content: joinEditorBlocks(state.editorBlocks),
+    blocks: editorBlocksPayload(),
   };
   const restoreFile = state.currentFile;
   const restoreY = readReadingPosition(restoreFile);
@@ -2753,10 +2793,11 @@ async function toggleEdit() {
     });
     if (!response.ok) throw new Error(await response.text());
     const data = await response.json();
-    state.currentContent = editor.value;
+    state.currentContent = payload.content;
+    state.currentBlocks = normalizeEditorBlocks(data.blocks || [], { fallback: false });
     state.currentContentLoaded = true;
     state.currentFile = data.file || state.currentFile;
-    rememberPageSource(state.currentFile, state.currentContent);
+    rememberPage(data, state.currentFile, state.currentContent);
     rememberRecentEdit(state.currentFile);
     replaceAppHistory(currentAppHistoryEntry());
     clearPageDraft(state.currentFile);
@@ -2778,6 +2819,7 @@ async function toggleEdit() {
       try {
         queueOfflineMutation("page", payload);
         state.currentContent = payload.content;
+        state.currentBlocks = [];
         state.currentContentLoaded = true;
         replaceAppHistory(currentAppHistoryEntry());
         clearPageDraft(state.currentFile);
@@ -2815,6 +2857,7 @@ async function loadCurrentPageSource(options = {}) {
   const pending = pendingPageContent(state.currentFile);
   if (pending !== null) {
     state.currentContent = pending;
+    state.currentBlocks = [];
     state.currentContentLoaded = true;
     return;
   }
@@ -2823,6 +2866,7 @@ async function loadCurrentPageSource(options = {}) {
     const cached = cachedPageSource(state.currentFile);
     if (cached) {
       state.currentContent = cached;
+      state.currentBlocks = cachedPageBlocks(state.currentFile);
       state.currentContentLoaded = true;
       return;
     }
@@ -2836,13 +2880,15 @@ async function loadCurrentPageSource(options = {}) {
   const data = await response.json();
   if (data.file === "NoPage") {
     state.currentContent = "";
+    state.currentBlocks = [];
     state.currentContentLoaded = true;
     return;
   }
   state.currentFile = data.file;
   state.currentContent = data.content || "";
+  state.currentBlocks = normalizeEditorBlocks(data.blocks || [], { fallback: false });
   state.currentContentLoaded = true;
-  rememberPageSource(state.currentFile, state.currentContent);
+  rememberPageSource(state.currentFile, state.currentContent, data.blocks || []);
 }
 
 async function warmPageSource(file) {
@@ -2853,7 +2899,7 @@ async function warmPageSource(file) {
     );
     if (!response.ok) return;
     const data = await response.json();
-    if (data.file !== "NoPage") rememberPageSource(data.file, data.content || "");
+    if (data.file !== "NoPage") rememberPageSource(data.file, data.content || "", data.blocks || []);
   } catch {
     // Best effort only.
   }
@@ -2862,6 +2908,7 @@ async function warmPageSource(file) {
 function handlePageEditorInput(event) {
   if (event?.target?.id === "page-editor") {
     formatTextareaCjkSpacing(event.target);
+    replaceEditorBlocksFromSource(event.target.value);
   }
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
@@ -2884,15 +2931,12 @@ function renderBlockEditor(options = {}) {
   const editor = el("page-editor");
   const blockEditor = el("page-block-editor");
   if (!editor || !blockEditor || editor.hidden) return;
-  const blocks = splitMarkdownBlocks(editor.value);
+  const blocks = state.editorBlocks.length ? state.editorBlocks : normalizeEditorBlocks([]);
   const activeIndex = Math.min(
     Math.max(Number(options.activeIndex ?? state.activeEditorBlock ?? -1), -1),
     blocks.length - 1,
   );
   state.activeEditorBlock = activeIndex;
-  const activeBlock = blocks[activeIndex];
-  state.activeEditorBlockStart = activeBlock ? activeBlock.start : -1;
-  state.activeEditorBlockTextEnd = activeBlock ? activeBlock.textEnd : -1;
   blockEditor.innerHTML = blocks
     .map((block, index) => editorBlockHtml(block, index, index === activeIndex))
     .join("");
@@ -2924,46 +2968,55 @@ function commitActiveEditorBlock() {
   const blockEditor = el("page-block-editor");
   const active = blockEditor?.querySelector(".editor-block.is-active textarea");
   if (!active) return;
-  replaceSourceBlock(Number(active.dataset.blockIndex || 0), active.value);
+  replaceEditorBlock(Number(active.dataset.blockIndex || 0), active.value);
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
   state.activeEditorBlock = -1;
   renderBlockEditor({ activeIndex: -1, focus: false });
+  scheduleEditorBlockRender(joinEditorBlocks(state.editorBlocks));
 }
 
 function updateActiveBlockFromTextarea(textarea) {
   formatTextareaCjkSpacing(textarea);
-  replaceSourceBlock(Number(textarea.dataset.blockIndex || 0), textarea.value);
+  replaceEditorBlock(Number(textarea.dataset.blockIndex || 0), textarea.value);
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
   autoResizeBlockTextarea(textarea);
 }
 
-function replaceSourceBlock(index, value) {
-  const editor = el("page-editor");
-  const source = String(editor.value || "").replace(/\r\n?/g, "\n");
-  const normalizedValue = String(value || "").replace(/\r\n?/g, "\n");
-  let start = state.activeEditorBlockStart;
-  let textEnd = state.activeEditorBlockTextEnd;
-
-  if (index !== state.activeEditorBlock || start < 0 || textEnd < start || textEnd > source.length) {
-    const blocks = splitMarkdownBlocks(source);
-    const block = blocks[index];
-    if (!block) return;
-    start = block.start;
-    textEnd = block.textEnd;
-  }
-
-  editor.value = `${source.slice(0, start)}${normalizedValue}${source.slice(textEnd)}`;
-  state.activeEditorBlock = index;
-  state.activeEditorBlockStart = start;
-  state.activeEditorBlockTextEnd = start + normalizedValue.length;
+function replaceEditorBlock(index, value) {
+  if (!state.editorBlocks[index]) return;
+  state.editorBlocks[index] = {
+    ...state.editorBlocks[index],
+    source: normalizeEditorText(value),
+    html: '<p class="editor-preview-empty">Preview updates after editing.</p>',
+  };
+  syncPageEditorValue();
 }
 
 function handleBlockTextareaKeydown(event) {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
     commitActiveEditorBlock();
+    return;
+  }
+  if (
+    event.key === "Backspace" &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    event.currentTarget.selectionStart === 0 &&
+    event.currentTarget.selectionEnd === 0 &&
+    !event.currentTarget.value &&
+    state.editorBlocks.length > 1
+  ) {
+    event.preventDefault();
+    const index = Number(event.currentTarget.dataset.blockIndex || 0);
+    deleteEditorBlocks(index, 1);
+    persistPageDraft();
+    setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
+    renderBlockEditor({ activeIndex: Math.max(0, index - 1), placeCursorAtEnd: true });
+    scheduleEditorBlockRender(joinEditorBlocks(state.editorBlocks));
   }
 }
 
@@ -2972,63 +3025,23 @@ function autoResizeBlockTextarea(textarea) {
   textarea.style.height = `${Math.max(46, textarea.scrollHeight)}px`;
 }
 
-function splitMarkdownBlocks(source) {
-  const text = String(source || "").replace(/\r\n?/g, "\n");
-  if (!text.trim()) return [{ text: "", separator: "", start: 0, textEnd: 0, end: 0 }];
-  const blocks = [];
-  const separatorPattern = /\n{2,}/g;
-  let start = 0;
-  let match;
-  while ((match = separatorPattern.exec(text)) !== null) {
-    const separatorStart = match.index;
-    const separator = match[0];
-    const firstSeparatorLength = separator.length >= 4 ? 2 : separator.length;
-    blocks.push({
-      text: text.slice(start, separatorStart),
-      separator: separator.slice(0, firstSeparatorLength),
-      start,
-      textEnd: separatorStart,
-      end: separatorStart + firstSeparatorLength,
-    });
-
-    let emptyStart = separatorStart + firstSeparatorLength;
-    let remaining = separator.length - firstSeparatorLength;
-    while (remaining >= 2) {
-      const separatorLength = remaining === 3 ? 3 : 2;
-      blocks.push({
-        text: "",
-        separator: separator.slice(
-          emptyStart - separatorStart,
-          emptyStart - separatorStart + separatorLength,
-        ),
-        start: emptyStart,
-        textEnd: emptyStart,
-        end: emptyStart + separatorLength,
-      });
-      emptyStart += separatorLength;
-      remaining -= separatorLength;
-    }
-    start = separatorStart + separator.length;
-  }
-  blocks.push({
-    text: text.slice(start),
-    separator: "",
-    start,
-    textEnd: text.length,
-    end: text.length,
-  });
-  return blocks.length ? blocks : [{ text: "", separator: "", start: 0, textEnd: 0, end: 0 }];
-}
-
-function joinMarkdownBlocks(blocks) {
-  return blocks.map((block) => `${block.text}${block.separator || ""}`).join("");
+function setEditorSource(source, blocks = []) {
+  const normalizedSource = normalizeEditorText(source);
+  const normalizedBlocks = Array.isArray(blocks) && blocks.length
+    ? normalizeEditorBlocks(blocks)
+    : [];
+  state.editorBlocks = normalizedBlocks.length
+    ? normalizedBlocks
+    : [{ source: normalizedSource, separator: "", html: '<p class="editor-preview-empty">Preview updates after editing.</p>' }];
+  syncPageEditorValue();
 }
 
 function editorBlockHtml(block, index, active) {
+  const source = editorBlockText(block);
   if (active) {
-    return `<div class="editor-block is-active" data-block-index="${index}"><textarea class="editor-block-source" data-block-index="${index}" rows="1">${escapeTextarea(block.text)}</textarea></div>`;
+    return `<div class="editor-block is-active" data-block-index="${index}"><textarea class="editor-block-source" data-block-index="${index}" rows="1">${escapeTextarea(source)}</textarea></div>`;
   }
-  const rendered = renderMarkdownBlock(block.text);
+  const rendered = block.html || '<p class="editor-preview-empty">Empty block</p>';
   return `<div class="editor-block" data-block-index="${index}" tabindex="0">${rendered}</div>`;
 }
 
@@ -3036,204 +3049,114 @@ function escapeTextarea(value) {
   return escapeHtml(value).replace(/"/g, "&quot;");
 }
 
-function renderMarkdownBlock(source) {
-  const sourceText = String(source || "");
-  if (!sourceText.trim()) {
-    return '<p class="editor-preview-empty">Empty block</p>';
+function normalizeEditorBlocks(blocks, options = {}) {
+  const normalized = Array.isArray(blocks)
+    ? blocks.map((block) => ({
+        source: normalizeEditorText(block?.source || ""),
+        separator: normalizeEditorText(block?.separator || ""),
+        html: typeof block?.html === "string" && block.html
+          ? block.html
+          : '<p class="editor-preview-empty">Empty block</p>',
+      }))
+    : [];
+  if (normalized.length) return normalized;
+  if (options.fallback === false) return [];
+  return [{ source: "", separator: "", html: '<p class="editor-preview-empty">Empty block</p>' }];
+}
+
+function editorBlockText(block) {
+  return normalizeEditorText(block?.source || "");
+}
+
+function editorBlockSeparator(block) {
+  return normalizeEditorText(block?.separator || "");
+}
+
+function joinEditorBlocks(blocks = state.editorBlocks) {
+  return normalizeEditorBlocks(blocks)
+    .map((block) => `${editorBlockText(block)}${editorBlockSeparator(block)}`)
+    .join("");
+}
+
+function editorBlocksPayload() {
+  return state.editorBlocks.map((block) => ({
+    source: editorBlockText(block),
+    separator: editorBlockSeparator(block),
+  }));
+}
+
+function syncPageEditorValue() {
+  const editor = el("page-editor");
+  if (editor) editor.value = joinEditorBlocks(state.editorBlocks);
+}
+
+function replaceEditorBlocksFromSource(source) {
+  state.editorBlocks = [{
+    source: normalizeEditorText(source),
+    separator: "",
+    html: '<p class="editor-preview-empty">Preview updates after editing.</p>',
+  }];
+  syncPageEditorValue();
+}
+
+function insertEditorBlocks(index, blocks) {
+  const insertAt = clamp(Number(index) || 0, 0, state.editorBlocks.length);
+  const normalized = normalizeEditorBlocks(blocks);
+  if (state.editorBlocks.length && insertAt === state.editorBlocks.length) {
+    const previous = state.editorBlocks[state.editorBlocks.length - 1];
+    if (!editorBlockSeparator(previous)) previous.separator = "\n\n";
   }
-  return renderMarkdownLines(sourceText);
-}
-
-function renderMarkdownLines(source) {
-  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
-  const html = [];
-  let paragraph = [];
-  let listType = "";
-  let listClass = "";
-  let codeLines = null;
-
-  const closeParagraph = () => {
-    if (!paragraph.length) return;
-    const renderedLines = paragraph
-      .map((line) => renderInlineMarkdown(line.trim()))
-      .filter((line) => line.length > 0);
-    html.push(`<p>${renderedLines.join("<br>\n")}</p>`);
-    paragraph = [];
-  };
-  const closeList = () => {
-    if (!listType) return;
-    html.push(`</${listType}>`);
-    listType = "";
-    listClass = "";
-  };
-  const openList = (type, className = "") => {
-    if (listType === type && listClass === className) return;
-    closeParagraph();
-    closeList();
-    html.push(`<${type}${className ? ` class="${className}"` : ""}>`);
-    listType = type;
-    listClass = className;
-  };
-
-  for (const rawLine of lines) {
-    const line = rawLine.replace(/\s+$/g, "");
-    if (/^\s*```/.test(line)) {
-      if (codeLines) {
-        html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-        codeLines = null;
-      } else {
-        closeParagraph();
-        closeList();
-        codeLines = [];
-      }
-      continue;
-    }
-    if (codeLines) {
-      codeLines.push(rawLine);
-      continue;
-    }
-    if (!line.trim()) {
-      closeParagraph();
-      closeList();
-      continue;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      closeParagraph();
-      closeList();
-      const level = heading[1].length;
-      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      continue;
-    }
-    const task = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/);
-    if (task) {
-      openList("ul", "editor-preview-task-list");
-      const checked = task[1].toLowerCase() === "x" ? " checked" : "";
-      html.push(`<li class="editor-preview-task"><input type="checkbox" disabled${checked}>${renderInlineMarkdown(task[2])}</li>`);
-      continue;
-    }
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
-    if (unordered) {
-      openList("ul");
-      html.push(`<li>${renderInlineMarkdown(unordered[1])}</li>`);
-      continue;
-    }
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
-    if (ordered) {
-      openList("ol");
-      html.push(`<li>${renderInlineMarkdown(ordered[1])}</li>`);
-      continue;
-    }
-    const quote = line.match(/^\s*>\s?(.+)$/);
-    if (quote) {
-      closeParagraph();
-      closeList();
-      html.push(`<blockquote><p>${renderInlineMarkdown(quote[1])}</p></blockquote>`);
-      continue;
-    }
-    closeList();
-    paragraph.push(line);
+  if (state.editorBlocks.length && insertAt < state.editorBlocks.length) {
+    const lastInserted = normalized[normalized.length - 1];
+    if (!editorBlockSeparator(lastInserted)) lastInserted.separator = "\n\n";
   }
-  closeParagraph();
-  closeList();
-  if (codeLines) html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-  return html.join("\n");
+  state.editorBlocks.splice(insertAt, 0, ...normalized);
+  syncPageEditorValue();
 }
 
-function renderInlineMarkdown(text) {
-  const tokens = [];
-  const token = (html) => {
-    const marker = `\u0000${tokens.length}\u0000`;
-    tokens.push(html);
-    return marker;
-  };
-  let value = String(text || "")
-    .replace(/`([^`]+)`/g, (_, code) => token(`<code>${escapeHtml(code)}</code>`))
-    .replace(/!\[\[([^\]]+)\]\]/g, (_, raw) => token(renderEditorObsidianEmbed(raw)))
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) =>
-      token(renderEditorMarkdownImage(src, alt)),
-    )
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, href) => token(renderEditorMarkdownLink(label, href)))
-    .replace(/<((?:https?:\/\/|mailto:)[^>\s]+)>/g, (_, href) => token(renderEditorMarkdownLink(href, href)))
-    .replace(/\[\[([^\]]+)\]\]/g, (_, raw) => token(renderEditorWikiLink(raw)));
-  value = escapeHtml(value)
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
-    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/_([^_]+)_/g, "<em>$1</em>");
-  tokens.forEach((html, index) => {
-    value = value.replace(`\u0000${index}\u0000`, html);
-  });
-  return value;
-}
-
-function renderEditorMarkdownLink(label, href) {
-  const cleanHref = sanitizeEditorLinkHref(href);
-  if (!cleanHref) return escapeHtml(label);
-  const external = /^(?:https?:)?\/\//i.test(cleanHref) || /^mailto:/i.test(cleanHref);
-  const targetAttrs = external ? ' target="_blank" rel="noopener noreferrer"' : "";
-  return `<a href="${escapeHtmlAttr(cleanHref)}"${targetAttrs}>${escapeHtml(label)}</a>`;
-}
-
-function renderEditorWikiLink(raw) {
-  const [targetPart, labelPart] = String(raw || "").split("|");
-  const target = targetPart.trim();
-  if (!target) return escapeHtml(raw);
-  const label = (labelPart || target).trim();
-  return `<a href="#" data-page="${escapeHtmlAttr(target)}" class="editor-preview-wikilink">${escapeHtml(label)}</a>`;
-}
-
-function sanitizeEditorLinkHref(href) {
-  const cleanHref = String(href || "").trim().replace(/^<|>$/g, "");
-  if (!cleanHref) return "";
-  if (/^(?:javascript|data|vbscript):/i.test(cleanHref)) return "";
-  return cleanHref;
-}
-
-function renderEditorObsidianEmbed(raw) {
-  const [targetPart, sizePart] = String(raw || "").split("|");
-  const target = targetPart.trim();
-  if (!target) return escapeHtml(raw);
-  const fullSrc = `/images/${percentEncodePath(target)}`;
-  if (isEditorPdfTarget(target)) {
-    return `<span class="pdf-embed"><span class="pdf-icon" aria-hidden="true">PDF</span><span class="pdf-meta"><strong>${escapeHtml(target)}</strong><span>Open PDF</span></span><a class="pdf-link" href="${escapeHtmlAttr(fullSrc)}" target="_blank">Open PDF</a></span>`;
+function deleteEditorBlocks(index, count = 1) {
+  if (!state.editorBlocks.length) return;
+  const start = clamp(Number(index) || 0, 0, state.editorBlocks.length - 1);
+  const size = Math.max(1, Number(count) || 1);
+  state.editorBlocks.splice(start, size);
+  if (!state.editorBlocks.length) {
+    state.editorBlocks.push({ source: "", separator: "", html: '<p class="editor-preview-empty">Empty block</p>' });
+  } else if (start >= state.editorBlocks.length) {
+    state.editorBlocks[state.editorBlocks.length - 1].separator = "";
   }
-  const previewSrc = `/image-preview/${percentEncodePath(target)}?w=900`;
-  const attrs = editorImageSizeAttrs(sizePart);
-  return `<img data-src="${escapeHtmlAttr(previewSrc)}" data-full-src="${escapeHtmlAttr(fullSrc)}" alt="${escapeHtmlAttr(target)}" loading="lazy" decoding="async" fetchpriority="low"${attrs}>`;
+  syncPageEditorValue();
 }
 
-function renderEditorMarkdownImage(src, alt = "") {
-  const cleanSrc = String(src || "").trim().replace(/^<|>$/g, "");
-  if (!cleanSrc) return "";
-  const attr = cleanSrc.startsWith("data:") ? "src" : "data-src";
-  return `<img ${attr}="${escapeHtmlAttr(cleanSrc)}" alt="${escapeHtmlAttr(alt)}" loading="lazy" decoding="async" fetchpriority="low">`;
+function normalizeEditorText(value) {
+  return String(value || "").replace(/\r\n?/g, "\n");
 }
 
-function isEditorPdfTarget(target) {
-  return String(target || "")
-    .split("#")[0]
-    .split("?")[0]
-    .toLowerCase()
-    .endsWith(".pdf");
-}
-
-function editorImageSizeAttrs(size) {
-  const value = String(size || "").trim();
-  if (!value) return "";
-  const [width, height] = value.split(/[xX]/).map((part) => part.trim());
-  let attrs = "";
-  if (/^\d+$/.test(width || "")) attrs += ` width="${width}"`;
-  if (/^\d+$/.test(height || "")) attrs += ` height="${height}"`;
-  return attrs;
-}
-
-function percentEncodePath(path) {
-  return String(path || "")
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
+async function scheduleEditorBlockRender(source) {
+  const editor = el("page-editor");
+  if (!editor || editor.hidden) return;
+  const expectedSource = normalizeEditorText(source);
+  const requestId = state.editorRenderRequestId + 1;
+  state.editorRenderRequestId = requestId;
+  try {
+    const response = await request("/api/markdown/blocks", {
+      method: "POST",
+      body: JSON.stringify({
+        file: state.currentFile,
+        content: expectedSource,
+      }),
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (requestId !== state.editorRenderRequestId) return;
+    if (editor.hidden) return;
+    if (joinEditorBlocks(state.editorBlocks) !== expectedSource) return;
+    if (state.activeEditorBlock >= 0) return;
+    state.editorBlocks = normalizeEditorBlocks(data.blocks || []);
+    syncPageEditorValue();
+    renderBlockEditor({ activeIndex: -1, focus: false });
+  } catch (error) {
+    if (!shouldQueueOffline(error)) console.error(error);
+  }
 }
 
 function bindConfirmPanelEvents() {
@@ -3299,7 +3222,7 @@ async function confirmDiscardUnsavedPageEdit() {
 
 function hasUnsavedPageEdit() {
   const editor = el("page-editor");
-  return !editor.hidden && editor.value !== state.currentContent;
+  return !editor.hidden && joinEditorBlocks(state.editorBlocks) !== state.currentContent;
 }
 
 function closePageEditor() {
@@ -3309,7 +3232,7 @@ function closePageEditor() {
   el("page-editor-shell").hidden = true;
   el("page-block-editor").innerHTML = "";
   showPageDraftBanner(false);
-  window.clearTimeout(state.editorPreviewTimer);
+  state.editorRenderRequestId += 1;
   el("page-content").hidden = false;
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   setPageEditorStatus("");
@@ -3322,7 +3245,7 @@ function persistPageDraft() {
     clearPageDraft(state.currentFile);
     return;
   }
-  localStorage.setItem(pageDraftKey(state.currentFile), editor.value);
+  localStorage.setItem(pageDraftKey(state.currentFile), joinEditorBlocks(state.editorBlocks));
 }
 
 function loadPageDraft(file) {
@@ -3350,10 +3273,10 @@ async function discardRestoredPageDraft() {
   });
   if (!discard) return;
   clearPageDraft(state.currentFile);
-  editor.value = state.currentContent;
+  setEditorSource(state.currentContent, state.currentBlocks);
   showPageDraftBanner(false);
   setPageEditorStatus("");
-  renderBlockEditor({ activeIndex: initialEditorBlockIndex(editor.value) });
+  renderBlockEditor({ activeIndex: initialEditorBlockIndex() });
   showToast("Draft discarded.");
 }
 

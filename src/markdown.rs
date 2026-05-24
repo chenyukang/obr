@@ -15,6 +15,7 @@ use notify::{
     Config as NotifyConfig, Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use pulldown_cmark::{Event, Options, Parser, html};
+use serde::Serialize;
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 use yaml_serde::Value as YamlValue;
@@ -50,6 +51,13 @@ pub(crate) struct MarkdownSearchResults {
     pub(crate) paths: Vec<PathBuf>,
     pub(crate) total_matches: usize,
     pub(crate) offset: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct MarkdownBlock {
+    pub(crate) source: String,
+    pub(crate) separator: String,
+    pub(crate) html: String,
 }
 
 pub(crate) struct MarkdownIndex {
@@ -630,6 +638,139 @@ pub(crate) fn render_markdown_html(raw: &str) -> String {
 
 pub(crate) fn render_markdown_html_for_file(raw: &str, file: &str) -> String {
     render_markdown_html_inner(raw, Some(Path::new(file)))
+}
+
+pub(crate) fn render_markdown_blocks_for_file(raw: &str, file: &str) -> Vec<MarkdownBlock> {
+    split_markdown_source_blocks(raw)
+        .into_iter()
+        .map(|(source, separator)| {
+            let html = if source.trim().is_empty() {
+                r#"<p class="editor-preview-empty">Empty block</p>"#.to_string()
+            } else {
+                render_markdown_html_for_file(&source, file)
+            };
+            MarkdownBlock {
+                source,
+                separator,
+                html,
+            }
+        })
+        .collect()
+}
+
+fn split_markdown_source_blocks(raw: &str) -> Vec<(String, String)> {
+    let text = raw.replace("\r\n", "\n").replace('\r', "\n");
+    if text.is_empty() {
+        return vec![(String::new(), String::new())];
+    }
+
+    let fenced_ranges = fenced_code_ranges(&text);
+    let mut blocks = Vec::new();
+    let mut block_start = 0usize;
+    let mut index = 0usize;
+    let bytes = text.as_bytes();
+
+    while index < bytes.len() {
+        if bytes[index] != b'\n' {
+            index += 1;
+            continue;
+        }
+
+        let run_start = index;
+        while index < bytes.len() && bytes[index] == b'\n' {
+            index += 1;
+        }
+        let run_end = index;
+        let run_len = run_end - run_start;
+
+        if run_len < 2 || offset_in_ranges(run_start, &fenced_ranges) {
+            continue;
+        }
+
+        push_split_block(
+            &mut blocks,
+            &text[block_start..run_start],
+            &text[run_start..run_end],
+        );
+        block_start = run_end;
+    }
+
+    blocks.push((text[block_start..].to_string(), String::new()));
+    blocks
+}
+
+fn push_split_block(blocks: &mut Vec<(String, String)>, source: &str, separator: &str) {
+    let first_separator_len = if separator.len() >= 4 {
+        2
+    } else {
+        separator.len()
+    };
+    blocks.push((
+        source.to_string(),
+        separator[..first_separator_len].to_string(),
+    ));
+
+    let mut offset = first_separator_len;
+    let mut remaining = separator.len().saturating_sub(first_separator_len);
+    while remaining >= 2 {
+        let separator_len = if remaining == 3 { 3 } else { 2 };
+        blocks.push((
+            String::new(),
+            separator[offset..offset + separator_len].to_string(),
+        ));
+        offset += separator_len;
+        remaining -= separator_len;
+    }
+}
+
+fn fenced_code_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+    let mut opening = None;
+    let mut offset = 0usize;
+
+    for line in text.split_inclusive('\n') {
+        let (body, _) = split_line_ending(line);
+        if let Some((marker, len)) = fence_marker(body) {
+            match opening {
+                None => {
+                    start = Some(offset);
+                    opening = Some((marker, len));
+                }
+                Some((opening_marker, opening_len))
+                    if marker == opening_marker && len >= opening_len =>
+                {
+                    if let Some(start) = start.take() {
+                        ranges.push(start..offset + body.len());
+                    }
+                    opening = None;
+                }
+                _ => {}
+            }
+        }
+        offset += line.len();
+    }
+
+    if let Some(start) = start {
+        ranges.push(start..text.len());
+    }
+    ranges
+}
+
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let count = trimmed.chars().take_while(|ch| *ch == marker).count();
+    (count >= 3).then_some((marker, count))
+}
+
+fn offset_in_ranges(offset: usize, ranges: &[std::ops::Range<usize>]) -> bool {
+    ranges
+        .iter()
+        .any(|range| range.start <= offset && offset < range.end)
 }
 
 fn render_markdown_html_inner(raw: &str, file: Option<&Path>) -> String {
@@ -1640,6 +1781,64 @@ mod tests {
         assert!(!rendered.contains("metadata-panel"));
         assert!(rendered.contains("<hr"));
         assert!(rendered.contains("<p>Body</p>"));
+    }
+
+    #[test]
+    fn render_markdown_blocks_preserves_source_boundaries() {
+        let blocks = render_markdown_blocks_for_file("one\n\ntwo\n\nthree", "Posts/note.md");
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two", "three"]
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.separator.as_str())
+                .collect::<Vec<_>>(),
+            vec!["\n\n", "\n\n", ""]
+        );
+        assert_eq!(join_test_blocks(&blocks), "one\n\ntwo\n\nthree");
+    }
+
+    #[test]
+    fn render_markdown_blocks_keeps_empty_blocks_addressable() {
+        let blocks = render_markdown_blocks_for_file("one\n\n\n\nthree\n\nfour", "Posts/note.md");
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "", "three", "four"]
+        );
+        assert_eq!(join_test_blocks(&blocks), "one\n\n\n\nthree\n\nfour");
+        assert!(blocks[1].html.contains("Empty block"));
+    }
+
+    #[test]
+    fn render_markdown_blocks_do_not_split_fenced_code_blanks() {
+        let source = "```rust\nfn main() {}\n\nprintln!();\n```\n\nafter";
+        let blocks = render_markdown_blocks_for_file(source, "Posts/note.md");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[0].source,
+            "```rust\nfn main() {}\n\nprintln!();\n```"
+        );
+        assert_eq!(blocks[0].separator, "\n\n");
+        assert_eq!(blocks[1].source, "after");
+        assert_eq!(join_test_blocks(&blocks), source);
+    }
+
+    fn join_test_blocks(blocks: &[MarkdownBlock]) -> String {
+        blocks
+            .iter()
+            .map(|block| format!("{}{}", block.source, block.separator))
+            .collect::<String>()
     }
 
     #[test]

@@ -33,9 +33,10 @@ use crate::{
     auth::{AUTH_SESSION_KEY, allows_local_password_login, verify_login},
     error::{AppError, AppResult},
     markdown::{
-        auto_link_note_titles, ensure_inside, escape_html, escape_html_attr, mark_todo_content,
-        normalize_markdown_rel, normalize_rel_path, rel_to_vault, render_markdown_html_for_file,
-        save_data_url_image, save_image_bytes,
+        MarkdownBlock, auto_link_note_titles, ensure_inside, escape_html, escape_html_attr,
+        mark_todo_content, normalize_markdown_rel, normalize_rel_path, rel_to_vault,
+        render_markdown_blocks_for_file, render_markdown_html_for_file, save_data_url_image,
+        save_image_bytes,
     },
 };
 
@@ -73,6 +74,19 @@ pub(crate) struct ImagePreviewQuery {
 #[derive(Deserialize)]
 pub(crate) struct PageUpdate {
     file: String,
+    content: Option<String>,
+    blocks: Option<Vec<PageUpdateBlock>>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PageUpdateBlock {
+    source: String,
+    separator: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct MarkdownBlocksRequest {
+    file: String,
     content: String,
 }
 
@@ -104,13 +118,21 @@ struct AuthOptions {
 #[derive(Serialize)]
 struct PageResponse {
     file: String,
+    source: String,
     html: String,
+    blocks: Vec<MarkdownBlock>,
 }
 
 #[derive(Serialize)]
 struct PageSourceResponse {
     file: String,
     content: String,
+    blocks: Vec<MarkdownBlock>,
+}
+
+#[derive(Serialize)]
+struct MarkdownBlocksResponse {
+    blocks: Vec<MarkdownBlock>,
 }
 
 #[derive(Serialize)]
@@ -375,12 +397,13 @@ pub(crate) async fn get_page(
     let Some((rel, content)) = read_page_content(&state, query)? else {
         return Ok(Json(PageResponse {
             file: "NoPage".to_string(),
+            source: String::new(),
             html: String::new(),
+            blocks: Vec::new(),
         })
         .into_response());
     };
-    let html = render_markdown_html_for_file(&content, &rel);
-    Ok(Json(PageResponse { file: rel, html }).into_response())
+    Ok(Json(render_page_response(rel, content)).into_response())
 }
 
 pub(crate) async fn get_page_source(
@@ -391,10 +414,17 @@ pub(crate) async fn get_page_source(
         return Ok(Json(PageSourceResponse {
             file: "NoPage".to_string(),
             content: String::new(),
+            blocks: Vec::new(),
         })
         .into_response());
     };
-    Ok(Json(PageSourceResponse { file: rel, content }).into_response())
+    let blocks = render_markdown_blocks_for_file(&content, &rel);
+    Ok(Json(PageSourceResponse {
+        file: rel,
+        content,
+        blocks,
+    })
+    .into_response())
 }
 
 pub(crate) async fn post_page(
@@ -407,17 +437,52 @@ pub(crate) async fn post_page(
     if !path.exists() {
         return Ok((StatusCode::NOT_FOUND, "NoPage").into_response());
     }
-    fs::write(&path, &body.content).with_context(|| format!("write {}", path.display()))?;
-    state
-        .markdown_index
-        .update_path(&path, body.content.clone())?;
+    let content = page_update_content(body);
+    fs::write(&path, &content).with_context(|| format!("write {}", path.display()))?;
+    state.markdown_index.update_path(&path, content.clone())?;
     state.maybe_git_sync();
     let rel = rel_to_vault(&state.config.vault_path, &path)?;
-    Ok(Json(PageResponse {
-        html: render_markdown_html_for_file(&body.content, &rel),
-        file: rel,
+    Ok(Json(render_page_response(rel, content)).into_response())
+}
+
+pub(crate) async fn render_markdown_blocks(Json(body): Json<MarkdownBlocksRequest>) -> Response {
+    let file = normalize_markdown_rel(&body.file, false)
+        .map(|path| vault_rel_path(&path))
+        .unwrap_or_else(|_| body.file.trim().to_string());
+    Json(MarkdownBlocksResponse {
+        blocks: render_markdown_blocks_for_file(&body.content, &file),
     })
-    .into_response())
+    .into_response()
+}
+
+fn render_page_response(file: String, source: String) -> PageResponse {
+    PageResponse {
+        html: render_markdown_html_for_file(&source, &file),
+        blocks: render_markdown_blocks_for_file(&source, &file),
+        file,
+        source,
+    }
+}
+
+fn page_update_content(body: PageUpdate) -> String {
+    if let Some(blocks) = body.blocks {
+        return blocks
+            .into_iter()
+            .map(|block| {
+                format!(
+                    "{}{}",
+                    normalize_markdown_text(&block.source),
+                    normalize_markdown_text(&block.separator.unwrap_or_default())
+                )
+            })
+            .collect();
+    }
+
+    normalize_markdown_text(&body.content.unwrap_or_default())
+}
+
+fn normalize_markdown_text(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn read_page_content(state: &AppState, query: PageQuery) -> AppResult<Option<(String, String)>> {
