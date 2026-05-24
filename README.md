@@ -28,6 +28,12 @@ or keep the default `vault_path = "vault"` and create a symlink:
 ln -s /path/to/obsidian/vault vault
 ```
 
+To try Obr without touching a real vault, copy the demo vault:
+
+```bash
+cp -R examples/demo-vault vault
+```
+
 Before running Obr, generate a password hash and add it to `config/local.toml`
 as shown in the Password section below.
 
@@ -74,8 +80,10 @@ target
 
 When Obr is reachable outside the local machine, serve it through HTTPS, set
 `secure_cookies = true`, and configure a stable `webauthn_rp_id` and
-`webauthn_origin`. Avoid exposing Obr directly to the public internet without an
-additional trusted access-control layer.
+`webauthn_origin`. Obr validates request `Host` headers and rejects browser
+cross-site write requests with untrusted `Origin` or `Sec-Fetch-Site` headers.
+Avoid exposing Obr directly to the public internet without an additional trusted
+access-control layer.
 
 ## Password
 
@@ -116,6 +124,16 @@ For the release binary:
 ```
 
 The release binary embeds the web UI assets (`index.html`, JavaScript, CSS, service worker, manifest, and favicon). Deploying Obr does not require copying the repo `assets/` directory.
+
+Check a deployment before opening it in a browser:
+
+```bash
+./target/release/obr doctor
+```
+
+`obr check` is an alias. The doctor command validates config, vault access,
+WebAuthn origin/RP ID settings, writable runtime data, logs, passkey storage,
+and image directories.
 
 Open:
 
@@ -189,6 +207,17 @@ Check the public route:
 ```bash
 tailscale funnel status
 ```
+
+## Releases
+
+Pushing a `v*` tag runs the release workflow. It builds the `obr` binary for:
+
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+
+Each release includes `obr-<target>.tar.gz` archives and SHA-256 checksums.
 
 ## CI
 

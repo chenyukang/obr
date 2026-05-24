@@ -31,6 +31,7 @@ When Obr is reachable from a phone or any remote browser:
 - serve it only through HTTPS
 - set `secure_cookies = true`
 - keep `webauthn_rp_id` and `webauthn_origin` stable
+- keep request `Host` and browser `Origin` values aligned with the configured origin
 - avoid exposing Obr directly to the public internet without an additional
   trusted access-control layer
 - keep `config/local.toml`, `data/`, `logs/`, and the vault outside public Git history

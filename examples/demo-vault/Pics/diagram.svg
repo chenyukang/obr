@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" role="img" aria-labelledby="title desc">
+  <title id="title">Obr sample flow</title>
+  <desc id="desc">A simple diagram showing capture, cache, and read flows.</desc>
+  <rect width="720" height="360" rx="24" fill="#f8fafc"/>
+  <rect x="56" y="96" width="160" height="96" rx="16" fill="#dbeafe" stroke="#2563eb" stroke-width="3"/>
+  <rect x="280" y="96" width="160" height="96" rx="16" fill="#dcfce7" stroke="#16a34a" stroke-width="3"/>
+  <rect x="504" y="96" width="160" height="96" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="3"/>
+  <text x="136" y="139" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#1e293b">Capture</text>
+  <text x="360" y="139" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#1e293b">Cache</text>
+  <text x="584" y="139" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#1e293b">Read</text>
+  <path d="M224 144h48" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+  <path d="M264 132l12 12-12 12" fill="none" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M448 144h48" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+  <path d="M488 132l12 12-12 12" fill="none" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="360" y="264" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" fill="#334155">Local-first markdown notes</text>
+</svg>

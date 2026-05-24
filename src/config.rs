@@ -175,7 +175,7 @@ impl Config {
         CookieDuration::days(self.session_days.min(max_days) as i64)
     }
 
-    fn is_loopback_listen(&self) -> bool {
+    pub(crate) fn is_loopback_listen(&self) -> bool {
         self.listen
             .parse::<SocketAddr>()
             .map(|addr| addr.ip().is_loopback())

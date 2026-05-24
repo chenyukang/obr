@@ -11,3 +11,7 @@ and this project follows semantic versioning once versioned releases begin.
 - Embed frontend assets into the release binary for single-binary deployment.
 - Add local-first mobile reading, editing, image preview, offline, and sync
   queue improvements.
+- Add GitHub Release builds for macOS/Linux x86_64 and arm64 with checksums.
+- Add request Host/Origin protection for browser-originated writes.
+- Add `obr doctor` / `obr check` deployment diagnostics.
+- Add a disposable demo vault under `examples/demo-vault`.

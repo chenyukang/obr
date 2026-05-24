@@ -30,7 +30,9 @@ use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 use crate::{
     auth::{LoginLimiter, is_authenticated, print_password_hash, session_layer},
     config::Config,
+    doctor,
     markdown::MarkdownIndex,
+    origin,
     passkeys::PasskeyStore,
     routes,
 };
@@ -67,6 +69,10 @@ pub fn run() -> Result<()> {
         }
         Some("daemon") | Some("--daemon") => {
             start_daemon()?;
+            return Ok(());
+        }
+        Some("doctor") | Some("check") => {
+            doctor::run()?;
             return Ok(());
         }
         Some("run") | None => {}
@@ -212,7 +218,7 @@ fn start_daemon() -> Result<()> {
     Ok(())
 }
 
-fn runtime_data_dir() -> Result<std::path::PathBuf> {
+pub(crate) fn runtime_data_dir() -> Result<std::path::PathBuf> {
     Ok(std::env::current_dir()?.join(DATA_DIR))
 }
 
@@ -292,6 +298,10 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .merge(protected)
         .layer(middleware::from_fn(log_request))
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            origin::guard,
+        ))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(session_layer)
         .with_state(state)

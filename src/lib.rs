@@ -1,8 +1,10 @@
 mod app;
 mod auth;
 mod config;
+mod doctor;
 mod error;
 mod markdown;
+mod origin;
 mod passkeys;
 mod routes;
 

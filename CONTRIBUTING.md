@@ -20,6 +20,12 @@ cp config.example.toml config/local.toml
 Point `vault_path` at a test vault or a disposable symlink. Do not develop
 against a vault that contains data you cannot afford to modify.
 
+For a disposable local vault, run:
+
+```bash
+cp -R examples/demo-vault vault
+```
+
 Generate a local password hash before running the app:
 
 ```bash
