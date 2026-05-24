@@ -1267,8 +1267,8 @@ a {
 
 .markdown .image-frame {
   position: relative;
-  display: flex;
-  width: fit-content;
+  display: block;
+  width: min(100%, var(--image-placeholder-width, 720px));
   max-width: 100%;
   margin: 14px auto;
   overflow: hidden;
@@ -1291,6 +1291,8 @@ a {
 
 .markdown .image-frame img {
   display: block;
+  width: 100%;
+  height: auto;
   opacity: 0;
   transition: opacity 160ms ease;
 }

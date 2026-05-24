@@ -3759,6 +3759,7 @@ function enhanceMarkdownImages(root) {
 
     const finish = () => {
       finishMarkdownImageLoad(img);
+      setLoadedImageFrameSize(frame, img);
       rememberLoadedImageUrl(img.dataset.src || img.currentSrc || img.src);
       frame.classList.remove("image-loading", "image-error", "image-seen");
       frame.classList.add("image-loaded");
@@ -3784,6 +3785,18 @@ function enhanceMarkdownImages(root) {
         fail();
       }
     }
+  }
+}
+
+function setLoadedImageFrameSize(frame, img) {
+  if (!frame || !img) return;
+  const hasWidth = Boolean(frame.style.getPropertyValue("--image-placeholder-width"));
+  const hasHeight = Boolean(frame.style.getPropertyValue("--image-placeholder-height"));
+  if (!hasWidth && img.naturalWidth > 0) {
+    frame.style.setProperty("--image-placeholder-width", `${img.naturalWidth}px`);
+  }
+  if (!hasHeight && img.naturalHeight > 0) {
+    frame.style.setProperty("--image-placeholder-height", `${img.naturalHeight}px`);
   }
 }
 
