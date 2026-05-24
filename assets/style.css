@@ -1202,7 +1202,10 @@ a {
 }
 
 .markdown img {
+  display: block;
   max-width: 100%;
+  margin-right: auto;
+  margin-left: auto;
   border-radius: 10px;
 }
 
@@ -1264,9 +1267,10 @@ a {
 
 .markdown .image-frame {
   position: relative;
-  display: inline-flex;
+  display: flex;
+  width: fit-content;
   max-width: 100%;
-  margin: 10px 0;
+  margin: 14px auto;
   overflow: hidden;
   vertical-align: top;
   border-radius: 10px;

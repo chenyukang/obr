@@ -2390,7 +2390,7 @@ async function fetchPage(
   displayPageData(data, path, sourceView, highlightKeyword, {
     updateHistory: updateHistory && !renderedCachedPage,
     saveScroll: false,
-    restoreReading: !renderedCachedPage,
+    restoreReading: true,
   });
 }
 
@@ -3366,6 +3366,8 @@ function restoreReadingPosition(file) {
   const y = readReadingPosition(file);
   restorePageScroll(y);
   window.setTimeout(() => restorePageScroll(y), 250);
+  window.setTimeout(() => restorePageScroll(y), 800);
+  window.setTimeout(() => restorePageScroll(y), 1600);
 }
 
 function restoreReadingPositionAfterEdit(file, y) {
