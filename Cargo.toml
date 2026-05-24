@@ -2,6 +2,11 @@
 name = "obr"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "A small Rust web app for fast Obsidian vault capture and reading."
+license = "MIT"
+repository = "https://github.com/chenyukang/obr"
+readme = "README.md"
 
 [dependencies]
 ammonia = "4.1.2"

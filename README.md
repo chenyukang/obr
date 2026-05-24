@@ -28,6 +28,9 @@ or keep the default `vault_path = "vault"` and create a symlink:
 ln -s /path/to/obsidian/vault vault
 ```
 
+Before running Obr, generate a password hash and add it to `config/local.toml`
+as shown in the Password section below.
+
 ## Vault Layout
 
 Obr keeps vault-specific paths configurable so it can fit different Obsidian layouts:
@@ -50,6 +53,29 @@ todo_path = "Posts/todo.md"
 These vault layout paths are relative to `vault_path`. Parent path components such as `..` are rejected.
 
 Runtime cache data is separate from the vault and is written under the gitignored `data` directory in the process working directory.
+
+## Security Model
+
+Obr is designed as a local-first personal app. It can be exposed to a phone or a
+remote browser, but vault content, uploaded images, page drafts, cached pages,
+passkeys, logs, and sync outbox data should all be treated as sensitive local
+data.
+
+Keep these paths out of Git history:
+
+```text
+config/local.toml
+vault
+data
+logs
+cache
+target
+```
+
+When Obr is reachable outside the local machine, serve it through HTTPS, set
+`secure_cookies = true`, and configure a stable `webauthn_rp_id` and
+`webauthn_origin`. Avoid exposing Obr directly to the public internet without an
+additional trusted access-control layer.
 
 ## Password
 
@@ -131,8 +157,8 @@ For phone or remote browser use, configure a stable HTTPS origin:
 
 ```toml
 secure_cookies = true
-webauthn_rp_id = "ob.example.ts.net"
-webauthn_origin = "https://ob.example.ts.net"
+webauthn_rp_id = "obr.example.com"
+webauthn_origin = "https://obr.example.com"
 ```
 
 Changing `webauthn_rp_id` or `webauthn_origin` invalidates existing passkeys for that domain. Register a new passkey after changing the public domain.
@@ -151,9 +177,12 @@ Then set the WebAuthn config to the Funnel hostname:
 
 ```toml
 secure_cookies = true
-webauthn_rp_id = "ob.tailnet-name.ts.net"
-webauthn_origin = "https://ob.tailnet-name.ts.net"
+webauthn_rp_id = "obr.example.com"
+webauthn_origin = "https://obr.example.com"
 ```
+
+Replace `obr.example.com` with the HTTPS hostname that Tailscale Funnel prints
+for your machine.
 
 Check the public route:
 
@@ -171,3 +200,12 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 cargo build --release --locked
 ```
+
+## Contributing And Security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and
+[SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+## License
+
+Obr is licensed under the [MIT License](LICENSE).
