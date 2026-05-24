@@ -28,6 +28,27 @@ or keep the default `vault_path = "vault"` and create a symlink:
 ln -s /path/to/obsidian/vault vault
 ```
 
+## Vault Layout
+
+Obr keeps vault-specific paths configurable so it can fit different Obsidian layouts:
+
+```toml
+# Daily memo files are created as <daily_dir>/<YYYY-MM-DD>.md.
+daily_dir = "Daily"
+
+# Named quick-entry pages are created under this directory, for example
+# page = "project/foo" writes <entry_dir>/project/foo.md.
+entry_dir = "Posts"
+
+# Uploaded images are stored here and served through /images/* and /image-preview/*.
+image_dir = "Pics"
+
+# The Todo view and page = "todo" entries use this file.
+todo_path = "Posts/todo.md"
+```
+
+All four paths are relative to `vault_path`. Parent path components such as `..` are rejected.
+
 ## Password
 
 Generate an Argon2 password hash:
@@ -59,6 +80,8 @@ For the release binary:
 ```bash
 ./target/release/obr run
 ```
+
+The release binary embeds the web UI assets (`index.html`, JavaScript, CSS, service worker, manifest, and favicon). Deploying Obr does not require copying the repo `assets/` directory.
 
 Open:
 

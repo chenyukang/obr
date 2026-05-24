@@ -117,6 +117,15 @@ struct PingResponse {
     ok: bool,
 }
 
+#[derive(Serialize)]
+struct AppConfigResponse {
+    daily_dir: String,
+    entry_dir: String,
+    image_dir: String,
+    todo_path: String,
+    todo_file: String,
+}
+
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
 const PASSKEY_AUTHENTICATION_SESSION_KEY: &str = "passkey_authentication";
 const MAX_ENTRY_IMAGE_BYTES: usize = 5 * 1024 * 1024;
@@ -141,6 +150,27 @@ pub(crate) async fn manifest() -> Response {
     )
 }
 
+pub(crate) async fn asset(AxumPath(path): AxumPath<String>) -> Response {
+    match path.as_str() {
+        "app.js" => static_service_response(
+            include_str!("../assets/app.js"),
+            "text/javascript; charset=utf-8",
+            immutable_asset_cache_control(),
+        ),
+        "style.css" => static_service_response(
+            include_str!("../assets/style.css"),
+            "text/css; charset=utf-8",
+            immutable_asset_cache_control(),
+        ),
+        "favicon.svg" => static_service_response(
+            include_str!("../assets/favicon.svg"),
+            "image/svg+xml",
+            immutable_asset_cache_control(),
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 pub(crate) async fn ping() -> Response {
     let mut response = Json(PingResponse { ok: true }).into_response();
     response.headers_mut().insert(
@@ -163,6 +193,10 @@ fn static_service_response(
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static(cache));
     response
+}
+
+fn immutable_asset_cache_control() -> &'static str {
+    "public, max-age=31536000, immutable"
 }
 
 pub(crate) async fn login(
@@ -321,6 +355,18 @@ pub(crate) async fn verify() -> AppResult<Response> {
     Ok("ok".into_response())
 }
 
+pub(crate) async fn app_config(State(state): State<Arc<AppState>>) -> AppResult<Response> {
+    let todo_file = vault_rel_path(&state.config.todo_path);
+    Ok(Json(AppConfigResponse {
+        daily_dir: vault_rel_path(&state.config.daily_dir),
+        entry_dir: vault_rel_path(&state.config.entry_dir),
+        image_dir: vault_rel_path(&state.config.image_dir),
+        todo_path: todo_file.trim_end_matches(".md").to_string(),
+        todo_file,
+    })
+    .into_response())
+}
+
 pub(crate) async fn get_page(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageQuery>,
@@ -380,6 +426,7 @@ fn read_page_content(state: &AppState, query: PageQuery) -> AppResult<Option<(St
             Some(path) => path,
             None => return Ok(None),
         },
+        Some("todo") => state.config.vault_path.join(&state.config.todo_path),
         _ => state
             .markdown_index
             .resolve_request(&query.path.unwrap_or_default())?,
@@ -542,7 +589,11 @@ pub(crate) async fn image_preview(
 
 fn resolve_image_file(state: &AppState, path: &str) -> AppResult<Option<(PathBuf, fs::Metadata)>> {
     let rel = normalize_rel_path(path)?;
-    let images_root = state.config.vault_path.join("Pics").canonicalize()?;
+    let images_root = state
+        .config
+        .vault_path
+        .join(&state.config.image_dir)
+        .canonicalize()?;
     let path = images_root.join(rel);
     ensure_inside(&images_root, &path)?;
     if !path.is_file() {
@@ -714,6 +765,7 @@ pub(crate) async fn post_entry(
     } else {
         Some(save_data_url_image(
             &state.config.vault_path,
+            &state.config.image_dir,
             &body.image,
             &now,
         )?)
@@ -783,6 +835,7 @@ pub(crate) async fn post_entry_multipart(
     let image_name = if let Some(bytes) = image_data {
         Some(save_image_bytes(
             &state.config.vault_path,
+            &state.config.image_dir,
             &bytes,
             &image_type,
             &now,
@@ -882,7 +935,7 @@ fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> 
         appended.push_str(&format!("\n\n![[{image_name}|250]]\n"));
     }
 
-    let content = if page == "todo" {
+    let content = if is_todo_page(page) {
         format!("{appended}\n\n---\n\n{existing}")
     } else {
         format!("{existing}\n{appended}")
@@ -899,11 +952,18 @@ fn entry_path(state: &AppState, page: &str, date: &str) -> AppResult<PathBuf> {
         return Ok(state
             .config
             .vault_path
-            .join("Daily")
+            .join(&state.config.daily_dir)
             .join(format!("{date}.md")));
     }
-    let rel = normalize_markdown_rel(&format!("Zero/{page}"), true)?;
-    Ok(state.config.vault_path.join(rel))
+    if is_todo_page(page) {
+        return Ok(state.config.vault_path.join(&state.config.todo_path));
+    }
+    let rel = normalize_markdown_rel(page, true)?;
+    Ok(state
+        .config
+        .vault_path
+        .join(&state.config.entry_dir)
+        .join(rel))
 }
 
 fn entry_body_markdown(
@@ -925,7 +985,7 @@ fn entry_body_markdown(
     }
 
     let linked_text = auto_link_note_titles(vault_path, text.trim())?;
-    let text = if page.trim() == "todo" {
+    let text = if is_todo_page(page) {
         format!("- [ ] {linked_text}")
     } else {
         linked_text
@@ -946,7 +1006,7 @@ pub(crate) async fn mark_todo(
     let Some(index) = query.index else {
         return Ok((StatusCode::BAD_REQUEST, "missing index").into_response());
     };
-    let path = state.config.vault_path.join("Zero").join("todo.md");
+    let path = state.config.vault_path.join(&state.config.todo_path);
     ensure_inside(&state.config.vault_path, &path)?;
     let content = fs::read_to_string(&path).unwrap_or_default();
 
@@ -958,6 +1018,14 @@ pub(crate) async fn mark_todo(
     } else {
         Ok((StatusCode::NOT_FOUND, "not found").into_response())
     }
+}
+
+fn is_todo_page(page: &str) -> bool {
+    page.trim().eq_ignore_ascii_case("todo")
+}
+
+fn vault_rel_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 #[cfg(test)]

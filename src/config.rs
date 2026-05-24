@@ -17,6 +17,14 @@ const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 pub(crate) struct Config {
     pub(crate) listen: String,
     pub(crate) vault_path: PathBuf,
+    #[serde(default = "default_daily_dir")]
+    pub(crate) daily_dir: PathBuf,
+    #[serde(default = "default_entry_dir")]
+    pub(crate) entry_dir: PathBuf,
+    #[serde(default = "default_image_dir")]
+    pub(crate) image_dir: PathBuf,
+    #[serde(default = "default_todo_path")]
+    pub(crate) todo_path: PathBuf,
     #[serde(default = "default_log_path")]
     pub(crate) log_path: PathBuf,
     #[serde(default = "default_log_level")]
@@ -52,6 +60,22 @@ fn default_log_path() -> PathBuf {
     PathBuf::from("logs/obr.log")
 }
 
+fn default_daily_dir() -> PathBuf {
+    PathBuf::from("Daily")
+}
+
+fn default_entry_dir() -> PathBuf {
+    PathBuf::from("Posts")
+}
+
+fn default_image_dir() -> PathBuf {
+    PathBuf::from("Pics")
+}
+
+fn default_todo_path() -> PathBuf {
+    PathBuf::from("Posts/todo.md")
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -85,6 +109,10 @@ impl Config {
         if config.passkey_store_path.is_relative() {
             config.passkey_store_path = cwd.join(config.passkey_store_path);
         }
+        config.daily_dir = normalize_vault_relative_path(config.daily_dir, "daily_dir", false)?;
+        config.entry_dir = normalize_vault_relative_path(config.entry_dir, "entry_dir", false)?;
+        config.image_dir = normalize_vault_relative_path(config.image_dir, "image_dir", false)?;
+        config.todo_path = normalize_vault_relative_path(config.todo_path, "todo_path", true)?;
         config.vault_path = config.vault_path.canonicalize().map_err(|err| {
             anyhow!(
                 "vault path does not exist or cannot be resolved: {}: {err}",
@@ -183,6 +211,39 @@ impl Config {
     }
 }
 
+fn normalize_vault_relative_path(
+    path: PathBuf,
+    field: &str,
+    markdown_file: bool,
+) -> Result<PathBuf> {
+    if path.as_os_str().is_empty() {
+        bail!("{field} cannot be empty");
+    }
+    if path.is_absolute() {
+        bail!("{field} must be relative to vault_path");
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => bail!("{field} cannot contain parent components"),
+            _ => bail!("{field} contains unsupported path components"),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        bail!("{field} cannot be empty");
+    }
+    if markdown_file && normalized.extension().is_none() {
+        normalized.set_extension("md");
+    }
+    if markdown_file && normalized.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        bail!("{field} must be a markdown file path");
+    }
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +252,10 @@ mod tests {
         Config {
             listen: "127.0.0.1:8010".to_string(),
             vault_path: PathBuf::from("."),
+            daily_dir: PathBuf::from("Daily"),
+            entry_dir: PathBuf::from("Posts"),
+            image_dir: PathBuf::from("Pics"),
+            todo_path: PathBuf::from("Posts/todo.md"),
             log_path: PathBuf::from("logs/obr.log"),
             log_level: "info".to_string(),
             username: "admin".to_string(),
@@ -220,5 +285,23 @@ mod tests {
         config.allow_plaintext_password = true;
 
         assert!(config.validate_auth_config().is_ok());
+    }
+
+    #[test]
+    fn vault_layout_paths_must_stay_inside_vault() {
+        assert!(
+            normalize_vault_relative_path(PathBuf::from("../Daily"), "daily_dir", false).is_err()
+        );
+        assert!(
+            normalize_vault_relative_path(PathBuf::from("/tmp/Pics"), "image_dir", false).is_err()
+        );
+    }
+
+    #[test]
+    fn todo_path_defaults_to_markdown_extension() {
+        let path =
+            normalize_vault_relative_path(PathBuf::from("Tasks/todo"), "todo_path", true).unwrap();
+
+        assert_eq!(path, PathBuf::from("Tasks/todo.md"));
     }
 }

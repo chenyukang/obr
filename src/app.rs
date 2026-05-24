@@ -22,7 +22,6 @@ use axum::{
 };
 use chrono::Local;
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
 use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
@@ -131,7 +130,7 @@ fn log_filter(config: &Config) -> String {
     if configured.contains('=') || configured.contains(',') {
         configured.to_string()
     } else {
-        format!("obr={configured},tower_http={configured}")
+        format!("obr={configured}")
     }
 }
 
@@ -210,8 +209,14 @@ fn start_daemon() -> Result<()> {
 }
 
 fn prepare_vault(config: &Config) -> Result<()> {
-    fs::create_dir_all(config.vault_path.join("Daily"))?;
-    fs::create_dir_all(config.vault_path.join("Pics"))?;
+    fs::create_dir_all(config.vault_path.join(&config.daily_dir))?;
+    fs::create_dir_all(config.vault_path.join(&config.entry_dir))?;
+    fs::create_dir_all(config.vault_path.join(&config.image_dir))?;
+    if let Some(parent) = config.todo_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(config.vault_path.join(parent))?;
+    }
     Ok(())
 }
 
@@ -249,7 +254,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
             post(routes::passkey_login_finish),
         )
         .route("/api/passkey/available", get(routes::passkey_available))
-        .nest_service("/assets", ServeDir::new("assets"));
+        .route("/assets/{*path}", get(routes::asset));
 
     let protected = Router::new()
         .route(
@@ -263,6 +268,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/passkey/status", get(routes::passkey_status))
         .route("/api/logout", post(routes::logout))
         .route("/api/verify", get(routes::verify))
+        .route("/api/app/config", get(routes::app_config))
         .route("/api/page/source", get(routes::get_page_source))
         .route("/api/page", get(routes::get_page).post(routes::post_page))
         .route("/api/search", get(routes::search))

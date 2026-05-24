@@ -1,8 +1,12 @@
 listen = "127.0.0.1:8010"
 vault_path = "vault"
+daily_dir = "Daily"
+entry_dir = "Posts"
+image_dir = "Pics"
+todo_path = "Posts/todo.md"
 log_path = "logs/obr.log"
 # Simple levels work here: "trace", "debug", "info", "warn", "error".
-# Full tracing filters also work, for example: "obr=debug,tower_http=info".
+# Full tracing filters also work, for example: "obr=debug".
 log_level = "info"
 username = "admin"
 # Generate with:

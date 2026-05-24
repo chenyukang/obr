@@ -183,6 +183,10 @@ mod tests {
         Config {
             listen: "127.0.0.1:8010".to_string(),
             vault_path: PathBuf::from("."),
+            daily_dir: PathBuf::from("Daily"),
+            entry_dir: PathBuf::from("Posts"),
+            image_dir: PathBuf::from("Pics"),
+            todo_path: PathBuf::from("Posts/todo.md"),
             log_path: PathBuf::from("logs/obr.log"),
             log_level: "info".to_string(),
             username: "admin".to_string(),

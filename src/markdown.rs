@@ -565,6 +565,7 @@ pub(crate) fn rel_to_vault(vault: &Path, path: &Path) -> Result<String> {
 
 pub(crate) fn save_data_url_image(
     vault: &Path,
+    image_dir: &Path,
     image: &str,
     now: &chrono::DateTime<Local>,
 ) -> Result<String> {
@@ -578,11 +579,12 @@ pub(crate) fn save_data_url_image(
         .trim_start_matches("data:image/")
         .trim_end_matches(";base64");
     let bytes = STANDARD.decode(data)?;
-    save_image_bytes(vault, &bytes, mime, now)
+    save_image_bytes(vault, image_dir, &bytes, mime, now)
 }
 
 pub(crate) fn save_image_bytes(
     vault: &Path,
+    image_dir: &Path,
     bytes: &[u8],
     mime: &str,
     now: &chrono::DateTime<Local>,
@@ -596,7 +598,9 @@ pub(crate) fn save_image_bytes(
         "image/heif" | "heif" => "heif",
         other => bail!("unsupported image type: {other}"),
     };
-    fs::create_dir_all(vault.join("Pics"))?;
+    let image_root = vault.join(image_dir);
+    ensure_inside(vault, &image_root)?;
+    fs::create_dir_all(&image_root)?;
     for _ in 0..16 {
         let suffix = Uuid::new_v4().simple().to_string();
         let name = format!(
@@ -605,7 +609,7 @@ pub(crate) fn save_image_bytes(
             &suffix[..4],
             ext
         );
-        let path = vault.join("Pics").join(&name);
+        let path = image_root.join(&name);
         ensure_inside(vault, &path)?;
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {

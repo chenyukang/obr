@@ -63,6 +63,13 @@ const state = {
   pagePrefetchSeen: new Set(),
   pageOutline: [],
   currentOutlineId: "",
+  appConfig: {
+    dailyDir: "Daily",
+    entryDir: "Posts",
+    imageDir: "Pics",
+    todoPath: "Posts/todo",
+    todoFile: "Posts/todo.md",
+  },
   confirmResolve: null,
 };
 
@@ -97,6 +104,7 @@ const RECENT_EDITS_KEY = "obr.recent-edits";
 const SEARCH_CACHE_KEY = "obr.search-cache";
 const SEARCH_CACHE_LIMIT = 24;
 const OUTBOX_KEY = "obr.offline.outbox";
+const APP_CONFIG_KEY = "obr.app-config";
 const CLIENT_ID_KEY = "obr.client-id";
 const LOADED_IMAGE_URLS_KEY = "obr.loaded-image-urls";
 const LOADED_IMAGE_URLS_LIMIT = 600;
@@ -140,6 +148,7 @@ const ICONS = {
 document.addEventListener("DOMContentLoaded", async () => {
   installIcons();
   restoreLoadedImageUrls();
+  restoreAppConfig();
   bindEvents();
   initializeAppHistory({ view: "day" });
   void registerServiceWorker();
@@ -148,6 +157,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   updateEntrySaveState();
   const ok = await verify();
   if (ok) {
+    await refreshAppConfig();
     showApp();
     showView("day", { updateHistory: false });
     void syncOutbox();
@@ -265,9 +275,9 @@ function bindEvents() {
   el("page-content").addEventListener("pointerup", rememberReadBlockFromPointer);
   el("page-content").addEventListener("click", async (event) => {
     const task = event.target.closest("input[data-task-index]");
-    if (task && state.currentFile === "Zero/todo.md") {
+    if (task && state.currentFile === state.appConfig.todoFile) {
       await markTodo(task.dataset.taskIndex);
-      await fetchPage("Zero/todo", "todo");
+      await fetchPage(state.appConfig.todoPath, "todo");
       return;
     }
 
@@ -1099,10 +1109,55 @@ function outboxItemDetail(item) {
   if (item.type === "page") {
     return item.payload?.file || "Untitled page";
   }
-  const page = item.payload?.page?.trim() || "Daily";
+  const page = item.payload?.page?.trim() || state.appConfig.dailyDir;
   const text = firstLine(item.payload?.text || "");
   const image = item.payload?.image ? " + image" : "";
   return text ? `${page}: ${text}${image}` : `${page}${image}`;
+}
+
+function restoreAppConfig() {
+  state.appConfig = normalizeAppConfig(readJson(APP_CONFIG_KEY, state.appConfig));
+}
+
+async function refreshAppConfig() {
+  try {
+    const response = await request("/api/app/config");
+    if (!response.ok) throw new Error(await response.text());
+    const config = normalizeAppConfig(await response.json());
+    state.appConfig = config;
+    localStorage.setItem(APP_CONFIG_KEY, JSON.stringify(config));
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function normalizeAppConfig(config = {}) {
+  const dailyDir = cleanRelPath(config.daily_dir || config.dailyDir || "Daily");
+  const entryDir = cleanRelPath(config.entry_dir || config.entryDir || "Posts");
+  const imageDir = cleanRelPath(config.image_dir || config.imageDir || "Pics");
+  const todoFile = withMarkdownExtension(
+    cleanRelPath(config.todo_file || config.todoFile || "Posts/todo.md"),
+  );
+  const todoPath = stripMarkdownExtension(
+    cleanRelPath(config.todo_path || config.todoPath || todoFile),
+  );
+  return { dailyDir, entryDir, imageDir, todoPath, todoFile };
+}
+
+function cleanRelPath(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+/g, "/")
+    .trim();
+}
+
+function withMarkdownExtension(value) {
+  return value.endsWith(".md") ? value : `${value}.md`;
+}
+
+function stripMarkdownExtension(value) {
+  return value.replace(/\.md$/, "");
 }
 
 function firstLine(value) {
@@ -2218,16 +2273,17 @@ async function loadTodo(options = {}) {
   const { renderCache = true } = options;
   const requestId = state.todoRequestId + 1;
   state.todoRequestId = requestId;
-  const cached = findCachedPage("Zero/todo");
+  const todoPath = state.appConfig.todoPath;
+  const cached = findCachedPage(todoPath);
   const cachedHtml = cachedPageHtml(cached);
   if (renderCache && cached) renderTodoHtml(cachedHtml, "No cached todos.");
 
   try {
-    const response = await request("/api/page?path=Zero%2Ftodo");
+    const response = await request("/api/page?query_type=todo");
     const data = await response.json();
     if (requestId !== state.todoRequestId) return;
     if (data.file !== "NoPage") {
-      rememberPage(data, "Zero/todo");
+      rememberPage(data, todoPath);
       void warmPageSource(data.file);
     }
     const html = data.file === "NoPage" ? "" : data.html || "";
