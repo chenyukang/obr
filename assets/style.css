@@ -1604,7 +1604,11 @@ a {
   left: 50%;
   bottom: calc(max(18px, env(safe-area-inset-bottom)) + 52px);
   z-index: 100;
-  max-width: min(360px, calc(100vw - 32px));
+  width: max-content;
+  max-width: min(520px, calc(100vw - 20px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   border-radius: 999px;
   background: #172026;
   color: #ffffff;
@@ -1623,6 +1627,14 @@ a {
 .toast.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+@media (max-width: 420px) {
+  .toast {
+    max-width: calc(100vw - 16px);
+    padding: 9px 12px;
+    font-size: 13px;
+  }
 }
 
 @media (max-width: 640px) {
