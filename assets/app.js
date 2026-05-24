@@ -2980,14 +2980,35 @@ function splitMarkdownBlocks(source) {
   let start = 0;
   let match;
   while ((match = separatorPattern.exec(text)) !== null) {
+    const separatorStart = match.index;
+    const separator = match[0];
+    const firstSeparatorLength = separator.length >= 4 ? 2 : separator.length;
     blocks.push({
-      text: text.slice(start, match.index),
-      separator: match[0],
+      text: text.slice(start, separatorStart),
+      separator: separator.slice(0, firstSeparatorLength),
       start,
-      textEnd: match.index,
-      end: match.index + match[0].length,
+      textEnd: separatorStart,
+      end: separatorStart + firstSeparatorLength,
     });
-    start = match.index + match[0].length;
+
+    let emptyStart = separatorStart + firstSeparatorLength;
+    let remaining = separator.length - firstSeparatorLength;
+    while (remaining >= 2) {
+      const separatorLength = remaining === 3 ? 3 : 2;
+      blocks.push({
+        text: "",
+        separator: separator.slice(
+          emptyStart - separatorStart,
+          emptyStart - separatorStart + separatorLength,
+        ),
+        start: emptyStart,
+        textEnd: emptyStart,
+        end: emptyStart + separatorLength,
+      });
+      emptyStart += separatorLength;
+      remaining -= separatorLength;
+    }
+    start = separatorStart + separator.length;
   }
   blocks.push({
     text: text.slice(start),
