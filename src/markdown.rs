@@ -623,11 +623,20 @@ pub(crate) fn save_image_bytes(
     bail!("could not allocate unique image filename")
 }
 
+#[cfg(test)]
 pub(crate) fn render_markdown_html(raw: &str) -> String {
+    render_markdown_html_inner(raw, None)
+}
+
+pub(crate) fn render_markdown_html_for_file(raw: &str, file: &str) -> String {
+    render_markdown_html_inner(raw, Some(Path::new(file)))
+}
+
+fn render_markdown_html_inner(raw: &str, file: Option<&Path>) -> String {
     let (frontmatter, body) = split_frontmatter(raw)
         .map(|(frontmatter, body)| (Some(frontmatter), body))
         .unwrap_or((None, raw));
-    let preprocessed = preprocess_obsidian_refs(body);
+    let preprocessed = preprocess_obsidian_refs(body, file);
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_TASKLISTS);
@@ -869,7 +878,7 @@ fn is_http_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
 }
 
-fn preprocess_obsidian_refs(raw: &str) -> String {
+fn preprocess_obsidian_refs(raw: &str, file: Option<&Path>) -> String {
     let mut output = String::with_capacity(raw.len());
     let mut in_fenced_code = false;
 
@@ -882,7 +891,7 @@ fn preprocess_obsidian_refs(raw: &str) -> String {
         } else if in_fenced_code {
             output.push_str(line);
         } else {
-            output.push_str(&replace_obsidian_refs_in_line(body));
+            output.push_str(&replace_obsidian_refs_in_line(body, file));
             output.push_str(ending);
         }
     }
@@ -890,37 +899,41 @@ fn preprocess_obsidian_refs(raw: &str) -> String {
     output
 }
 
-fn obsidian_link_html(raw: &str) -> String {
+fn obsidian_link_html(raw: &str, file: Option<&Path>) -> String {
     let (target, label) = split_obsidian_target(raw);
     if target.is_empty() {
         return escape_html(raw);
     }
+    let resolved_target =
+        resolve_obsidian_target(target, file).unwrap_or_else(|| target.to_string());
     let text = label
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| target.split('#').next().unwrap_or(target).trim());
     format!(
         r##"<a href="#" data-page="{}">{}</a>"##,
-        escape_html_attr(target),
+        escape_html_attr(&resolved_target),
         escape_html(text)
     )
 }
 
-fn obsidian_embed_html(raw: &str) -> String {
+fn obsidian_embed_html(raw: &str, file: Option<&Path>) -> String {
     let (target, size) = split_obsidian_target(raw);
     if target.is_empty() {
         return escape_html(raw);
     }
+    let resolved_target =
+        resolve_obsidian_target(target, file).unwrap_or_else(|| target.to_string());
 
-    let encoded_target = percent_encode_path(target);
+    let encoded_target = percent_encode_path(&resolved_target);
     let full_src = format!("/images/{encoded_target}");
-    if is_pdf_embed_target(target) {
-        return render_pdf_embed(target, &full_src);
+    if is_pdf_embed_target(&resolved_target) {
+        return render_pdf_embed(&resolved_target, &full_src);
     }
 
     let (attrs, preview_width) = image_embed_attrs(size);
     let preview_src = format!("/image-preview/{encoded_target}?w={preview_width}");
 
-    render_image_embed(target, &preview_src, &full_src, &attrs)
+    render_image_embed(&resolved_target, &preview_src, &full_src, &attrs)
 }
 
 fn image_embed_attrs(size: Option<&str>) -> (String, u32) {
@@ -1018,7 +1031,7 @@ fn split_line_ending(line: &str) -> (&str, &str) {
     }
 }
 
-fn replace_obsidian_refs_in_line(line: &str) -> String {
+fn replace_obsidian_refs_in_line(line: &str, file: Option<&Path>) -> String {
     let mut output = String::with_capacity(line.len());
     let mut index = 0;
 
@@ -1035,9 +1048,9 @@ fn replace_obsidian_refs_in_line(line: &str) -> String {
                 let body_end = body_start + close;
                 let body = &rest[body_start..body_end];
                 output.push_str(&if is_embed {
-                    obsidian_embed_html(body)
+                    obsidian_embed_html(body, file)
                 } else {
-                    obsidian_link_html(body)
+                    obsidian_link_html(body, file)
                 });
                 index += body_end + 2;
             } else {
@@ -1053,6 +1066,49 @@ fn replace_obsidian_refs_in_line(line: &str) -> String {
     }
 
     output
+}
+
+fn resolve_obsidian_target(target: &str, file: Option<&Path>) -> Option<String> {
+    let path_part = target.split('#').next().unwrap_or(target);
+    if !path_part.starts_with("../") && !path_part.starts_with("./") {
+        return None;
+    }
+    let base_dir = file.and_then(Path::parent)?;
+    let resolved_path = normalize_obsidian_relative_path(base_dir, path_part)?;
+    let suffix = target
+        .strip_prefix(path_part)
+        .filter(|suffix| suffix.starts_with('#'))
+        .unwrap_or_default();
+    Some(format!("{resolved_path}{suffix}"))
+}
+
+fn normalize_obsidian_relative_path(base_dir: &Path, target: &str) -> Option<String> {
+    let mut parts = base_dir
+        .components()
+        .filter_map(normal_component_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    for component in Path::new(target).components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            _ => return None,
+        }
+    }
+
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+fn normal_component_str(component: Component<'_>) -> Option<&str> {
+    match component {
+        Component::Normal(part) => part.to_str(),
+        Component::CurDir => None,
+        _ => None,
+    }
 }
 
 fn inline_code_span_end(rest: &str) -> usize {
@@ -1506,6 +1562,18 @@ mod tests {
         assert!(rendered.contains(r#"loading="lazy""#));
         assert!(rendered.contains(r#"decoding="async""#));
         assert!(rendered.contains(r#"width="250""#));
+    }
+
+    #[test]
+    fn render_markdown_html_resolves_relative_obsidian_links() {
+        let rendered = render_markdown_html_for_file(
+            "[[../Daily/2026-05-24]]\n\n![[../Pics/photo.jpg|250]]",
+            "Posts/note.md",
+        );
+
+        assert!(rendered.contains(r#"data-page="Daily/2026-05-24""#));
+        assert!(rendered.contains(r#"<img src="/image-preview/Pics/photo.jpg?w=500""#));
+        assert!(rendered.contains(r#"data-full-src="/images/Pics/photo.jpg""#));
     }
 
     #[test]

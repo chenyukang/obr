@@ -33,7 +33,7 @@ use crate::{
     error::{AppError, AppResult},
     markdown::{
         auto_link_note_titles, ensure_inside, escape_html, escape_html_attr, mark_todo_content,
-        normalize_markdown_rel, normalize_rel_path, rel_to_vault, render_markdown_html,
+        normalize_markdown_rel, normalize_rel_path, rel_to_vault, render_markdown_html_for_file,
         save_data_url_image, save_image_bytes,
     },
 };
@@ -378,7 +378,7 @@ pub(crate) async fn get_page(
         })
         .into_response());
     };
-    let html = render_markdown_html(&content);
+    let html = render_markdown_html_for_file(&content, &rel);
     Ok(Json(PageResponse { file: rel, html }).into_response())
 }
 
@@ -413,8 +413,8 @@ pub(crate) async fn post_page(
     state.maybe_git_sync();
     let rel = rel_to_vault(&state.config.vault_path, &path)?;
     Ok(Json(PageResponse {
+        html: render_markdown_html_for_file(&body.content, &rel),
         file: rel,
-        html: render_markdown_html(&body.content),
     })
     .into_response())
 }
