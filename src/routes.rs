@@ -23,6 +23,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 use tracing::warn;
+use walkdir::WalkDir;
 use webauthn_rs::prelude::{
     PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
 };
@@ -595,19 +596,71 @@ pub(crate) async fn image_preview(
 
 fn resolve_image_file(state: &AppState, path: &str) -> AppResult<Option<(PathBuf, fs::Metadata)>> {
     let rel = normalize_rel_path(path)?;
-    let images_root = state
-        .config
-        .vault_path
-        .join(&state.config.image_dir)
-        .canonicalize()?;
-    let path = images_root.join(rel);
-    ensure_inside(&images_root, &path)?;
-    if !path.is_file() {
+    let Some(path) =
+        resolve_attachment_path(&state.config.vault_path, &state.config.image_dir, &rel)?
+    else {
         return Ok(None);
-    }
+    };
 
     let metadata = fs::metadata(&path).with_context(|| format!("stat image {}", path.display()))?;
     Ok(Some((path, metadata)))
+}
+
+fn resolve_attachment_path(
+    vault: &Path,
+    image_dir: &Path,
+    rel: &Path,
+) -> AppResult<Option<PathBuf>> {
+    let vault = vault.canonicalize()?;
+    let image_root = vault.join(image_dir);
+    let is_bare_filename = rel.components().count() == 1;
+    let candidates = if is_bare_filename {
+        vec![image_root.join(rel), vault.join(rel)]
+    } else {
+        vec![vault.join(rel), image_root.join(rel)]
+    };
+
+    for candidate in candidates {
+        ensure_inside(&vault, &candidate)?;
+        if candidate.is_file() {
+            return Ok(Some(candidate));
+        }
+    }
+
+    if is_bare_filename && is_supported_attachment_path(rel) {
+        let Some(file_name) = rel.file_name() else {
+            return Ok(None);
+        };
+        let mut matches = Vec::new();
+        for entry in WalkDir::new(&vault).follow_links(false) {
+            let entry = entry?;
+            if entry.file_type().is_file()
+                && entry.path().file_name() == Some(file_name)
+                && is_supported_attachment_path(entry.path())
+            {
+                matches.push(entry.path().to_path_buf());
+            }
+        }
+        matches.sort_by_key(|path| rel_to_vault(&vault, path).unwrap_or_default());
+        if let Some(path) = matches.into_iter().next() {
+            ensure_inside(&vault, &path)?;
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn is_supported_attachment_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| {
+            matches!(
+                extension.as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "gif" | "svg" | "heic" | "heif" | "pdf"
+            )
+        })
 }
 
 fn image_file_response(
@@ -1037,9 +1090,11 @@ fn vault_rel_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
-    use super::{ensure_image_preview, entry_body_already_exists};
+    use super::{
+        ensure_image_preview, entry_body_already_exists, rel_to_vault, resolve_attachment_path,
+    };
 
     #[test]
     fn entry_body_duplicate_check_uses_visible_content() {
@@ -1069,5 +1124,63 @@ mod tests {
         assert_eq!(generated.width(), 600);
         assert_eq!(generated.height(), 400);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_attachment_path_finds_svg_by_obsidian_filename() {
+        let vault =
+            std::env::temp_dir().join(format!("obr-attachment-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(vault.join("Pics")).unwrap();
+        fs::write(vault.join("Pics").join("diagram.svg"), "<svg></svg>").unwrap();
+
+        let path = resolve_attachment_path(&vault, Path::new("Pics"), Path::new("diagram.svg"))
+            .unwrap()
+            .unwrap();
+
+        let canonical_vault = vault.canonicalize().unwrap();
+        assert_eq!(
+            rel_to_vault(&canonical_vault, &path).unwrap(),
+            "Pics/diagram.svg"
+        );
+        let _ = fs::remove_dir_all(vault);
+    }
+
+    #[test]
+    fn resolve_attachment_path_accepts_vault_relative_image_paths() {
+        let vault =
+            std::env::temp_dir().join(format!("obr-attachment-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(vault.join("Pics")).unwrap();
+        fs::write(vault.join("Pics").join("photo.jpg"), "fake").unwrap();
+
+        let path = resolve_attachment_path(&vault, Path::new("Pics"), Path::new("Pics/photo.jpg"))
+            .unwrap()
+            .unwrap();
+
+        let canonical_vault = vault.canonicalize().unwrap();
+        assert_eq!(
+            rel_to_vault(&canonical_vault, &path).unwrap(),
+            "Pics/photo.jpg"
+        );
+        let _ = fs::remove_dir_all(vault);
+    }
+
+    #[test]
+    fn resolve_attachment_path_falls_back_to_vault_wide_filename_lookup() {
+        let vault =
+            std::env::temp_dir().join(format!("obr-attachment-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(vault.join("Assets")).unwrap();
+        fs::create_dir_all(vault.join("Pics")).unwrap();
+        fs::write(vault.join("Assets").join("diagram.svg"), "<svg></svg>").unwrap();
+
+        let path = resolve_attachment_path(&vault, Path::new("Pics"), Path::new("diagram.svg"))
+            .unwrap()
+            .unwrap();
+
+        let canonical_vault = vault.canonicalize().unwrap();
+        assert_eq!(
+            rel_to_vault(&canonical_vault, &path).unwrap(),
+            "Assets/diagram.svg"
+        );
+        let _ = fs::remove_dir_all(vault);
     }
 }
