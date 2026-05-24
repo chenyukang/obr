@@ -23,7 +23,7 @@ against a vault that contains data you cannot afford to modify.
 For a disposable local vault, run:
 
 ```bash
-cp -R examples/vaul vault
+cp -R examples/vault vault
 ```
 
 Generate a local password hash before running the app:

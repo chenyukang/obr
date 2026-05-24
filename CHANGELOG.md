@@ -14,5 +14,5 @@ and this project follows semantic versioning once versioned releases begin.
 - Add GitHub Release builds for macOS/Linux x86_64 and arm64 with checksums.
 - Add request Host/Origin protection for browser-originated writes.
 - Add `obr doctor` / `obr check` deployment diagnostics.
-- Add a disposable demo vault under `examples/vaul`.
+- Add a disposable demo vault under `examples/vault`.
 - Add real `obr daemon start|stop|reload|status` process control.
