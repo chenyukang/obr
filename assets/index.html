@@ -7,7 +7,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260524-empty-block-autosave">
+    <link rel="stylesheet" href="/assets/style.css?v=20260524-rss-read">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -42,6 +42,7 @@
             <button data-view="day" data-icon="calendar-days">Day</button>
             <button data-view="find" data-icon="search">Find</button>
             <button data-view="todo" data-icon="list-checks">Todo</button>
+            <button data-view="rss" data-icon="rss">RSS</button>
           </nav>
           <div class="auth-actions">
             <div id="connection-status" class="connection-status is-offline" role="status" aria-live="polite" title="Offline">
@@ -138,10 +139,33 @@
           <p id="todo-status" class="status" role="status" aria-live="polite" hidden></p>
         </section>
 
+        <section id="rss-view" class="view" hidden>
+          <div class="rss-toolbar">
+            <div class="rss-tabs" role="group" aria-label="RSS item state">
+              <button id="rss-unread-filter" type="button" data-rss-filter="unread">Unread</button>
+              <button id="rss-all-filter" type="button" data-rss-filter="all">All</button>
+            </div>
+            <form id="rss-search-form" class="rss-search">
+              <div class="search-field">
+                <label class="sr-only" for="rss-search-input">Search RSS items</label>
+                <input id="rss-search-input" type="search" placeholder="Search RSS" autocomplete="off">
+                <button id="rss-search-clear" class="input-clear" type="button" aria-label="Clear RSS search" title="Clear RSS search" data-icon="x" hidden></button>
+              </div>
+            </form>
+            <button id="rss-refresh-button" type="button" data-icon="rotate-ccw">Refresh</button>
+          </div>
+          <p id="rss-status" class="status" role="status" aria-live="polite" hidden></p>
+          <div class="rss-layout">
+            <div id="rss-list" class="panel rss-list" aria-live="polite"></div>
+          </div>
+        </section>
+
         <section id="page-view" class="view" hidden>
           <div class="page-actions">
             <button id="back-button" data-icon="arrow-left">Back</button>
             <button id="edit-button" data-icon="pencil">Edit</button>
+            <button id="rss-star-button" class="rss-page-action" type="button" data-icon="star" hidden>Star</button>
+            <button id="rss-unsubscribe-button" class="rss-page-action danger-button" type="button" data-icon="trash-2" hidden>Unsub</button>
           </div>
           <article class="panel">
             <h2 id="page-title"></h2>
@@ -199,6 +223,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260524-empty-block-autosave"></script>
+    <script src="/assets/app.js?v=20260524-rss-read"></script>
   </body>
 </html>

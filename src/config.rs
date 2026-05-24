@@ -50,6 +50,18 @@ pub(crate) struct Config {
     pub(crate) webauthn_rp_id: Option<String>,
     #[serde(default)]
     pub(crate) webauthn_origin: Option<String>,
+    #[serde(default)]
+    pub(crate) rss_enabled: bool,
+    #[serde(default = "default_rss_feeds_path")]
+    pub(crate) rss_feeds_path: PathBuf,
+    #[serde(default = "default_rss_data_dir")]
+    pub(crate) rss_data_dir: PathBuf,
+    #[serde(default = "default_rss_refresh_minutes")]
+    pub(crate) rss_refresh_minutes: u64,
+    #[serde(default = "default_rss_max_items_per_feed")]
+    pub(crate) rss_max_items_per_feed: usize,
+    #[serde(default = "default_rss_fetch_full_content")]
+    pub(crate) rss_fetch_full_content: bool,
 }
 
 fn default_session_days() -> u64 {
@@ -88,6 +100,26 @@ fn default_webauthn_rp_name() -> String {
     "Obr".to_string()
 }
 
+fn default_rss_feeds_path() -> PathBuf {
+    PathBuf::from("Zero/feeds.md")
+}
+
+fn default_rss_data_dir() -> PathBuf {
+    PathBuf::from("data/rss")
+}
+
+fn default_rss_refresh_minutes() -> u64 {
+    30
+}
+
+fn default_rss_max_items_per_feed() -> usize {
+    20
+}
+
+fn default_rss_fetch_full_content() -> bool {
+    true
+}
+
 impl Config {
     pub(crate) fn load() -> Result<Self> {
         let path = if Path::new("config/local.toml").exists() {
@@ -109,10 +141,15 @@ impl Config {
         if config.passkey_store_path.is_relative() {
             config.passkey_store_path = cwd.join(config.passkey_store_path);
         }
+        if config.rss_data_dir.is_relative() {
+            config.rss_data_dir = cwd.join(config.rss_data_dir);
+        }
         config.daily_dir = normalize_vault_relative_path(config.daily_dir, "daily_dir", false)?;
         config.entry_dir = normalize_vault_relative_path(config.entry_dir, "entry_dir", false)?;
         config.image_dir = normalize_vault_relative_path(config.image_dir, "image_dir", false)?;
         config.todo_path = normalize_vault_relative_path(config.todo_path, "todo_path", true)?;
+        config.rss_feeds_path =
+            normalize_vault_relative_path(config.rss_feeds_path, "rss_feeds_path", true)?;
         config.vault_path = config.vault_path.canonicalize().map_err(|err| {
             anyhow!(
                 "vault path does not exist or cannot be resolved: {}: {err}",
@@ -141,6 +178,17 @@ impl Config {
         }
         if self.webauthn_rp_name.trim().is_empty() {
             bail!("webauthn_rp_name cannot be empty");
+        }
+        if self.rss_enabled {
+            if self.rss_refresh_minutes == 0 {
+                bail!("rss_refresh_minutes must be greater than 0");
+            }
+            if self.rss_max_items_per_feed == 0 {
+                bail!("rss_max_items_per_feed must be greater than 0");
+            }
+            if self.rss_data_dir.as_os_str().is_empty() {
+                bail!("rss_data_dir cannot be empty");
+            }
         }
         match (&self.password_hash, &self.password) {
             (Some(hash), _) => {
@@ -273,6 +321,12 @@ mod tests {
             webauthn_rp_name: "Obr".to_string(),
             webauthn_rp_id: None,
             webauthn_origin: None,
+            rss_enabled: false,
+            rss_feeds_path: PathBuf::from("Zero/feeds.md"),
+            rss_data_dir: PathBuf::from("data/rss"),
+            rss_refresh_minutes: 30,
+            rss_max_items_per_feed: 20,
+            rss_fetch_full_content: true,
         }
     }
 

@@ -29,6 +29,7 @@ use crate::{
     origin,
     passkeys::PasskeyStore,
     routes,
+    rss::RssReader,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,6 +48,7 @@ pub(crate) struct AppState {
     pub(crate) webauthn: Arc<Webauthn>,
     pub(crate) passkey_store: Arc<PasskeyStore>,
     pub(crate) markdown_index: Arc<MarkdownIndex>,
+    pub(crate) rss_reader: Option<Arc<RssReader>>,
 }
 
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -55,7 +57,7 @@ const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
     "default-src 'self'; ",
     "script-src 'self'; ",
     "style-src 'self'; ",
-    "img-src 'self' data:; ",
+    "img-src 'self' data: https: http:; ",
     "connect-src 'self'; ",
     "frame-src 'self'; ",
     "object-src 'self'; ",
@@ -200,6 +202,7 @@ async fn serve() -> Result<()> {
     );
     let webauthn = build_webauthn(&config)?;
     let passkey_store = PasskeyStore::load(config.passkey_store_path.clone())?;
+    let rss_reader = RssReader::open(&config)?;
 
     let listen: SocketAddr = config.listen.parse().context("invalid listen address")?;
     let session_layer = session_layer(&config);
@@ -210,7 +213,11 @@ async fn serve() -> Result<()> {
         webauthn,
         passkey_store: Arc::new(passkey_store),
         markdown_index: Arc::new(markdown_index),
+        rss_reader,
     });
+    if let Some(rss_reader) = state.rss_reader.clone() {
+        rss_reader.spawn_refresh_loop();
+    }
     let app = router(Arc::clone(&state), session_layer);
 
     let listener = TcpListener::bind(listen).await?;
@@ -332,6 +339,17 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/page", get(routes::get_page).post(routes::post_page))
         .route("/api/markdown/blocks", post(routes::render_markdown_blocks))
         .route("/api/search", get(routes::search))
+        .route("/api/rss/status", get(routes::rss_status))
+        .route("/api/rss/feeds", get(routes::rss_feeds))
+        .route("/api/rss/items", get(routes::rss_items))
+        .route("/api/rss/items/{id}", get(routes::rss_item))
+        .route("/api/rss/items/{id}/read", post(routes::rss_mark_read))
+        .route("/api/rss/items/{id}/star", post(routes::rss_star))
+        .route(
+            "/api/rss/feeds/{id}/unsubscribe",
+            post(routes::rss_unsubscribe),
+        )
+        .route("/api/rss/refresh", post(routes::rss_refresh))
         .route("/api/entry", post(routes::post_entry))
         .route("/api/entry/multipart", post(routes::post_entry_multipart))
         .route("/api/mark", post(routes::mark_todo))

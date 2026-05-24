@@ -19,7 +19,7 @@ use axum::{
     },
     response::{Html, IntoResponse, Response},
 };
-use chrono::Local;
+use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 use tracing::warn;
@@ -38,6 +38,7 @@ use crate::{
         render_markdown_blocks_for_file, render_markdown_html_for_file, save_data_url_image,
         save_image_bytes,
     },
+    rss::{self, RssItemDetail, RssItemFilter},
 };
 
 const IMAGE_PREVIEW_WIDTH: u32 = 900;
@@ -104,6 +105,23 @@ pub(crate) struct MarkQuery {
     index: Option<usize>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct RssItemsQuery {
+    state: Option<String>,
+    limit: Option<usize>,
+    q: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RssReadRequest {
+    read: bool,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RssStarRequest {
+    starred: bool,
+}
+
 #[derive(Serialize)]
 struct PasskeyStatus {
     registered: bool,
@@ -147,6 +165,13 @@ struct AppConfigResponse {
     image_dir: String,
     todo_path: String,
     todo_file: String,
+}
+
+#[derive(Serialize)]
+struct RssItemDetailResponse {
+    #[serde(flatten)]
+    item: RssItemDetail,
+    html: String,
 }
 
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
@@ -388,6 +413,107 @@ pub(crate) async fn app_config(State(state): State<Arc<AppState>>) -> AppResult<
         todo_file,
     })
     .into_response())
+}
+
+pub(crate) async fn rss_status(State(state): State<Arc<AppState>>) -> AppResult<Response> {
+    let status = if let Some(reader) = &state.rss_reader {
+        reader.status()?
+    } else {
+        rss::disabled_status(&state.config)
+    };
+    Ok(Json(status).into_response())
+}
+
+pub(crate) async fn rss_feeds(State(state): State<Arc<AppState>>) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok(Json(Vec::<rss::RssFeedSummary>::new()).into_response());
+    };
+    Ok(Json(reader.list_feeds()?).into_response())
+}
+
+pub(crate) async fn rss_items(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RssItemsQuery>,
+) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok(Json(Vec::<rss::RssItemSummary>::new()).into_response());
+    };
+    let filter = match query.state.as_deref() {
+        Some("all") => RssItemFilter::All,
+        _ => RssItemFilter::Unread,
+    };
+    Ok(
+        Json(reader.list_items(filter, query.limit.unwrap_or(50), query.q.as_deref())?)
+            .into_response(),
+    )
+}
+
+pub(crate) async fn rss_item(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
+    };
+    let Some(mut item) = reader.get_item(&id)? else {
+        return Ok((StatusCode::NOT_FOUND, "RSS item not found").into_response());
+    };
+    if item.read_at.is_none() && reader.mark_item_read(&id, true)? {
+        item.read_at = Some(Utc::now().to_rfc3339());
+    }
+    let html =
+        render_markdown_html_for_file(&item.content_markdown, &format!("rss/{}.md", item.id));
+    Ok(Json(RssItemDetailResponse { item, html }).into_response())
+}
+
+pub(crate) async fn rss_mark_read(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RssReadRequest>,
+) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
+    };
+    if reader.mark_item_read(&id, body.read)? {
+        Ok("ok".into_response())
+    } else {
+        Ok((StatusCode::NOT_FOUND, "RSS item not found").into_response())
+    }
+}
+
+pub(crate) async fn rss_star(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RssStarRequest>,
+) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
+    };
+    if reader.mark_item_starred(&id, body.starred)? {
+        Ok("ok".into_response())
+    } else {
+        Ok((StatusCode::NOT_FOUND, "RSS item not found").into_response())
+    }
+}
+
+pub(crate) async fn rss_unsubscribe(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
+    };
+    let Some(summary) = reader.unsubscribe_feed(&id)? else {
+        return Ok((StatusCode::NOT_FOUND, "RSS feed not found").into_response());
+    };
+    Ok(Json(summary).into_response())
+}
+
+pub(crate) async fn rss_refresh(State(state): State<Arc<AppState>>) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
+    };
+    Ok(Json(reader.refresh().await?).into_response())
 }
 
 pub(crate) async fn get_page(

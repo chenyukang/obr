@@ -91,6 +91,33 @@ These vault layout paths are relative to `vault_path`. Parent path components su
 
 Runtime cache data is separate from the vault and is written under the gitignored `data` directory in the process working directory.
 
+## RSS Reader
+
+Obr can maintain a local RSS reading list. Enable it in `config/local.toml`:
+
+```toml
+rss_enabled = true
+rss_feeds_path = "Zero/feeds.md"
+rss_data_dir = "data/rss"
+rss_refresh_minutes = 30
+rss_max_items_per_feed = 20
+rss_fetch_full_content = true
+```
+
+`rss_feeds_path` is relative to `vault_path` and should contain one RSS, Atom,
+or JSON Feed URL per line. Blank lines and `#` comments are ignored, and
+duplicate URLs are skipped.
+
+RSS metadata and read/unread state are stored in `data/rss/rss.sqlite`. Article
+Markdown is stored under `data/rss/content/`. When
+`rss_fetch_full_content = true`, Obr fetches article pages and uses
+`rs-trafilatura` to extract readable Markdown. If extraction fails, it falls
+back to feed content or summary. Each refresh treats the feeds file as the
+source of truth: removing a feed URL from the file removes that feed's stored
+items and article Markdown on the next scan. The RSS detail page also has an
+Unsubscribe action, which removes the feed URL from `rss_feeds_path` and prunes
+that feed's cached items immediately.
+
 ## Security Model
 
 Obr is designed as a local-first personal app. It can be exposed to a phone or a

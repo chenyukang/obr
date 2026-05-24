@@ -232,6 +232,12 @@ mod tests {
             webauthn_rp_name: "Obr".to_string(),
             webauthn_rp_id: None,
             webauthn_origin: None,
+            rss_enabled: false,
+            rss_feeds_path: PathBuf::from("Zero/feeds.md"),
+            rss_data_dir: PathBuf::from("data/rss"),
+            rss_refresh_minutes: 30,
+            rss_max_items_per_feed: 20,
+            rss_fetch_full_content: true,
         }
     }
 

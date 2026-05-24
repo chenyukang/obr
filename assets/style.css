@@ -159,6 +159,11 @@ nav {
   gap: 8px;
 }
 
+nav button[data-view="rss"] .icon {
+  width: 14px;
+  height: 14px;
+}
+
 .topbar-right,
 .auth-actions {
   display: flex;
@@ -970,6 +975,213 @@ main {
   font-weight: 700;
 }
 
+.rss-toolbar {
+  display: grid;
+  align-items: center;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.rss-search {
+  min-width: 0;
+}
+
+.rss-search .search-field {
+  width: 100%;
+}
+
+#rss-refresh-button {
+  white-space: nowrap;
+}
+
+.rss-tabs {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 3px;
+}
+
+.rss-tabs button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 11px;
+  font-weight: 750;
+}
+
+.rss-tabs button.is-active {
+  background: #e9f2ee;
+  color: #163f2c;
+}
+
+.rss-layout {
+  display: grid;
+  gap: 16px;
+}
+
+#rss-view.has-reader .rss-layout {
+  align-items: start;
+  grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.55fr);
+}
+
+#rss-view.has-reader .rss-list {
+  max-height: calc(100vh - 176px);
+  overflow: auto;
+  position: sticky;
+  top: 90px;
+}
+
+.rss-list {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+}
+
+.rss-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  width: 100%;
+  gap: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.rss-item:hover,
+.rss-item.is-active {
+  background: #edf1f3;
+}
+
+.rss-item-main {
+  display: grid;
+  justify-content: stretch;
+  gap: 5px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 10px;
+  text-align: left;
+}
+
+.rss-item-main:hover {
+  border-color: transparent;
+}
+
+.rss-item-read-button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+}
+
+.rss-item-read-button:hover {
+  background: #dfe8e3;
+  color: var(--green);
+}
+
+.rss-item-read-button .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.rss-item.is-read:not(.is-active),
+.rss-item.is-read:not(.is-active) .rss-item-title {
+  color: var(--muted);
+}
+
+.rss-item-title,
+.rss-item-meta,
+.rss-item-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rss-item-title {
+  color: var(--text);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.rss-item.is-read:not(.is-active) .rss-item-title {
+  color: var(--muted);
+}
+
+.rss-item-meta {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.rss-item-summary {
+  color: #45565f;
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.rss-reader {
+  margin-top: 0;
+  min-width: 0;
+}
+
+.rss-reader-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+}
+
+.rss-reader-header h2 {
+  margin: 0 0 8px;
+  color: #1f2f37;
+  font-size: 24px;
+  line-height: 1.25;
+}
+
+.rss-reader-feed {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.rss-reader #rss-reader-content {
+  color: #1f2f37;
+  font-size: 16px;
+}
+
+.rss-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0 0 16px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.rss-detail-meta a {
+  color: var(--blue);
+  font-weight: 800;
+}
+
 .empty {
   margin: 0;
   color: var(--muted);
@@ -1012,6 +1224,20 @@ a {
   padding: 7px 12px;
   pointer-events: auto;
   backdrop-filter: blur(10px);
+}
+
+.page-actions .danger-button {
+  border-color: #f1b5aa;
+  color: #b42318;
+}
+
+.page-actions .is-starred {
+  border-color: #e0b64b;
+  color: #8a5b00;
+}
+
+.page-actions .is-starred .icon {
+  fill: currentColor;
 }
 
 #edit-button {
@@ -1751,9 +1977,16 @@ a {
 
   nav,
   .search-bar,
-  .todo-form {
+  .todo-form,
+  .rss-toolbar {
     width: 100%;
     flex-wrap: wrap;
+  }
+
+  nav {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
   }
 
   .page-actions button {
@@ -1776,6 +2009,44 @@ a {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .rss-tabs {
+    min-width: 0;
+  }
+
+  .rss-tabs button {
+    min-height: 36px;
+    padding: 6px 8px;
+  }
+
+  #rss-refresh-button {
+    min-width: 0;
+    min-height: 36px;
+    padding: 6px 8px;
+  }
+
+  .rss-toolbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .rss-search input {
+    min-height: 36px;
+    padding: 8px 34px 8px 10px;
+  }
+
+  #rss-view.has-reader .rss-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #rss-view.has-reader .rss-list {
+    max-height: none;
+    overflow: visible;
+    position: static;
+  }
+
+  .rss-reader-header {
+    display: grid;
+  }
+
   .toolbar button,
   .toolbar .file-button {
     width: 100%;
@@ -1784,7 +2055,23 @@ a {
   }
 
   nav button {
-    flex: 1 1 74px;
+    gap: 4px;
+    min-height: 38px;
+    min-width: 0;
+    padding: 6px 4px;
+    width: 100%;
+    font-size: 15px;
+    white-space: nowrap;
+  }
+
+  nav button .icon {
+    width: 12px;
+    height: 12px;
+  }
+
+  nav button[data-view="rss"] .icon {
+    width: 12px;
+    height: 12px;
   }
 
   nav {

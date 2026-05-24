@@ -20,9 +20,18 @@ const state = {
   searchController: null,
   searchRequestId: 0,
   searchPage: 0,
+  rssSearchTimer: 0,
   pageController: null,
   pageRequestId: 0,
   todoRequestId: 0,
+  rssFilter: "unread",
+  rssItemsRequestId: 0,
+  rssItemRequestId: 0,
+  rssSelectedItemId: "",
+  rssCurrentFeedId: "",
+  rssCurrentFeedTitle: "",
+  rssCurrentStarred: false,
+  rssRefreshing: false,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
   connectionOnline: true,
@@ -45,6 +54,8 @@ const state = {
   outboxActiveItemId: "",
   outboxCancelingIds: new Set(),
   historyReady: false,
+  appHistoryIndex: 0,
+  appHistoryMaxIndex: 0,
   applyingHistory: false,
   updateWorker: null,
   refreshingForUpdate: false,
@@ -120,6 +131,7 @@ const ICONS = {
     '<path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path><path d="M8 14h.01"></path><path d="M12 14h.01"></path><path d="M16 14h.01"></path><path d="M8 18h.01"></path><path d="M12 18h.01"></path><path d="M16 18h.01"></path>',
   camera:
     '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"></path><circle cx="12" cy="13" r="3"></circle>',
+  check: '<path d="M20 6 9 17l-5-5"></path>',
   image:
     '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
   list: '<path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>',
@@ -138,11 +150,14 @@ const ICONS = {
   plus: '<path d="M5 12h14"></path><path d="M12 5v14"></path>',
   "rotate-ccw":
     '<path d="M3 12a9 9 0 1 0 9-9 9.8 9.8 0 0 0-6.7 2.7L3 8"></path><path d="M3 3v5h5"></path>',
+  rss: '<path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1"></circle>',
   save: '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"></path><path d="M17 21v-7H7v7"></path><path d="M7 3v5h8"></path>',
   search:
     '<circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path>',
   shuffle:
     '<path d="m18 14 4 4-4 4"></path><path d="m18 2 4 4-4 4"></path><path d="M2 18h1.9a6 6 0 0 0 5.2-3l5.8-10A6 6 0 0 1 20.1 2H22"></path><path d="M2 6h1.9a6 6 0 0 1 5.2 3l.7 1.2"></path><path d="M14.9 19a6 6 0 0 0 5.2 3H22"></path>',
+  star:
+    '<path d="M11.5 2.8a.55.55 0 0 1 1 0l2.3 4.7a2.1 2.1 0 0 0 1.6 1.2l5.2.8a.55.55 0 0 1 .3.9l-3.8 3.7a2.1 2.1 0 0 0-.6 1.9l.9 5.2a.55.55 0 0 1-.8.6L13 19.3a2.1 2.1 0 0 0-2 0l-4.6 2.4a.55.55 0 0 1-.8-.6l.9-5.2a2.1 2.1 0 0 0-.6-1.9L2.1 10.4a.55.55 0 0 1 .3-.9l5.2-.8a2.1 2.1 0 0 0 1.6-1.2z"></path>',
   "trash-2":
     '<path d="M3 6h18"></path><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path>',
   x: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
@@ -276,8 +291,37 @@ function bindEvents() {
     await loadTodo({ renderCache: false });
   });
 
+  document.querySelectorAll("[data-rss-filter]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.rssFilter = button.dataset.rssFilter || "unread";
+      updateRssFilterButtons();
+      await loadRssItems();
+    });
+  });
+  el("rss-search-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    window.clearTimeout(state.rssSearchTimer);
+    await loadRssItems();
+  });
+  el("rss-search-input").addEventListener("input", () => {
+    updateRssSearchClear();
+    window.clearTimeout(state.rssSearchTimer);
+    state.rssSearchTimer = window.setTimeout(loadRssItems, 180);
+  });
+  el("rss-search-input").addEventListener("keydown", async (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      await clearRssSearch();
+    }
+  });
+  el("rss-search-clear").addEventListener("click", clearRssSearch);
+  el("rss-refresh-button").addEventListener("click", refreshRss);
+  el("rss-list").addEventListener("click", handleRssListClick);
+
   el("back-button").addEventListener("click", goBackToLastList);
   el("edit-button").addEventListener("click", toggleEdit);
+  el("rss-star-button").addEventListener("click", toggleCurrentRssStar);
+  el("rss-unsubscribe-button").addEventListener("click", unsubscribeCurrentRssFeed);
   el("page-new-block-button").addEventListener("click", openNewBlockAtEnd);
 
   el("page-content").addEventListener("pointerup", rememberReadBlockFromPointer);
@@ -349,6 +393,7 @@ function initializeAppHistory(entry) {
 function appHistoryState(entry) {
   return {
     obr: true,
+    historyIndex: state.appHistoryIndex,
     ...entry,
   };
 }
@@ -360,8 +405,14 @@ function replaceAppHistory(entry) {
 
 function pushAppHistory(entry) {
   if (!state.historyReady || state.applyingHistory) return;
-  const next = appHistoryState(entry);
+  const nextIndex = state.appHistoryIndex + 1;
+  const next = {
+    ...appHistoryState(entry),
+    historyIndex: nextIndex,
+  };
   if (sameAppHistoryState(window.history.state, next)) return;
+  state.appHistoryIndex = nextIndex;
+  state.appHistoryMaxIndex = nextIndex;
   window.history.pushState(next, "", location.href);
 }
 
@@ -398,7 +449,14 @@ async function handleAppPopState(event) {
 
   state.applyingHistory = true;
   try {
+    if (Number.isFinite(target.historyIndex)) {
+      state.appHistoryIndex = target.historyIndex;
+    }
     if (target.view === "page" && target.file) {
+      if (target.file.startsWith("rss:")) {
+        await openRssItem(target.file.slice(4), { updateHistory: false });
+        return;
+      }
       await fetchPage(
         target.file,
         target.sourceView || state.lastListView,
@@ -1736,6 +1794,18 @@ async function showView(name, options = {}) {
     if (updateHistory) pushAppHistory({ view: "find" });
     return;
   }
+  if (name === "rss") {
+    clearPageOutline();
+    updateReadingProgress();
+    state.lastListView = "rss";
+    el("rss-view").hidden = false;
+    updateRssFilterButtons();
+    updateRssSearchClear();
+    await loadRssItems();
+    if (restoreScroll) restoreViewScroll("rss");
+    if (updateHistory) pushAppHistory({ view: "rss" });
+    return;
+  }
   clearPageOutline();
   updateReadingProgress();
   el("day-view").hidden = false;
@@ -2376,6 +2446,305 @@ function renderTodoHtml(html, emptyMessage) {
   );
 }
 
+async function loadRssItems() {
+  const requestId = state.rssItemsRequestId + 1;
+  state.rssItemsRequestId = requestId;
+  setRssStatus("Loading...");
+  try {
+    const params = new URLSearchParams({
+      state: state.rssFilter,
+      limit: "80",
+    });
+    const query = rssSearchQuery();
+    if (query) params.set("q", query);
+    const response = await request(`/api/rss/items?${params}`);
+    if (!response.ok) throw new Error(await response.text());
+    const items = await response.json();
+    if (requestId !== state.rssItemsRequestId) return;
+    renderRssItems(items);
+    setRssStatus("");
+  } catch (error) {
+    if (requestId !== state.rssItemsRequestId) return;
+    console.error(error);
+    renderRssItems([]);
+    setRssStatus(error.message || "RSS loading failed.");
+  }
+}
+
+function renderRssItems(items) {
+  const list = el("rss-list");
+  if (!items.length) {
+    const empty = rssSearchQuery()
+      ? "No RSS matches."
+      : state.rssFilter === "unread"
+        ? "No unread items."
+        : "No RSS items.";
+    list.innerHTML = `<p class="empty">${empty}</p>`;
+    markSelectedRssItem();
+    return;
+  }
+  list.innerHTML = items.map(rssItemHtml).join("");
+  markSelectedRssItem();
+}
+
+function rssItemHtml(item) {
+  const active = item.id === state.rssSelectedItemId ? " is-active" : "";
+  const read = item.read_at ? " is-read" : "";
+  const meta = [item.feed_title, formatTime(item.published_at || item.first_seen_at)]
+    .filter(Boolean)
+    .join(" · ");
+  const summary = firstLine(item.summary_md || "");
+  const readButton = item.read_at
+    ? ""
+    : `<button class="rss-item-read-button" type="button" data-rss-mark-read="${escapeHtmlAttr(item.id)}" aria-label="Mark read" title="Mark read">${iconSvg("check")}</button>`;
+  return `
+    <div class="rss-item${active}${read}" data-rss-row="${escapeHtmlAttr(item.id)}">
+      <button class="rss-item-main" type="button" data-rss-item="${escapeHtmlAttr(item.id)}">
+        <span class="rss-item-title">${escapeHtml(item.title || "Untitled")}</span>
+        <span class="rss-item-meta">${escapeHtml(meta)}</span>
+        ${summary ? `<span class="rss-item-summary">${escapeHtml(summary)}</span>` : ""}
+      </button>
+      ${readButton}
+    </div>
+  `;
+}
+
+async function handleRssListClick(event) {
+  const readButton = event.target.closest("[data-rss-mark-read]");
+  if (readButton) {
+    event.preventDefault();
+    await markRssItemReadFromList(readButton.dataset.rssMarkRead, readButton);
+    return;
+  }
+  const button = event.target.closest("[data-rss-item]");
+  if (!button) return;
+  event.preventDefault();
+  await openRssItem(button.dataset.rssItem);
+}
+
+async function markRssItemReadFromList(id, button) {
+  if (!id) return;
+  button.disabled = true;
+  try {
+    const response = await request(`/api/rss/items/${encodeURIComponent(id)}/read`, {
+      method: "POST",
+      body: JSON.stringify({ read: true }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    if (state.rssFilter === "unread") {
+      button.closest("[data-rss-row]")?.remove();
+      if (!el("rss-list").querySelector("[data-rss-row]")) {
+        await loadRssItems();
+      }
+    } else {
+      markRssRowRead(id);
+    }
+  } catch (error) {
+    console.error(error);
+    button.disabled = false;
+    setRssStatus(error.message || "Mark read failed.");
+  }
+}
+
+async function openRssItem(id, options = {}) {
+  if (!id) return;
+  const { updateHistory = true } = options;
+  const requestId = state.rssItemRequestId + 1;
+  state.rssItemRequestId = requestId;
+  state.rssSelectedItemId = id;
+  markSelectedRssItem();
+  setRssStatus("Opening...");
+  try {
+    const response = await request(`/api/rss/items/${encodeURIComponent(id)}`);
+    if (!response.ok) throw new Error(await response.text());
+    const item = await response.json();
+    if (requestId !== state.rssItemRequestId) return;
+    renderRssDetailPage(item, { updateHistory });
+    markSelectedRssItem(true);
+    setRssStatus("");
+  } catch (error) {
+    if (requestId !== state.rssItemRequestId) return;
+    console.error(error);
+    setRssStatus(error.message || "RSS item failed.");
+  }
+}
+
+function renderRssDetailPage(item, options = {}) {
+  state.rssSelectedItemId = item.id;
+  state.rssCurrentFeedId = item.feed_id || "";
+  state.rssCurrentFeedTitle = item.feed_title || item.feed_url || "";
+  state.rssCurrentStarred = Boolean(item.starred_at);
+  state.currentFile = `rss:${item.id}`;
+  state.currentContent = item.content_markdown || "";
+  state.currentBlocks = [];
+  state.currentContentLoaded = true;
+  state.currentHighlightKeyword = "";
+  const publishedAt = formatTime(item.published_at || item.first_seen_at);
+  const feedSource = item.feed_title || item.feed_url || "Unknown feed";
+  const feedSourceHtml = item.feed_url
+    ? `<span>Source: <a href="${escapeHtmlAttr(item.feed_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(feedSource)}</a></span>`
+    : `<span>Source: ${escapeHtml(feedSource)}</span>`;
+  const metaHtml = `
+    <p class="rss-detail-meta">
+      ${feedSourceHtml}
+      ${publishedAt ? `<span>${escapeHtml(publishedAt)}</span>` : ""}
+      ${item.url ? `<a href="${escapeHtmlAttr(item.url)}" target="_blank" rel="noopener noreferrer">Original</a>` : ""}
+    </p>
+  `;
+  showPage(
+    item.title || "Untitled",
+    `${metaHtml}${item.html?.trim() ? item.html : '<p class="empty">No content.</p>'}`,
+    "rss",
+    { ...options, editable: false, restoreReading: false },
+  );
+  updateRssPageActions();
+}
+
+async function refreshRss() {
+  if (state.rssRefreshing) return;
+  state.rssRefreshing = true;
+  setRssRefreshLoading(true);
+  setRssStatus("Refreshing...");
+  try {
+    const response = await request("/api/rss/refresh", {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 120000,
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const summary = await response.json();
+    const removedItems = summary.removed_items || 0;
+    const removedText = removedItems ? `, ${removedItems} removed` : "";
+    const failedFeeds = summary.failed || 0;
+    const failedText = failedFeeds ? `, ${failedFeeds} failed` : "";
+    showToast(`RSS refreshed. ${summary.new_items || 0} new${removedText}${failedText}.`);
+    await loadRssItems();
+    setRssStatus(failedFeeds ? `${failedFeeds} feed${failedFeeds === 1 ? "" : "s"} failed. Other feeds refreshed.` : "");
+  } catch (error) {
+    console.error(error);
+    setRssStatus(error.message || "RSS refresh failed.");
+  } finally {
+    state.rssRefreshing = false;
+    setRssRefreshLoading(false);
+  }
+}
+
+async function toggleCurrentRssStar() {
+  const id = state.rssSelectedItemId;
+  if (!id) return;
+  const starred = !state.rssCurrentStarred;
+  try {
+    const response = await request(`/api/rss/items/${encodeURIComponent(id)}/star`, {
+      method: "POST",
+      body: JSON.stringify({ starred }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    state.rssCurrentStarred = starred;
+    updateRssPageActions();
+    showToast(starred ? "Starred." : "Unstarred.");
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "Star failed.");
+  }
+}
+
+async function unsubscribeCurrentRssFeed() {
+  const feedId = state.rssCurrentFeedId;
+  if (!feedId) return;
+  const label = state.rssCurrentFeedTitle || "this feed";
+  const confirmed = await showConfirmPanel({
+    title: "Unsubscribe",
+    message: `Unsubscribe from ${label}? This removes its RSS items.`,
+    cancelText: "Cancel",
+    confirmText: "Unsub",
+    danger: true,
+  });
+  if (!confirmed) return;
+  const button = el("rss-unsubscribe-button");
+  button.disabled = true;
+  try {
+    const response = await request(`/api/rss/feeds/${encodeURIComponent(feedId)}/unsubscribe`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 120000,
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const summary = await response.json();
+    state.rssSelectedItemId = "";
+    state.rssCurrentFeedId = "";
+    state.rssCurrentFeedTitle = "";
+    showToast(`Unsubscribed. ${summary.removed_items || 0} items removed.`);
+    await showView("rss", { restoreScroll: false });
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "Unsubscribe failed.");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function updateRssPageActions() {
+  const starButton = el("rss-star-button");
+  const unsubscribeButton = el("rss-unsubscribe-button");
+  starButton.hidden = false;
+  unsubscribeButton.hidden = false;
+  starButton.classList.toggle("is-starred", state.rssCurrentStarred);
+  setButtonIcon(starButton, "star", state.rssCurrentStarred ? "Starred" : "Star");
+}
+
+function updateRssFilterButtons() {
+  document.querySelectorAll("[data-rss-filter]").forEach((button) => {
+    const active = button.dataset.rssFilter === state.rssFilter;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function markSelectedRssItem(read = null) {
+  document.querySelectorAll("[data-rss-row]").forEach((row) => {
+    const active = row.dataset.rssRow === state.rssSelectedItemId;
+    row.classList.toggle("is-active", active);
+    if (active && read !== null) row.classList.toggle("is-read", read);
+  });
+}
+
+function markRssRowRead(id) {
+  const row = [...el("rss-list").querySelectorAll("[data-rss-row]")]
+    .find((candidate) => candidate.dataset.rssRow === id);
+  if (!row) return;
+  row.classList.add("is-read");
+  row.querySelector("[data-rss-mark-read]")?.remove();
+}
+
+function setRssRefreshLoading(loading) {
+  const button = el("rss-refresh-button");
+  button.disabled = loading;
+  button.classList.toggle("is-loading", loading);
+  setButtonIcon(button, loading ? "loader" : "rotate-ccw", loading ? "Refreshing..." : "Refresh");
+}
+
+function setRssStatus(message) {
+  el("rss-status").textContent = message;
+  el("rss-status").hidden = !message;
+}
+
+function rssSearchQuery() {
+  return el("rss-search-input").value.trim();
+}
+
+async function clearRssSearch() {
+  window.clearTimeout(state.rssSearchTimer);
+  if (!el("rss-search-input").value) return;
+  el("rss-search-input").value = "";
+  updateRssSearchClear();
+  await loadRssItems();
+  el("rss-search-input").focus();
+}
+
+function updateRssSearchClear() {
+  el("rss-search-clear").hidden = !el("rss-search-input").value;
+}
+
 function renderRecentPanel() {
   const pages = readRecentPages().slice(0, 5);
   const edits = readRecentEdits().slice(0, 5);
@@ -2559,14 +2928,15 @@ function displayPageData(
 
 function showPage(title, html, sourceView, options = {}) {
   const {
+    editable = true,
     updateHistory = true,
     saveScroll = true,
     restoreReading = true,
   } = options;
   if (saveScroll) saveCurrentScrollPosition();
-  if (sourceView === "todo" || sourceView === "find") {
+  if (sourceView === "todo" || sourceView === "find" || sourceView === "rss") {
     state.lastListView = sourceView;
-  } else if (state.lastListView !== "todo") {
+  } else if (state.lastListView !== "todo" && state.lastListView !== "rss") {
     state.lastListView = "find";
   }
   state.view = "page";
@@ -2583,7 +2953,10 @@ function showPage(title, html, sourceView, options = {}) {
   setEditorMode("closed");
   el("page-block-editor").hidden = false;
   el("page-block-editor").innerHTML = "";
-  el("page-new-block-button").hidden = title === "NoPage";
+  el("edit-button").hidden = !editable;
+  el("page-new-block-button").hidden = !editable || title === "NoPage";
+  el("rss-star-button").hidden = true;
+  el("rss-unsubscribe-button").hidden = true;
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
@@ -3711,12 +4084,52 @@ function handleGlobalKeydown(event) {
       resetImageLightboxZoom();
       return;
     }
+    return;
+  }
+  if (handleHistoryKeydown(event)) {
+    return;
   }
   if (isEditableTarget(event.target) || event.key !== "/" || event.altKey) return;
   event.preventDefault();
   void showView("find", { restoreScroll: false }).then(() =>
     focusSearchInput({ select: true }),
   );
+}
+
+function handleHistoryKeydown(event) {
+  if (isEditableTarget(event.target) || isPageEditorOpen()) return false;
+  if (event.repeat) return false;
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  if (event.key === "h" || event.key === "ArrowLeft") {
+    event.preventDefault();
+    navigateAppHistory(-1);
+    return true;
+  }
+  if (event.key === "l" || event.key === "ArrowRight") {
+    event.preventDefault();
+    navigateAppHistory(1);
+    return true;
+  }
+  return false;
+}
+
+function navigateAppHistory(direction) {
+  if (!state.historyReady) return;
+  if (direction < 0) {
+    if (state.appHistoryIndex > 0) {
+      window.history.back();
+    } else if (state.view === "page") {
+      void showView(state.lastListView, { focusSearch: false });
+    }
+    return;
+  }
+  if (direction > 0 && state.appHistoryIndex < state.appHistoryMaxIndex) {
+    window.history.forward();
+  }
+}
+
+function isPageEditorOpen() {
+  return state.view === "page" && !el("page-editor-shell").hidden;
 }
 
 function openRandomNote() {

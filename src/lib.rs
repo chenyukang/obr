@@ -9,5 +9,6 @@ mod markdown;
 mod origin;
 mod passkeys;
 mod routes;
+mod rss;
 
 pub use app::run;

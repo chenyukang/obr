@@ -139,6 +139,12 @@ allow_plaintext_password = false
 session_days = 21
 secure_cookies = {secure_cookies}
 auto_git_sync = false
+rss_enabled = false
+rss_feeds_path = "Zero/feeds.md"
+rss_data_dir = "data/rss"
+rss_refresh_minutes = 30
+rss_max_items_per_feed = 20
+rss_fetch_full_content = true
 passkey_store_path = "data/passkeys.json"
 webauthn_rp_name = "Obr"
 "#,

@@ -21,6 +21,14 @@ session_days = 21
 secure_cookies = false
 auto_git_sync = false
 
+# RSS reader. Feeds are read from a vault-relative Markdown file with one URL per line.
+rss_enabled = false
+rss_feeds_path = "Zero/feeds.md"
+rss_data_dir = "data/rss"
+rss_refresh_minutes = 30
+rss_max_items_per_feed = 20
+rss_fetch_full_content = true
+
 # Passkeys/WebAuthn. Keep RP ID stable; changing it invalidates registered passkeys.
 passkey_store_path = "data/passkeys.json"
 webauthn_rp_name = "Obr"
