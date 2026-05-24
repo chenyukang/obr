@@ -2989,7 +2989,7 @@ function replaceEditorBlock(index, value) {
   state.editorBlocks[index] = {
     ...state.editorBlocks[index],
     source: normalizeEditorText(value),
-    html: '<p class="editor-preview-empty">Preview updates after editing.</p>',
+    html: pendingEditorBlockHtml(value),
   };
   syncPageEditorValue();
 }
@@ -3032,7 +3032,7 @@ function setEditorSource(source, blocks = []) {
     : [];
   state.editorBlocks = normalizedBlocks.length
     ? normalizedBlocks
-    : [{ source: normalizedSource, separator: "", html: '<p class="editor-preview-empty">Preview updates after editing.</p>' }];
+    : [{ source: normalizedSource, separator: "", html: pendingEditorBlockHtml(normalizedSource) }];
   syncPageEditorValue();
 }
 
@@ -3041,7 +3041,7 @@ function editorBlockHtml(block, index, active) {
   if (active) {
     return `<div class="editor-block is-active" data-block-index="${index}"><textarea class="editor-block-source" data-block-index="${index}" rows="1">${escapeTextarea(source)}</textarea></div>`;
   }
-  const rendered = block.html || '<p class="editor-preview-empty">Empty block</p>';
+  const rendered = block.html || pendingEditorBlockHtml(source);
   return `<div class="editor-block" data-block-index="${index}" tabindex="0">${rendered}</div>`;
 }
 
@@ -3091,12 +3091,19 @@ function syncPageEditorValue() {
 }
 
 function replaceEditorBlocksFromSource(source) {
+  const normalizedSource = normalizeEditorText(source);
   state.editorBlocks = [{
-    source: normalizeEditorText(source),
+    source: normalizedSource,
     separator: "",
-    html: '<p class="editor-preview-empty">Preview updates after editing.</p>',
+    html: pendingEditorBlockHtml(normalizedSource),
   }];
   syncPageEditorValue();
+}
+
+function pendingEditorBlockHtml(source) {
+  return normalizeEditorText(source).trim()
+    ? ""
+    : '<p class="editor-preview-empty">Empty block</p>';
 }
 
 function insertEditorBlocks(index, blocks) {

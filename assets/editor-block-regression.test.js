@@ -36,6 +36,7 @@ this.__obrTest = {
   insertEditorBlocks,
   deleteEditorBlocks,
   applyRenderedEditorBlocks,
+  pendingEditorBlockHtml,
   editorBlocksPayload,
 };`,
   sandbox,
@@ -49,6 +50,7 @@ const {
   insertEditorBlocks,
   deleteEditorBlocks,
   applyRenderedEditorBlocks,
+  pendingEditorBlockHtml,
   editorBlocksPayload,
 } = sandbox.__obrTest;
 
@@ -65,6 +67,7 @@ setEditorSource("one\n\ntwo\n\nthree", [
 assertSource("one\n\ntwo\n\nthree");
 
 replaceEditorBlock(1, "");
+assert.strictEqual(state.editorBlocks[1].html, '<p class="editor-preview-empty">Empty block</p>');
 assertSource("one\n\n\n\nthree");
 assert.deepStrictEqual(
   editorBlocksPayload().map((block) => block.source),
@@ -104,6 +107,9 @@ setEditorSource("one\n\ntwo\n\nthree", [
   { source: "three", separator: "", html: "<p>stale three</p>" },
 ]);
 replaceEditorBlock(1, "two edited");
+assert.strictEqual(state.editorBlocks[1].html, "");
+assert.strictEqual(pendingEditorBlockHtml("two edited"), "");
+assert(!JSON.stringify(state.editorBlocks).includes("Preview updates after editing"));
 state.activeEditorBlock = 2;
 assert.strictEqual(
   applyRenderedEditorBlocks(
