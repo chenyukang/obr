@@ -1,6 +1,14 @@
 # Obr
 
-Obr is a small Rust web app for writing to and reading from an Obsidian vault. It is designed to run locally, then optionally be exposed through a stable HTTPS origin such as Tailscale Serve/Funnel.
+Obr is a local-first web companion for an Obsidian vault. It gives you a fast
+browser interface for capturing daily notes, editing Markdown blocks, reading
+and searching notes, managing todos, and uploading images, while keeping your
+content as plain Markdown files in the vault you already use.
+
+Obr runs on your own machine and can be opened locally or exposed to trusted
+devices through a stable HTTPS origin such as Tailscale Serve/Funnel. It is
+built for personal writing workflows where the browser is the quick input
+surface and Obsidian remains the durable knowledge base.
 
 ## Setup
 
