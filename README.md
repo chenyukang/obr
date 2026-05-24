@@ -18,7 +18,30 @@ Install Rust stable, then clone and build:
 cargo build --release
 ```
 
-Create a local config:
+For the fastest setup, let Obr generate `config/local.toml`, prepare the vault
+directory, start the daemon, and print the service URL:
+
+```bash
+./target/release/obr init --vault /path/to/obsidian/vault
+```
+
+To also publish Obr through Tailscale Funnel:
+
+```bash
+./target/release/obr init --vault /path/to/obsidian/vault --tailscale
+```
+
+The Tailscale flow starts a separate userspace `tailscaled` under
+`$HOME/.local/share/tailscale-obr`, asks you to approve the Tailscale login URL
+if needed, enables Funnel, writes the resulting `*.ts.net` hostname into
+`config/local.toml`, starts Obr, and prints both the local and public URLs. Use
+`--hostname <name>` to request a specific Tailscale node name; the actual
+published hostname is read back from `tailscale funnel status`.
+
+If `config/local.toml` already exists, `obr init` backs it up before writing the
+new config.
+
+For manual setup, create a local config:
 
 ```bash
 cp config.example.toml config/local.toml
@@ -206,8 +229,15 @@ Once a passkey is registered, password login is disabled outside localhost. Loca
 Tailscale Funnel exposes a local Obr server through a public HTTPS hostname
 under your tailnet domain, such as `<hostname>.<tailnet>.ts.net`.
 
-First, please [install tailscale](https://tailscale.com/docs/install) and log in to your tailnet.
+First, please [install tailscale](https://tailscale.com/docs/install). The
+init/manual flow will ask you to log in to your tailnet if this userspace
+instance has not been authorized yet.
 
+The `init` command can run this whole flow for you:
+
+```bash
+./target/release/obr init --vault /path/to/obsidian/vault --tailscale
+```
 
 The examples below use a separate userspace `tailscaled` instance instead of the
 system Tailscale daemon. That keeps Obr's public route isolated in its own state

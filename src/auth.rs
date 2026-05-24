@@ -80,10 +80,19 @@ pub(crate) fn session_layer(config: &Config) -> SessionManagerLayer<MemoryStore>
 
 pub(crate) fn print_password_hash() -> Result<()> {
     if io::stdin().is_terminal() {
-        let password = read_password_interactively()?;
-        let hash = hash_password(&password)?;
+        let hash = password_hash_from_input()?;
         println!(r#"password_hash = "{hash}""#);
         return Ok(());
+    }
+
+    println!("{}", password_hash_from_input()?);
+    Ok(())
+}
+
+pub(crate) fn password_hash_from_input() -> Result<String> {
+    if io::stdin().is_terminal() {
+        let password = read_password_interactively()?;
+        return hash_password(&password);
     }
 
     let mut password = String::new();
@@ -94,8 +103,7 @@ pub(crate) fn print_password_hash() -> Result<()> {
     if password.is_empty() {
         bail!("password from stdin is empty");
     }
-    println!("{}", hash_password(password)?);
-    Ok(())
+    hash_password(password)
 }
 
 fn read_password_interactively() -> Result<String> {

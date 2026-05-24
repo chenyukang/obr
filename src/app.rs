@@ -24,6 +24,7 @@ use crate::{
     config::Config,
     daemon::{self, DaemonCommand},
     doctor,
+    init::{self, InitOptions},
     markdown::MarkdownIndex,
     origin,
     passkeys::PasskeyStore,
@@ -35,6 +36,7 @@ enum CommandMode {
     Run,
     HashPassword,
     Doctor,
+    Init(InitOptions),
     Daemon(DaemonCommand),
 }
 
@@ -88,6 +90,10 @@ pub fn run() -> Result<()> {
             doctor::run()?;
             return Ok(());
         }
+        CommandMode::Init(options) => {
+            init::run(options)?;
+            return Ok(());
+        }
         CommandMode::Run => {}
     }
 
@@ -114,6 +120,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> Result<CommandMode> 
             reject_extra_args(args)?;
             Ok(CommandMode::Doctor)
         }
+        Some("init") => Ok(CommandMode::Init(parse_init_options(args)?)),
         Some("daemon") | Some("--daemon") => {
             let subcommand = args.next();
             let daemon_command = match subcommand.as_deref().unwrap_or("start") {
@@ -137,6 +144,46 @@ fn reject_extra_args(mut args: impl Iterator<Item = String>) -> Result<()> {
         bail!("unexpected argument: {arg}");
     }
     Ok(())
+}
+
+fn parse_init_options(args: impl IntoIterator<Item = String>) -> Result<InitOptions> {
+    let mut vault_path = None;
+    let mut tailscale = false;
+    let mut hostname = "ob".to_string();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--tailscale" {
+            tailscale = true;
+        } else if arg == "--vault" {
+            let Some(value) = args.next() else {
+                bail!("--vault requires a path");
+            };
+            vault_path = Some(value.into());
+        } else if let Some(value) = arg.strip_prefix("--vault=") {
+            if value.is_empty() {
+                bail!("--vault requires a path");
+            }
+            vault_path = Some(value.into());
+        } else if arg == "--hostname" {
+            let Some(value) = args.next() else {
+                bail!("--hostname requires a name");
+            };
+            hostname = value;
+        } else if let Some(value) = arg.strip_prefix("--hostname=") {
+            if value.is_empty() {
+                bail!("--hostname requires a name");
+            }
+            hostname = value.to_string();
+        } else {
+            bail!("unexpected init argument: {arg}");
+        }
+    }
+    let vault_path = vault_path.ok_or_else(|| anyhow::anyhow!("init requires --vault <path>"))?;
+    Ok(InitOptions {
+        vault_path,
+        tailscale,
+        hostname,
+    })
 }
 
 async fn serve() -> Result<()> {
@@ -414,7 +461,9 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandMode, DaemonCommand, parse_command};
+    use std::path::PathBuf;
+
+    use super::{CommandMode, DaemonCommand, InitOptions, parse_command};
 
     fn parse(args: &[&str]) -> anyhow::Result<CommandMode> {
         parse_command(args.iter().map(|arg| (*arg).to_string()))
@@ -464,5 +513,30 @@ mod tests {
     fn parse_rejects_extra_arguments() {
         let err = parse(&["daemon", "stop", "now"]).unwrap_err().to_string();
         assert!(err.contains("unexpected argument"));
+    }
+
+    #[test]
+    fn parse_init_options() {
+        assert_eq!(
+            parse(&[
+                "init",
+                "--vault",
+                "/tmp/vault",
+                "--tailscale",
+                "--hostname=notes"
+            ])
+            .unwrap(),
+            CommandMode::Init(InitOptions {
+                vault_path: PathBuf::from("/tmp/vault"),
+                tailscale: true,
+                hostname: "notes".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_init_requires_vault() {
+        let err = parse(&["init", "--tailscale"]).unwrap_err().to_string();
+        assert!(err.contains("init requires --vault"));
     }
 }

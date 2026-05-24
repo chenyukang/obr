@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod doctor;
 mod error;
+mod init;
 mod markdown;
 mod origin;
 mod passkeys;
