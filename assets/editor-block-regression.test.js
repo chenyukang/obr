@@ -35,6 +35,7 @@ this.__obrTest = {
   replaceEditorBlock,
   insertEditorBlocks,
   deleteEditorBlocks,
+  applyRenderedEditorBlocks,
   editorBlocksPayload,
 };`,
   sandbox,
@@ -47,6 +48,7 @@ const {
   replaceEditorBlock,
   insertEditorBlocks,
   deleteEditorBlocks,
+  applyRenderedEditorBlocks,
   editorBlocksPayload,
 } = sandbox.__obrTest;
 
@@ -95,5 +97,28 @@ assertSource("zero\n\none\n\nthree");
 deleteEditorBlocks(0, state.editorBlocks.length);
 assertSource("");
 assert.strictEqual(state.editorBlocks.length, 1);
+
+setEditorSource("one\n\ntwo\n\nthree", [
+  { source: "one", separator: "\n\n", html: "<p>stale one</p>" },
+  { source: "two", separator: "\n\n", html: "<p>stale two</p>" },
+  { source: "three", separator: "", html: "<p>stale three</p>" },
+]);
+replaceEditorBlock(1, "two edited");
+state.activeEditorBlock = 2;
+assert.strictEqual(
+  applyRenderedEditorBlocks(
+    [
+      { source: "one", separator: "\n\n", html: "<p>fresh one</p>" },
+      { source: "two edited", separator: "\n\n", html: "<p>fresh two edited</p>" },
+      { source: "three", separator: "", html: "<p>fresh three</p>" },
+    ],
+    "one\n\ntwo edited\n\nthree",
+  ),
+  true,
+);
+assertSource("one\n\ntwo edited\n\nthree");
+assert.strictEqual(state.editorBlocks[0].html, "<p>fresh one</p>");
+assert.strictEqual(state.editorBlocks[1].html, "<p>fresh two edited</p>");
+assert.strictEqual(state.editorBlocks[2].html, "<p>stale three</p>");
 
 console.log("editor block regression tests passed");

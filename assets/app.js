@@ -3149,14 +3149,45 @@ async function scheduleEditorBlockRender(source) {
     const data = await response.json();
     if (requestId !== state.editorRenderRequestId) return;
     if (editor.hidden) return;
-    if (joinEditorBlocks(state.editorBlocks) !== expectedSource) return;
-    if (state.activeEditorBlock >= 0) return;
-    state.editorBlocks = normalizeEditorBlocks(data.blocks || []);
-    syncPageEditorValue();
-    renderBlockEditor({ activeIndex: -1, focus: false });
+    applyRenderedEditorBlocks(data.blocks || [], expectedSource);
   } catch (error) {
     if (!shouldQueueOffline(error)) console.error(error);
   }
+}
+
+function applyRenderedEditorBlocks(blocks, expectedSource) {
+  const renderedBlocks = normalizeEditorBlocks(blocks, { fallback: false });
+  if (!renderedBlocks.length) return false;
+  if (joinEditorBlocks(state.editorBlocks) !== normalizeEditorText(expectedSource)) return false;
+
+  const activeIndex = state.activeEditorBlock;
+  if (activeIndex >= 0) {
+    if (renderedBlocks.length !== state.editorBlocks.length) return false;
+    state.editorBlocks = state.editorBlocks.map((block, index) =>
+      index === activeIndex ? block : renderedBlocks[index],
+    );
+    syncPageEditorValue();
+    refreshInactiveEditorBlockHtml(renderedBlocks, activeIndex);
+    return true;
+  }
+
+  state.editorBlocks = renderedBlocks;
+  syncPageEditorValue();
+  renderBlockEditor({ activeIndex: -1, focus: false });
+  return true;
+}
+
+function refreshInactiveEditorBlockHtml(renderedBlocks, activeIndex) {
+  const blockEditor = el("page-block-editor");
+  if (!blockEditor) return;
+  renderedBlocks.forEach((block, index) => {
+    if (index === activeIndex) return;
+    const node = blockEditor.querySelector(
+      `.editor-block[data-block-index="${index}"]:not(.is-active)`,
+    );
+    if (node) node.innerHTML = block.html || '<p class="editor-preview-empty">Empty block</p>';
+  });
+  enhanceMarkdownImages(blockEditor);
 }
 
 function bindConfirmPanelEvents() {
