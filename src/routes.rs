@@ -537,7 +537,13 @@ pub(crate) async fn image_preview(
         return not_modified_response(cache_control, &etag_value);
     }
 
-    let cache_path = image_preview_cache_path(&source_path, &source_metadata, width, quality);
+    let cache_path = image_preview_cache_path(
+        &state.data_dir,
+        &source_path,
+        &source_metadata,
+        width,
+        quality,
+    );
     let cache_hit = cache_path.is_file();
     if !cache_hit {
         let source_path_for_task = source_path.clone();
@@ -696,6 +702,7 @@ fn can_preview_image(path: &Path) -> bool {
 }
 
 fn image_preview_cache_path(
+    data_dir: &Path,
     source_path: &Path,
     metadata: &fs::Metadata,
     width: u32,
@@ -707,7 +714,7 @@ fn image_preview_cache_path(
     metadata_modified_nanos(metadata).hash(&mut hasher);
     width.hash(&mut hasher);
     quality.hash(&mut hasher);
-    PathBuf::from("cache")
+    data_dir
         .join("image-preview")
         .join(format!("{:016x}-w{width}-q{quality}.jpg", hasher.finish()))
 }

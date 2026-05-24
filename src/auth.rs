@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{self, Read},
+    io::{self, IsTerminal, Read},
     net::IpAddr,
     sync::Mutex,
     time::{Duration, Instant},
@@ -78,7 +78,14 @@ pub(crate) fn session_layer(config: &Config) -> SessionManagerLayer<MemoryStore>
         .with_expiry(Expiry::OnInactivity(config.session_duration()))
 }
 
-pub(crate) fn print_password_hash_from_stdin() -> Result<()> {
+pub(crate) fn print_password_hash() -> Result<()> {
+    if io::stdin().is_terminal() {
+        let password = read_password_interactively()?;
+        let hash = hash_password(&password)?;
+        println!(r#"password_hash = "{hash}""#);
+        return Ok(());
+    }
+
     let mut password = String::new();
     io::stdin()
         .read_to_string(&mut password)
@@ -87,13 +94,30 @@ pub(crate) fn print_password_hash_from_stdin() -> Result<()> {
     if password.is_empty() {
         bail!("password from stdin is empty");
     }
+    println!("{}", hash_password(password)?);
+    Ok(())
+}
+
+fn read_password_interactively() -> Result<String> {
+    let password = rpassword::prompt_password("Password: ").context("read password")?;
+    if password.is_empty() {
+        bail!("password cannot be empty");
+    }
+    let confirmation =
+        rpassword::prompt_password("Confirm password: ").context("read password confirmation")?;
+    if password != confirmation {
+        bail!("passwords do not match");
+    }
+    Ok(password)
+}
+
+fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map_err(|err| anyhow!("hash password: {err}"))?
         .to_string();
-    println!("{hash}");
-    Ok(())
+    Ok(hash)
 }
 
 pub(crate) async fn is_authenticated(
@@ -220,6 +244,15 @@ mod tests {
             .unwrap()
             .to_string();
         let config = test_config(Some(hash), Some("ignored".to_string()));
+
+        assert!(verify_login(&config, "admin", "secret"));
+        assert!(!verify_login(&config, "admin", "wrong"));
+    }
+
+    #[test]
+    fn hash_password_outputs_verifiable_argon2_hash() {
+        let hash = hash_password("secret").unwrap();
+        let config = test_config(Some(hash), None);
 
         assert!(verify_login(&config, "admin", "secret"));
         assert!(!verify_login(&config, "admin", "wrong"));

@@ -152,7 +152,7 @@ impl Config {
             }
             (None, Some(_)) if self.allow_plaintext_password => {
                 warn!(
-                    "config uses plaintext password; pipe the password into `./target/release/obr hash-password` and set password_hash instead"
+                    "config uses plaintext password; run `./target/release/obr hash-password` and set password_hash instead"
                 );
             }
             (None, Some(_)) => {

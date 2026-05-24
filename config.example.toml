@@ -9,10 +9,8 @@ log_path = "logs/obr.log"
 # Full tracing filters also work, for example: "obr=debug".
 log_level = "info"
 username = "admin"
-# Generate with:
-#   read -rsp 'Password: ' OBR_PASSWORD; echo
-#   printf '%s' "$OBR_PASSWORD" | ./target/release/obr hash-password
-#   unset OBR_PASSWORD
+# Generate interactively with:
+#   ./target/release/obr hash-password
 # This example hash is for the development password "change-me".
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$5tMFL98jFzMMDO53hOkZHg$iAAWgoWfbfSCiMKWVHUCAc2Gfbam0K4nowD5DFPKkek"
 # Plaintext passwords are disabled by default. Only set this to true for throwaway local development.

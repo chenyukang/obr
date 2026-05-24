@@ -28,7 +28,7 @@ use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
 use webauthn_rs::prelude::{Webauthn, WebauthnBuilder};
 
 use crate::{
-    auth::{LoginLimiter, is_authenticated, print_password_hash_from_stdin, session_layer},
+    auth::{LoginLimiter, is_authenticated, print_password_hash, session_layer},
     config::Config,
     markdown::MarkdownIndex,
     passkeys::PasskeyStore,
@@ -37,6 +37,7 @@ use crate::{
 
 pub(crate) struct AppState {
     pub(crate) config: Config,
+    pub(crate) data_dir: std::path::PathBuf,
     pub(crate) login_limiter: LoginLimiter,
     pub(crate) webauthn: Arc<Webauthn>,
     pub(crate) passkey_store: Arc<PasskeyStore>,
@@ -44,6 +45,7 @@ pub(crate) struct AppState {
 }
 
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
+const DATA_DIR: &str = "data";
 const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
     "default-src 'self'; ",
     "script-src 'self'; ",
@@ -60,7 +62,7 @@ const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
 pub fn run() -> Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("hash-password") => {
-            print_password_hash_from_stdin()?;
+            print_password_hash()?;
             return Ok(());
         }
         Some("daemon") | Some("--daemon") => {
@@ -81,7 +83,8 @@ pub fn run() -> Result<()> {
 async fn serve() -> Result<()> {
     let config = Config::load()?;
     init_logging(&config)?;
-    prepare_vault(&config)?;
+    let data_dir = runtime_data_dir()?;
+    prepare_vault(&config, &data_dir)?;
     let markdown_index = MarkdownIndex::load(config.vault_path.clone())?;
     let index_stats = markdown_index.stats();
     info!(
@@ -96,6 +99,7 @@ async fn serve() -> Result<()> {
     let session_layer = session_layer(&config);
     let state = Arc::new(AppState {
         config,
+        data_dir,
         login_limiter: LoginLimiter::default(),
         webauthn,
         passkey_store: Arc::new(passkey_store),
@@ -208,7 +212,12 @@ fn start_daemon() -> Result<()> {
     Ok(())
 }
 
-fn prepare_vault(config: &Config) -> Result<()> {
+fn runtime_data_dir() -> Result<std::path::PathBuf> {
+    Ok(std::env::current_dir()?.join(DATA_DIR))
+}
+
+fn prepare_vault(config: &Config, data_dir: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(data_dir)?;
     fs::create_dir_all(config.vault_path.join(&config.daily_dir))?;
     fs::create_dir_all(config.vault_path.join(&config.entry_dir))?;
     fs::create_dir_all(config.vault_path.join(&config.image_dir))?;

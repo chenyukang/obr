@@ -47,22 +47,30 @@ image_dir = "Pics"
 todo_path = "Posts/todo.md"
 ```
 
-All four paths are relative to `vault_path`. Parent path components such as `..` are rejected.
+These vault layout paths are relative to `vault_path`. Parent path components such as `..` are rejected.
+
+Runtime cache data is separate from the vault and is written under the gitignored `data` directory in the process working directory.
 
 ## Password
 
 Generate an Argon2 password hash:
 
 ```bash
-printf '%s' "YOUR_PASSWORD" | ./target/release/obr hash-password
+./target/release/obr hash-password
 ```
 
-Put the generated value in `config/local.toml`:
+The command prompts for the password twice without echoing it, then prints a line you can put in `config/local.toml`:
 
 ```toml
 username = "admin"
 password_hash = "$argon2id$..."
 allow_plaintext_password = false
+```
+
+For scripts, stdin still works:
+
+```bash
+printf '%s' "$OBR_PASSWORD" | ./target/release/obr hash-password
 ```
 
 Plaintext passwords are disabled by default. Only enable `allow_plaintext_password = true` for throwaway local development.
