@@ -12,6 +12,7 @@ const state = {
   imageReadId: 0,
   searchTimer: 0,
   editorBlocks: [],
+  editorMode: "closed",
   editorRenderRequestId: 0,
   activeEditorBlock: -1,
   lastReadBlockIndex: -1,
@@ -109,6 +110,7 @@ const APP_CONFIG_KEY = "obr.app-config";
 const CLIENT_ID_KEY = "obr.client-id";
 const LOADED_IMAGE_URLS_KEY = "obr.loaded-image-urls";
 const LOADED_IMAGE_URLS_LIMIT = 600;
+const EMPTY_BLOCK_HTML = '<p class="editor-preview-empty">Empty block</p>';
 
 const ICONS = {
   "arrow-left": '<path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>',
@@ -211,6 +213,8 @@ function bindEvents() {
 
   el("entry-reset").addEventListener("click", resetEntry);
   el("entry-text").addEventListener("input", handleEntryInput);
+  el("entry-text").addEventListener("compositionstart", handleTextareaCompositionStart);
+  el("entry-text").addEventListener("compositionend", handleEntryTextCompositionEnd);
   el("entry-page").addEventListener("input", handleEntryInput);
   el("entry-links").addEventListener("input", handleEntryInput);
   el("entry-meta").addEventListener("toggle", updateEntryMetaSummary);
@@ -220,6 +224,8 @@ function bindEvents() {
   el("entry-image-file").addEventListener("change", handleImageFile);
   el("entry-camera-file").addEventListener("change", handleImageFile);
   el("page-editor").addEventListener("input", handlePageEditorInput);
+  el("page-editor").addEventListener("compositionstart", handleTextareaCompositionStart);
+  el("page-editor").addEventListener("compositionend", handlePageEditorCompositionEnd);
   el("page-block-editor").addEventListener("click", handlePageBlockEditorClick);
   el("page-block-editor").addEventListener("focusout", handlePageBlockEditorFocusOut);
   el("discard-page-draft").addEventListener("click", discardRestoredPageDraft);
@@ -272,9 +278,17 @@ function bindEvents() {
 
   el("back-button").addEventListener("click", goBackToLastList);
   el("edit-button").addEventListener("click", toggleEdit);
+  el("page-new-block-button").addEventListener("click", openNewBlockAtEnd);
 
   el("page-content").addEventListener("pointerup", rememberReadBlockFromPointer);
   el("page-content").addEventListener("click", async (event) => {
+    const blockEdit = event.target.closest("[data-page-block-action='edit']");
+    if (blockEdit) {
+      event.preventDefault();
+      await openBlockEditorAt(Number(blockEdit.dataset.blockIndex || 0));
+      return;
+    }
+
     const task = event.target.closest("input[data-task-index]");
     if (task && state.currentFile === state.appConfig.todoFile) {
       await markTodo(task.dataset.taskIndex);
@@ -1240,7 +1254,7 @@ async function syncOutboxItem(item, options = {}) {
         clearPageDraft(data.file);
       }
       if (el("page-editor").hidden) {
-        setDeferredMarkdownHtml(el("page-content"), data.html || "");
+        setPageContentHtml(data.html || "");
         updatePageOutline();
         highlightPageContent(state.currentHighlightKeyword);
       }
@@ -1809,15 +1823,33 @@ function updateEntrySaveState() {
 
 function handleEntryInput(event) {
   if (event?.target?.id === "entry-text") {
-    formatTextareaCjkSpacing(event.target);
+    formatTextareaCjkSpacing(event.target, { event });
   }
   persistDraft();
   updateEntrySaveState();
   updateEntryMetaSummary();
 }
 
-function formatTextareaCjkSpacing(textarea) {
+function handleEntryTextCompositionEnd(event) {
+  finishTextareaComposition(event);
+  persistDraft();
+  updateEntrySaveState();
+}
+
+function handleTextareaCompositionStart(event) {
+  if (event?.target?.dataset) event.target.dataset.composing = "1";
+}
+
+function finishTextareaComposition(event) {
+  const textarea = event?.target || event?.currentTarget;
   if (!textarea) return false;
+  if (textarea.dataset) delete textarea.dataset.composing;
+  return formatTextareaCjkSpacing(textarea, { force: true });
+}
+
+function formatTextareaCjkSpacing(textarea, options = {}) {
+  if (!textarea) return false;
+  if (!options.force && isTextareaComposing(textarea, options.event)) return false;
   const before = textarea.value;
   const after = addCjkSpacingToMarkdownText(before);
   if (after === before) return false;
@@ -1827,6 +1859,14 @@ function formatTextareaCjkSpacing(textarea) {
   textarea.selectionStart = addCjkSpacingToMarkdownText(before.slice(0, selectionStart)).length;
   textarea.selectionEnd = addCjkSpacingToMarkdownText(before.slice(0, selectionEnd)).length;
   return true;
+}
+
+function isTextareaComposing(textarea, event = null) {
+  return Boolean(
+    event?.isComposing ||
+      event?.inputType === "insertCompositionText" ||
+      textarea?.dataset?.composing === "1",
+  );
 }
 
 function addCjkSpacingToMarkdownText(text) {
@@ -2534,13 +2574,16 @@ function showPage(title, html, sourceView, options = {}) {
     view.hidden = true;
   }
   el("page-title").textContent = title;
-  setDeferredMarkdownHtml(el("page-content"), html);
+  setPageContentHtml(html);
   updatePageOutline();
   highlightPageContent(state.currentHighlightKeyword);
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
   el("page-editor-shell").hidden = true;
+  setEditorMode("closed");
+  el("page-block-editor").hidden = false;
   el("page-block-editor").innerHTML = "";
+  el("page-new-block-button").hidden = title === "NoPage";
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
@@ -2559,6 +2602,33 @@ function showPage(title, html, sourceView, options = {}) {
       highlightKeyword: state.currentHighlightKeyword,
     });
   }
+}
+
+function setPageContentHtml(html) {
+  const blocks = normalizeEditorBlocks(state.currentBlocks, { fallback: false });
+  if (!blocks.length) {
+    setDeferredMarkdownHtml(el("page-content"), html);
+    return;
+  }
+  setDeferredMarkdownHtml(el("page-content"), pageBlocksHtml(blocks));
+}
+
+function pageBlocksHtml(blocks) {
+  return blocks
+    .map((block, index) => {
+      const source = editorBlockText(block);
+      const emptyClass = source.trim() ? "" : " is-empty";
+      const rendered = block.html || pendingEditorBlockHtml(source);
+      return `
+        <div class="page-render-block${emptyClass}" data-page-block-index="${index}">
+          ${rendered}
+          <button class="page-block-edit" type="button" data-page-block-action="edit" data-block-index="${index}" aria-label="Edit block ${index + 1}" title="Edit block">
+            ${iconSvg("pencil")}
+          </button>
+        </div>
+      `;
+    })
+    .join("");
 }
 
 function clearPageOutline() {
@@ -2731,48 +2801,106 @@ function estimateEditorBlockIndexFromViewportY(clientY) {
 
 async function toggleEdit() {
   const editor = el("page-editor");
+  if (editor.hidden) {
+    await openPageEditor("source");
+    return;
+  }
+  await savePageEditor();
+}
+
+async function openBlockEditorAt(index) {
+  await openPageEditor("blocks", { activeIndex: index });
+}
+
+async function openNewBlockAtEnd() {
+  await openPageEditor("blocks", { newBlockAtEnd: true });
+}
+
+async function openPageEditor(mode, options = {}) {
+  const editor = el("page-editor");
+  const editorShell = el("page-editor-shell");
+  const blockEditor = el("page-block-editor");
+  const content = el("page-content");
+  const button = el("edit-button");
+  saveReadingPosition(state.currentFile);
+  setPageEditorStatus("Loading source...");
+  button.disabled = true;
+  try {
+    await loadCurrentPageSource({ forceNetwork: true });
+  } catch (error) {
+    console.error(error);
+    const message = error.message
+      ? `Could not load source: ${error.message}`
+      : "Could not load source.";
+    setPageEditorStatus(message);
+    button.disabled = false;
+    return;
+  }
+  button.disabled = false;
+  const draft = loadPageDraft(state.currentFile);
+  const editSource = draft ?? state.currentContent;
+  setEditorSource(editSource, draft === null ? state.currentBlocks : []);
+  let activeIndex = Number.isFinite(Number(options.activeIndex))
+    ? Number(options.activeIndex)
+    : initialEditorBlockIndex();
+  let insertedNewBlock = false;
+  if (mode === "blocks" && options.newBlockAtEnd) {
+    const onlyEmptyBlock =
+      state.editorBlocks.length === 1 &&
+      !editorBlockText(state.editorBlocks[0]) &&
+      !editorBlockSeparator(state.editorBlocks[0]);
+    if (onlyEmptyBlock) {
+      activeIndex = 0;
+    } else {
+      insertEditorBlocks(state.editorBlocks.length, [
+        { source: "", separator: "", html: EMPTY_BLOCK_HTML },
+      ]);
+      activeIndex = state.editorBlocks.length - 1;
+      insertedNewBlock = true;
+    }
+  }
+  editor.hidden = false;
+  editorShell.hidden = false;
+  setEditorMode(mode);
+  blockEditor.hidden = mode !== "blocks";
+  if (mode === "blocks") {
+    renderBlockEditor({
+      activeIndex,
+      placeCursorAtEnd: Boolean(options.newBlockAtEnd || options.placeCursorAtEnd),
+    });
+  } else {
+    blockEditor.innerHTML = "";
+    state.activeEditorBlock = -1;
+    syncPageEditorValue();
+    window.requestAnimationFrame(() => {
+      editor.focus();
+      editor.selectionStart = editor.value.length;
+      editor.selectionEnd = editor.value.length;
+    });
+  }
+  if (draft !== null) scheduleEditorBlockRender(editSource);
+  content.hidden = true;
+  el("page-new-block-button").hidden = true;
+  el("toc-button").hidden = true;
+  closeTocPanel();
+  updateReadingProgress();
+  showPageDraftBanner(draft !== null);
+  if (insertedNewBlock) persistPageDraft();
+  setPageEditorStatus(insertedNewBlock ? "Unsaved draft." : "");
+  setButtonIcon(button, "save", "Save");
+}
+
+async function savePageEditor(options = {}) {
+  const editor = el("page-editor");
   const editorShell = el("page-editor-shell");
   const content = el("page-content");
   const button = el("edit-button");
-  if (editor.hidden) {
-    saveReadingPosition(state.currentFile);
-    setPageEditorStatus("Loading source...");
-    button.disabled = true;
-    try {
-      await loadCurrentPageSource({ forceNetwork: true });
-    } catch (error) {
-      console.error(error);
-      const message = error.message
-        ? `Could not load source: ${error.message}`
-        : "Could not load source.";
-      setPageEditorStatus(message);
-      button.disabled = false;
-      return;
-    }
-    button.disabled = false;
-    const draft = loadPageDraft(state.currentFile);
-    const editSource = draft ?? state.currentContent;
-    setEditorSource(editSource, draft === null ? state.currentBlocks : []);
-    const initialBlockIndex = initialEditorBlockIndex();
-    editor.hidden = false;
-    editorShell.hidden = false;
-    renderBlockEditor({ activeIndex: initialBlockIndex });
-    if (draft !== null) scheduleEditorBlockRender(editSource);
-    content.hidden = true;
-    el("toc-button").hidden = true;
-    closeTocPanel();
-    updateReadingProgress();
-    showPageDraftBanner(draft !== null);
-    setPageEditorStatus("");
-    setButtonIcon(button, "save", "Save");
-    return;
-  }
-  commitActiveEditorBlock();
+  syncEditorBlocksForSave(options);
   const currentEditorSource = joinEditorBlocks(state.editorBlocks);
   const spacedEditorSource = addCjkSpacingToMarkdownText(currentEditorSource);
   if (spacedEditorSource !== currentEditorSource) {
     replaceEditorBlocksFromSource(spacedEditorSource);
-    renderBlockEditor({ activeIndex: -1, focus: false });
+    if (state.editorMode === "blocks") renderBlockEditor({ activeIndex: -1, focus: false });
     scheduleEditorBlockRender(spacedEditorSource);
   }
   persistPageDraft();
@@ -2801,13 +2929,16 @@ async function toggleEdit() {
     rememberRecentEdit(state.currentFile);
     replaceAppHistory(currentAppHistoryEntry());
     clearPageDraft(state.currentFile);
-    setDeferredMarkdownHtml(content, data.html || "");
+    setPageContentHtml(data.html || "");
     updatePageOutline();
     highlightPageContent(state.currentHighlightKeyword);
     editor.hidden = true;
     editorShell.hidden = true;
+    setEditorMode("closed");
     el("page-block-editor").innerHTML = "";
+    el("page-block-editor").hidden = false;
     content.hidden = false;
+    el("page-new-block-button").hidden = false;
     updateReadingProgress();
     restoreReadingPositionAfterEdit(restoreFile, restoreY);
     setPageEditorStatus("");
@@ -2829,8 +2960,11 @@ async function toggleEdit() {
         updatePageOutline();
         editor.hidden = true;
         editorShell.hidden = true;
+        setEditorMode("closed");
         el("page-block-editor").innerHTML = "";
+        el("page-block-editor").hidden = false;
         content.hidden = false;
+        el("page-new-block-button").hidden = false;
         updateReadingProgress();
         restoreReadingPositionAfterEdit(restoreFile, restoreY);
         setPageEditorStatus("");
@@ -2850,6 +2984,14 @@ async function toggleEdit() {
   } finally {
     button.disabled = false;
   }
+}
+
+function syncEditorBlocksForSave(options = {}) {
+  if (state.editorMode === "blocks") {
+    if (!options.skipActiveBlockCommit) commitActiveEditorBlockForSave();
+    return;
+  }
+  replaceEditorBlocksFromSource(el("page-editor").value);
 }
 
 async function loadCurrentPageSource(options = {}) {
@@ -2907,15 +3049,35 @@ async function warmPageSource(file) {
 
 function handlePageEditorInput(event) {
   if (event?.target?.id === "page-editor") {
-    formatTextareaCjkSpacing(event.target);
+    formatTextareaCjkSpacing(event.target, { event });
     replaceEditorBlocksFromSource(event.target.value);
   }
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
-  renderBlockEditor({ activeIndex: state.activeEditorBlock });
+  if (state.editorMode === "blocks") {
+    renderBlockEditor({ activeIndex: state.activeEditorBlock });
+  }
 }
 
-function handlePageBlockEditorClick(event) {
+function handlePageEditorCompositionEnd(event) {
+  finishTextareaComposition(event);
+  handlePageEditorInput({ target: event.target });
+}
+
+async function handlePageBlockEditorClick(event) {
+  const action = event.target.closest("[data-editor-block-action]");
+  if (action) {
+    event.preventDefault();
+    event.stopPropagation();
+    const index = Number(action.dataset.blockIndex || 0);
+    if (action.dataset.editorBlockAction === "delete-empty") {
+      await deleteEmptyEditorBlock(index);
+      return;
+    }
+    activateEditorBlock(index);
+    return;
+  }
+
   const block = event.target.closest(".editor-block");
   if (!block) return;
   activateEditorBlock(Number(block.dataset.blockIndex || 0));
@@ -2930,7 +3092,7 @@ function handlePageBlockEditorFocusOut(event) {
 function renderBlockEditor(options = {}) {
   const editor = el("page-editor");
   const blockEditor = el("page-block-editor");
-  if (!editor || !blockEditor || editor.hidden) return;
+  if (!editor || !blockEditor || editor.hidden || state.editorMode !== "blocks") return;
   const blocks = state.editorBlocks.length ? state.editorBlocks : normalizeEditorBlocks([]);
   const activeIndex = Math.min(
     Math.max(Number(options.activeIndex ?? state.activeEditorBlock ?? -1), -1),
@@ -2944,7 +3106,9 @@ function renderBlockEditor(options = {}) {
   if (activeIndex >= 0) {
     const active = blockEditor.querySelector(`[data-block-index="${activeIndex}"] textarea`);
     if (active && options.focus !== false) {
-      active.addEventListener("input", () => updateActiveBlockFromTextarea(active));
+      active.addEventListener("input", (event) => updateActiveBlockFromTextarea(active, event));
+      active.addEventListener("compositionstart", handleTextareaCompositionStart);
+      active.addEventListener("compositionend", handleBlockTextareaCompositionEnd);
       active.addEventListener("keydown", handleBlockTextareaKeydown);
       window.requestAnimationFrame(() => {
         active.focus();
@@ -2976,8 +3140,29 @@ function commitActiveEditorBlock() {
   scheduleEditorBlockRender(joinEditorBlocks(state.editorBlocks));
 }
 
-function updateActiveBlockFromTextarea(textarea) {
-  formatTextareaCjkSpacing(textarea);
+function commitActiveEditorBlockForSave() {
+  const blockEditor = el("page-block-editor");
+  const active = blockEditor?.querySelector(".editor-block.is-active textarea");
+  if (!active) return false;
+  const index = Number(active.dataset.blockIndex || 0);
+  if (normalizeEditorText(active.value).trim()) {
+    commitActiveEditorBlock();
+    return false;
+  }
+  deleteEditorBlocks(index, 1);
+  state.activeEditorBlock = -1;
+  renderBlockEditor({ activeIndex: -1, focus: false });
+  scheduleEditorBlockRender(joinEditorBlocks(state.editorBlocks));
+  return true;
+}
+
+function handleBlockTextareaCompositionEnd(event) {
+  finishTextareaComposition(event);
+  updateActiveBlockFromTextarea(event.currentTarget);
+}
+
+function updateActiveBlockFromTextarea(textarea, event = null) {
+  formatTextareaCjkSpacing(textarea, { event });
   replaceEditorBlock(Number(textarea.dataset.blockIndex || 0), textarea.value);
   persistPageDraft();
   setPageEditorStatus(hasUnsavedPageEdit() ? "Unsaved draft." : "");
@@ -3020,6 +3205,22 @@ function handleBlockTextareaKeydown(event) {
   }
 }
 
+async function deleteEmptyEditorBlock(index) {
+  const textarea = el("page-block-editor")?.querySelector(
+    `.editor-block.is-active textarea[data-block-index="${index}"]`,
+  );
+  const value = textarea ? textarea.value : editorBlockText(state.editorBlocks[index]);
+  if (normalizeEditorText(value).trim()) return;
+  replaceEditorBlock(index, value);
+  deleteEditorBlocks(index, 1);
+  persistPageDraft();
+  setPageEditorStatus("Deleting block...");
+  state.activeEditorBlock = -1;
+  renderBlockEditor({ activeIndex: -1, focus: false });
+  scheduleEditorBlockRender(joinEditorBlocks(state.editorBlocks));
+  await savePageEditor({ skipActiveBlockCommit: true });
+}
+
 function autoResizeBlockTextarea(textarea) {
   textarea.style.height = "auto";
   textarea.style.height = `${Math.max(46, textarea.scrollHeight)}px`;
@@ -3039,10 +3240,18 @@ function setEditorSource(source, blocks = []) {
 function editorBlockHtml(block, index, active) {
   const source = editorBlockText(block);
   if (active) {
-    return `<div class="editor-block is-active" data-block-index="${index}"><textarea class="editor-block-source" data-block-index="${index}" rows="1">${escapeTextarea(source)}</textarea></div>`;
+    const deleteButton = !source.trim() && state.editorBlocks.length > 1
+      ? `<button class="editor-block-action editor-block-delete" type="button" data-editor-block-action="delete-empty" data-block-index="${index}" aria-label="Delete empty block ${index + 1}" title="Delete empty block">${iconSvg("trash-2")}</button>`
+      : "";
+    return `<div class="editor-block is-active" data-block-index="${index}"><textarea class="editor-block-source" data-block-index="${index}" rows="1">${escapeTextarea(source)}</textarea>${deleteButton}</div>`;
   }
+  return `<div class="editor-block" data-block-index="${index}" tabindex="0">${editorBlockPreviewHtml(block, index)}</div>`;
+}
+
+function editorBlockPreviewHtml(block, index) {
+  const source = editorBlockText(block);
   const rendered = block.html || pendingEditorBlockHtml(source);
-  return `<div class="editor-block" data-block-index="${index}" tabindex="0">${rendered}</div>`;
+  return `${rendered}<button class="editor-block-action editor-block-edit" type="button" data-editor-block-action="edit" data-block-index="${index}" aria-label="Edit block ${index + 1}" title="Edit block">${iconSvg("pencil")}</button>`;
 }
 
 function escapeTextarea(value) {
@@ -3056,12 +3265,12 @@ function normalizeEditorBlocks(blocks, options = {}) {
         separator: normalizeEditorText(block?.separator || ""),
         html: typeof block?.html === "string" && block.html
           ? block.html
-          : '<p class="editor-preview-empty">Empty block</p>',
+          : EMPTY_BLOCK_HTML,
       }))
     : [];
   if (normalized.length) return normalized;
   if (options.fallback === false) return [];
-  return [{ source: "", separator: "", html: '<p class="editor-preview-empty">Empty block</p>' }];
+  return [{ source: "", separator: "", html: EMPTY_BLOCK_HTML }];
 }
 
 function editorBlockText(block) {
@@ -3103,7 +3312,7 @@ function replaceEditorBlocksFromSource(source) {
 function pendingEditorBlockHtml(source) {
   return normalizeEditorText(source).trim()
     ? ""
-    : '<p class="editor-preview-empty">Empty block</p>';
+    : EMPTY_BLOCK_HTML;
 }
 
 function insertEditorBlocks(index, blocks) {
@@ -3127,7 +3336,7 @@ function deleteEditorBlocks(index, count = 1) {
   const size = Math.max(1, Number(count) || 1);
   state.editorBlocks.splice(start, size);
   if (!state.editorBlocks.length) {
-    state.editorBlocks.push({ source: "", separator: "", html: '<p class="editor-preview-empty">Empty block</p>' });
+    state.editorBlocks.push({ source: "", separator: "", html: EMPTY_BLOCK_HTML });
   } else if (start >= state.editorBlocks.length) {
     state.editorBlocks[state.editorBlocks.length - 1].separator = "";
   }
@@ -3192,7 +3401,7 @@ function refreshInactiveEditorBlockHtml(renderedBlocks, activeIndex) {
     const node = blockEditor.querySelector(
       `.editor-block[data-block-index="${index}"]:not(.is-active)`,
     );
-    if (node) node.innerHTML = block.html || '<p class="editor-preview-empty">Empty block</p>';
+    if (node) node.innerHTML = editorBlockPreviewHtml(block, index);
   });
   enhanceMarkdownImages(blockEditor);
 }
@@ -3268,12 +3477,23 @@ function closePageEditor() {
   if (editor.hidden) return;
   editor.hidden = true;
   el("page-editor-shell").hidden = true;
+  setEditorMode("closed");
+  el("page-block-editor").hidden = false;
   el("page-block-editor").innerHTML = "";
+  el("page-new-block-button").hidden = false;
   showPageDraftBanner(false);
   state.editorRenderRequestId += 1;
   el("page-content").hidden = false;
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   setPageEditorStatus("");
+}
+
+function setEditorMode(mode) {
+  state.editorMode = mode;
+  const shell = el("page-editor-shell");
+  if (!shell) return;
+  shell.classList.toggle("is-block-mode", mode === "blocks");
+  shell.classList.toggle("is-source-mode", mode === "source");
 }
 
 function persistPageDraft() {

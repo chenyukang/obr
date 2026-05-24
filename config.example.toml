@@ -25,6 +25,6 @@ auto_git_sync = false
 passkey_store_path = "data/passkeys.json"
 webauthn_rp_name = "Obr"
 # Defaults to http://localhost:<listen-port> for local development.
-# For phone/browser use, set these to your HTTPS origin, e.g.:
+# For phone/browser use, set this to your HTTPS hostname; the origin defaults
+# to https://<webauthn_rp_id>.
 # webauthn_rp_id = "obr.example.com"
-# webauthn_origin = "https://obr.example.com"

@@ -4,8 +4,21 @@ const vm = require("vm");
 
 const app = fs.readFileSync(require.resolve("./app.js"), "utf8");
 const pageEditor = { value: "", hidden: false };
+let activeBlockTextarea = null;
+const pageBlockEditor = {
+  hidden: false,
+  innerHTML: "",
+  querySelector(selector) {
+    if (selector === ".editor-block.is-active textarea") return activeBlockTextarea;
+    return null;
+  },
+  querySelectorAll() {
+    return [];
+  },
+};
 const elements = {
   "page-editor": pageEditor,
+  "page-block-editor": pageBlockEditor,
 };
 const sandbox = {
   console,
@@ -38,6 +51,11 @@ this.__obrTest = {
   applyRenderedEditorBlocks,
   pendingEditorBlockHtml,
   editorBlocksPayload,
+  editorBlockHtml,
+  pageBlocksHtml,
+  formatTextareaCjkSpacing,
+  commitActiveEditorBlockForSave,
+  syncEditorBlocksForSave,
 };`,
   sandbox,
 );
@@ -52,6 +70,11 @@ const {
   applyRenderedEditorBlocks,
   pendingEditorBlockHtml,
   editorBlocksPayload,
+  editorBlockHtml,
+  pageBlocksHtml,
+  formatTextareaCjkSpacing,
+  commitActiveEditorBlockForSave,
+  syncEditorBlocksForSave,
 } = sandbox.__obrTest;
 
 function assertSource(expected) {
@@ -126,5 +149,67 @@ assertSource("one\n\ntwo edited\n\nthree");
 assert.strictEqual(state.editorBlocks[0].html, "<p>fresh one</p>");
 assert.strictEqual(state.editorBlocks[1].html, "<p>fresh two edited</p>");
 assert.strictEqual(state.editorBlocks[2].html, "<p>stale three</p>");
+
+assert(editorBlockHtml(state.editorBlocks[0], 0, false).includes('data-editor-block-action="edit"'));
+replaceEditorBlock(1, "");
+assert(editorBlockHtml(state.editorBlocks[1], 1, true).includes('data-editor-block-action="delete-empty"'));
+const pageBlocks = pageBlocksHtml(state.editorBlocks);
+assert(pageBlocks.includes('data-page-block-action="edit"'));
+assert(pageBlocks.includes("page-render-block is-empty"));
+
+const composingTextarea = {
+  value: "中文abc",
+  selectionStart: 5,
+  selectionEnd: 5,
+  dataset: { composing: "1" },
+};
+assert.strictEqual(formatTextareaCjkSpacing(composingTextarea), false);
+assert.strictEqual(composingTextarea.value, "中文abc");
+
+const inputComposingTextarea = {
+  value: "中文123",
+  selectionStart: 5,
+  selectionEnd: 5,
+  dataset: {},
+};
+assert.strictEqual(
+  formatTextareaCjkSpacing(inputComposingTextarea, {
+    event: { isComposing: true },
+  }),
+  false,
+);
+assert.strictEqual(inputComposingTextarea.value, "中文123");
+assert.strictEqual(
+  formatTextareaCjkSpacing(inputComposingTextarea, { force: true }),
+  true,
+);
+assert.strictEqual(inputComposingTextarea.value, "中文 123");
+
+setEditorSource("one\n\ntwo\n\nthree", [
+  { source: "one", separator: "\n\n", html: "<p>one</p>" },
+  { source: "two", separator: "\n\n", html: "<p>two</p>" },
+  { source: "three", separator: "", html: "<p>three</p>" },
+]);
+state.editorMode = "blocks";
+state.activeEditorBlock = 1;
+activeBlockTextarea = {
+  dataset: { blockIndex: "1" },
+  value: "  ",
+};
+assert.strictEqual(commitActiveEditorBlockForSave(), true);
+assertSource("one\n\nthree");
+
+setEditorSource("one\n\ntwo\n\nthree", [
+  { source: "one", separator: "\n\n", html: "<p>one</p>" },
+  { source: "two", separator: "\n\n", html: "<p>two</p>" },
+  { source: "three", separator: "", html: "<p>three</p>" },
+]);
+state.editorMode = "blocks";
+syncEditorBlocksForSave({ skipActiveBlockCommit: true });
+assert.deepStrictEqual(
+  state.editorBlocks.map((block) => block.source),
+  ["one", "two", "three"],
+);
+assertSource("one\n\ntwo\n\nthree");
 
 console.log("editor block regression tests passed");

@@ -75,15 +75,15 @@ vault
 data
 logs
 cache
-target
 ```
 
 When Obr is reachable outside the local machine, serve it through HTTPS, set
-`secure_cookies = true`, and configure a stable `webauthn_rp_id` and
-`webauthn_origin`. Obr validates request `Host` headers and rejects browser
+`secure_cookies = true`, and configure a stable `webauthn_rp_id`. Obr derives
+the WebAuthn origin as `https://<webauthn_rp_id>` unless `webauthn_origin` is
+set explicitly. Obr validates request `Host` headers and rejects browser
 cross-site write requests with untrusted `Origin` or `Sec-Fetch-Site` headers.
-Avoid exposing Obr directly to the public internet without an additional trusted
-access-control layer.
+Avoid exposing Obr directly to the public internet without an additional
+trusted access-control layer.
 
 ## Password
 
@@ -182,64 +182,100 @@ For phone or remote browser use, configure a stable HTTPS origin:
 ```toml
 secure_cookies = true
 webauthn_rp_id = "obr.example.com"
-webauthn_origin = "https://obr.example.com"
 ```
 
-Changing `webauthn_rp_id` or `webauthn_origin` invalidates existing passkeys for that domain. Register a new passkey after changing the public domain.
+`webauthn_origin` defaults to `https://<webauthn_rp_id>`. Set it explicitly
+only when the browser origin differs from that default.
+
+Changing `webauthn_rp_id` or the effective WebAuthn origin invalidates existing
+passkeys for that domain. Register a new passkey after changing the public
+domain.
 
 Once a passkey is registered, password login is disabled outside localhost. Localhost password login remains available as a recovery path.
 
-## Tailscale Funnel Example
+## Tailscale Funnel
 
-With Obr listening on `127.0.0.1:8010`, expose it through Tailscale Funnel:
+Tailscale Funnel exposes a local Obr server through a public HTTPS hostname
+under your tailnet domain, such as `<hostname>.<tailnet>.ts.net`.
+
+First, please [install tailscale](https://tailscale.com/docs/install) and log in to your tailnet.
+
+
+The examples below use a separate userspace `tailscaled` instance instead of the
+system Tailscale daemon. That keeps Obr's public route isolated in its own state
+directory and socket.
 
 ```bash
-tailscale funnel --yes --bg http://127.0.0.1:8010
+HOST=ob
+BASE="$HOME/.local/share/tailscale-obr"
+SOCK="$BASE/tailscaled.sock"
+```
+
+Start the separate `tailscaled` in the background:
+
+```bash
+mkdir -p "$BASE"
+
+nohup tailscaled \
+  --tun=userspace-networking \
+  --socket="$SOCK" \
+  --statedir="$BASE" \
+  > "$BASE/tailscaled.log" 2>&1 &
+
+echo $! > "$BASE/tailscaled.pid"
+```
+
+Log this instance into your tailnet and choose the `*.ts.net` hostname:
+
+```bash
+tailscale --socket="$SOCK" up --hostname="$HOST" --accept-dns=false
+```
+
+If this is the first login for this state directory, Tailscale prints an
+authorization URL. Open it and approve the new node.
+
+With Obr listening on `127.0.0.1:8010`, publish it through Funnel:
+
+```bash
+tailscale --socket="$SOCK" funnel --yes --bg http://127.0.0.1:8010
+```
+
+Check the public route:
+
+```bash
+tailscale --socket="$SOCK" funnel status
 ```
 
 Then set the WebAuthn config to the Funnel hostname:
 
 ```toml
 secure_cookies = true
-webauthn_rp_id = "obr.example.com"
-webauthn_origin = "https://obr.example.com"
+webauthn_rp_id = "<hostname>.<tailnet>.ts.net"
 ```
 
-Replace `obr.example.com` with the HTTPS hostname that Tailscale Funnel prints
-for your machine.
+Replace `<hostname>.<tailnet>.ts.net` with the HTTPS hostname from
+`funnel status`. For example, if `HOST=ob`, the public origin will look like
+`https://ob.<tailnet>.ts.net`.
 
-Check the public route:
+The `--socket` flag is important. Without it, the `tailscale` CLI tries the
+system daemon socket, usually `/var/run/tailscaled.socket`, and will not talk to
+the separate Obr `tailscaled` instance above.
+
+Stop the public Funnel route without stopping `tailscaled`:
 
 ```bash
-tailscale funnel status
+tailscale --socket="$SOCK" funnel reset
 ```
 
-## Releases
-
-Pushing a `v*` tag runs the release workflow. It builds the `obr` binary for:
-
-- `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
-
-Each release includes `obr-<target>.tar.gz` archives and SHA-256 checksums.
-
-## CI
-
-The GitHub Actions workflow runs the usual Rust checks:
+Stop the separate `tailscaled` process:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
-cargo build --release --locked
+kill "$(cat "$BASE/tailscaled.pid")"
 ```
 
-## Contributing And Security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and
-[SECURITY.md](SECURITY.md) for vulnerability reporting.
+`tailscaled.state` is internal state maintained by `tailscaled`. Do not edit it
+by hand; change Funnel and Serve routes with the `tailscale --socket=...`
+commands.
 
 ## License
 

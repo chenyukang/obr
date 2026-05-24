@@ -480,10 +480,11 @@ main {
 }
 
 .editor-block {
+  position: relative;
   min-height: 30px;
   border: 1px solid transparent;
   border-radius: 8px;
-  padding: 6px 8px;
+  padding: 6px 36px 6px 8px;
   cursor: text;
 }
 
@@ -509,6 +510,7 @@ main {
 }
 
 .editor-block-source {
+  width: 100%;
   min-height: 46px;
   overflow: hidden;
   resize: none;
@@ -519,6 +521,36 @@ main {
   font-size: 15px;
   line-height: 1.55;
   outline: none;
+}
+
+.editor-block-action {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 90%);
+  color: var(--muted);
+  padding: 0;
+  opacity: 0.58;
+}
+
+.editor-block-action .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.editor-block:hover .editor-block-action,
+.editor-block:focus-within .editor-block-action {
+  opacity: 1;
+}
+
+.editor-block-delete {
+  border-color: #f1b5aa;
+  color: #b42318;
 }
 
 .editor-preview-empty {
@@ -551,7 +583,71 @@ main {
 }
 
 #page-editor {
+  min-height: 58vh;
+  border-radius: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.page-editor-shell.is-block-mode #page-editor,
+.page-editor-shell.is-source-mode #page-block-editor {
   display: none;
+}
+
+.page-render-block {
+  position: relative;
+  min-height: 30px;
+  padding-right: 34px;
+}
+
+.page-render-block + .page-render-block {
+  margin-top: 2px;
+}
+
+.page-render-block.is-empty {
+  min-height: 28px;
+}
+
+.page-render-block.is-empty .editor-preview-empty {
+  opacity: 0.65;
+}
+
+.page-block-edit {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 88%);
+  color: var(--muted);
+  padding: 0;
+  opacity: 0.35;
+}
+
+.page-block-edit .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.page-render-block:hover .page-block-edit,
+.page-render-block:focus-within .page-block-edit,
+.page-block-edit:focus-visible {
+  opacity: 1;
+}
+
+.page-new-block-button {
+  width: auto;
+  min-width: 0;
+  min-height: 30px;
+  margin: 18px auto 0;
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 5px 10px;
+  font-size: 13px;
 }
 
 .recent-panel {

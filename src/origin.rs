@@ -253,7 +253,6 @@ mod tests {
         config.listen = "0.0.0.0:8010".to_string();
         config.secure_cookies = true;
         config.webauthn_rp_id = Some("obr.example.com".to_string());
-        config.webauthn_origin = Some("https://obr.example.com".to_string());
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("obr.example.com"));
         headers.insert(ORIGIN, HeaderValue::from_static("https://obr.example.com"));

@@ -187,6 +187,10 @@ impl Config {
             return url::Url::parse(origin)
                 .map_err(|err| anyhow!("invalid webauthn_origin: {err}"));
         }
+        if let Some(rp_id) = &self.webauthn_rp_id {
+            return url::Url::parse(&format!("https://{rp_id}"))
+                .map_err(|err| anyhow!("build webauthn origin from webauthn_rp_id: {err}"));
+        }
         let listen: SocketAddr = self
             .listen
             .parse()
@@ -303,5 +307,16 @@ mod tests {
             normalize_vault_relative_path(PathBuf::from("Tasks/todo"), "todo_path", true).unwrap();
 
         assert_eq!(path, PathBuf::from("Tasks/todo.md"));
+    }
+
+    #[test]
+    fn webauthn_origin_defaults_to_https_rp_id_when_configured() {
+        let mut config = test_config();
+        config.webauthn_rp_id = Some("obr.example.com".to_string());
+
+        assert_eq!(
+            config.webauthn_origin().unwrap().as_str(),
+            "https://obr.example.com/"
+        );
     }
 }
