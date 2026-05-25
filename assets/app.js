@@ -27,6 +27,9 @@ const state = {
   rssFilter: "unread",
   rssItemsRequestId: 0,
   rssItemRequestId: 0,
+  rssDetailRenderId: 0,
+  rssItemsCache: new Map(),
+  rssItemCache: new Map(),
   rssSelectedItemId: "",
   rssCurrentFeedId: "",
   rssCurrentFeedTitle: "",
@@ -116,6 +119,7 @@ const RECENT_PAGES_KEY = "obr.offline.recent-pages";
 const RECENT_EDITS_KEY = "obr.recent-edits";
 const SEARCH_CACHE_KEY = "obr.search-cache";
 const SEARCH_CACHE_LIMIT = 24;
+const RSS_ITEMS_PAGE_SIZE = 20;
 const OUTBOX_KEY = "obr.offline.outbox";
 const APP_CONFIG_KEY = "obr.app-config";
 const CLIENT_ID_KEY = "obr.client-id";
@@ -295,18 +299,18 @@ function bindEvents() {
     button.addEventListener("click", async () => {
       state.rssFilter = button.dataset.rssFilter || "unread";
       updateRssFilterButtons();
-      await loadRssItems();
+      await loadRssItems({ preferCache: true });
     });
   });
   el("rss-search-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     window.clearTimeout(state.rssSearchTimer);
-    await loadRssItems();
+    await loadRssItems({ preferCache: true });
   });
   el("rss-search-input").addEventListener("input", () => {
     updateRssSearchClear();
     window.clearTimeout(state.rssSearchTimer);
-    state.rssSearchTimer = window.setTimeout(loadRssItems, 180);
+    state.rssSearchTimer = window.setTimeout(() => loadRssItems({ preferCache: true }), 180);
   });
   el("rss-search-input").addEventListener("keydown", async (event) => {
     if (event.key === "Escape") {
@@ -1801,7 +1805,7 @@ async function showView(name, options = {}) {
     el("rss-view").hidden = false;
     updateRssFilterButtons();
     updateRssSearchClear();
-    await loadRssItems();
+    await loadRssItems({ preferCache: true });
     if (restoreScroll) restoreViewScroll("rss");
     if (updateHistory) pushAppHistory({ view: "rss" });
     return;
@@ -2446,32 +2450,88 @@ function renderTodoHtml(html, emptyMessage) {
   );
 }
 
-async function loadRssItems() {
+async function loadRssItems(options = {}) {
+  const { force = false, preferCache = false, append = false } = options;
   const requestId = state.rssItemsRequestId + 1;
   state.rssItemsRequestId = requestId;
-  setRssStatus("Loading...");
+  const cacheKey = rssItemsCacheKey();
+  const cachedPage = state.rssItemsCache.get(cacheKey);
+  const renderedCache = Boolean(cachedPage && preferCache && !append);
+  if (renderedCache) {
+    renderRssItemsPage(cachedPage);
+    setRssStatus("");
+  }
+  const offset = append ? cachedPage?.nextOffset : 0;
+  if (append && offset == null) return;
+  if (!renderedCache || append) {
+    setRssStatus(append ? "Loading more RSS..." : "Loading RSS...", "loading");
+  }
   try {
     const params = new URLSearchParams({
       state: state.rssFilter,
-      limit: "80",
+      limit: String(RSS_ITEMS_PAGE_SIZE),
+      offset: String(offset || 0),
     });
     const query = rssSearchQuery();
     if (query) params.set("q", query);
     const response = await request(`/api/rss/items?${params}`);
     if (!response.ok) throw new Error(await response.text());
-    const items = await response.json();
+    const page = normalizeRssItemsPage(await response.json());
     if (requestId !== state.rssItemsRequestId) return;
-    renderRssItems(items);
+    const nextPage = append
+      ? {
+          items: [...(cachedPage?.items || []), ...page.items],
+          nextOffset: page.nextOffset,
+      }
+      : page;
+    state.rssItemsCache.set(cacheKey, nextPage);
+    const changed = append || !cachedPage || !sameRssItemsPage(cachedPage, nextPage);
+    if (changed || !renderedCache || force) {
+      renderRssItemsPage(nextPage);
+    }
     setRssStatus("");
   } catch (error) {
     if (requestId !== state.rssItemsRequestId) return;
     console.error(error);
-    renderRssItems([]);
-    setRssStatus(error.message || "RSS loading failed.");
+    if (renderedCache) {
+      setRssStatus("");
+      showToast(error.message || "RSS update failed.");
+    } else {
+      if (!cachedPage) renderRssItemsPage({ items: [], nextOffset: null });
+      setRssStatus(error.message || "RSS loading failed.", "error");
+    }
   }
 }
 
-function renderRssItems(items) {
+function normalizeRssItemsPage(payload) {
+  if (Array.isArray(payload)) {
+    return {
+      items: payload,
+      nextOffset: payload.length >= RSS_ITEMS_PAGE_SIZE ? payload.length : null,
+    };
+  }
+  return {
+    items: Array.isArray(payload?.items) ? payload.items : [],
+    nextOffset: Number.isInteger(payload?.next_offset) ? payload.next_offset : null,
+  };
+}
+
+function sameRssItemsPage(left, right) {
+  return rssItemsPageSignature(left) === rssItemsPageSignature(right);
+}
+
+function rssItemsPageSignature(page) {
+  return JSON.stringify({
+    items: page?.items || [],
+    nextOffset: page?.nextOffset ?? null,
+  });
+}
+
+function renderRssItemsPage(page) {
+  renderRssItems(page.items, { nextOffset: page.nextOffset });
+}
+
+function renderRssItems(items, options = {}) {
   const list = el("rss-list");
   if (!items.length) {
     const empty = rssSearchQuery()
@@ -2483,14 +2543,28 @@ function renderRssItems(items) {
     markSelectedRssItem();
     return;
   }
-  list.innerHTML = items.map(rssItemHtml).join("");
+  list.innerHTML = `${items.map(rssItemHtml).join("")}${rssMoreHtml(options.nextOffset, items.length)}`;
   markSelectedRssItem();
+}
+
+function rssMoreHtml(nextOffset, shown) {
+  if (nextOffset == null) return "";
+  return `
+    <div class="rss-more-row">
+      <button class="rss-more" type="button" data-rss-more="${escapeHtmlAttr(nextOffset)}">
+        More <span>${escapeHtml(shown)}</span>
+      </button>
+    </div>
+  `;
 }
 
 function rssItemHtml(item) {
   const active = item.id === state.rssSelectedItemId ? " is-active" : "";
   const read = item.read_at ? " is-read" : "";
-  const meta = [item.feed_title, formatTime(item.published_at || item.first_seen_at)]
+  const meta = [
+    item.feed_title,
+    formatTime(item.published_at || item.updated_at || item.first_seen_at),
+  ]
     .filter(Boolean)
     .join(" · ");
   const summary = firstLine(item.summary_md || "");
@@ -2509,7 +2583,22 @@ function rssItemHtml(item) {
   `;
 }
 
+function rssItemPreviewFromRow(row) {
+  if (!row) return {};
+  return {
+    title: row.querySelector(".rss-item-title")?.textContent?.trim() || "",
+    meta: row.querySelector(".rss-item-meta")?.textContent?.trim() || "",
+  };
+}
+
 async function handleRssListClick(event) {
+  const moreButton = event.target.closest("[data-rss-more]");
+  if (moreButton) {
+    event.preventDefault();
+    moreButton.disabled = true;
+    await loadRssItems({ append: true });
+    return;
+  }
   const readButton = event.target.closest("[data-rss-mark-read]");
   if (readButton) {
     event.preventDefault();
@@ -2519,7 +2608,9 @@ async function handleRssListClick(event) {
   const button = event.target.closest("[data-rss-item]");
   if (!button) return;
   event.preventDefault();
-  await openRssItem(button.dataset.rssItem);
+  await openRssItem(button.dataset.rssItem, {
+    preview: rssItemPreviewFromRow(button.closest("[data-rss-row]")),
+  });
 }
 
 async function markRssItemReadFromList(id, button) {
@@ -2531,10 +2622,12 @@ async function markRssItemReadFromList(id, button) {
       body: JSON.stringify({ read: true }),
     });
     if (!response.ok) throw new Error(await response.text());
+    clearRssItemsCache();
+    updateCachedRssItem(id, { read_at: new Date().toISOString() });
     if (state.rssFilter === "unread") {
       button.closest("[data-rss-row]")?.remove();
       if (!el("rss-list").querySelector("[data-rss-row]")) {
-        await loadRssItems();
+        await loadRssItems({ force: true });
       }
     } else {
       markRssRowRead(id);
@@ -2542,34 +2635,101 @@ async function markRssItemReadFromList(id, button) {
   } catch (error) {
     console.error(error);
     button.disabled = false;
-    setRssStatus(error.message || "Mark read failed.");
+    setRssStatus(error.message || "Mark read failed.", "error");
   }
 }
 
 async function openRssItem(id, options = {}) {
   if (!id) return;
-  const { updateHistory = true } = options;
+  const { updateHistory = true, preview = {} } = options;
   const requestId = state.rssItemRequestId + 1;
   state.rssItemRequestId = requestId;
   state.rssSelectedItemId = id;
   markSelectedRssItem();
-  setRssStatus("Opening...");
+  const cachedItem = state.rssItemCache.get(id);
+  const renderedCache = Boolean(cachedItem);
+  if (cachedItem) {
+    renderRssDetailPage(cachedItem, { updateHistory, saveScroll: false });
+    markSelectedRssItem(Boolean(cachedItem.read_at));
+    setRssStatus("");
+  } else {
+    renderRssDetailShell(id, preview, { updateHistory });
+    setRssStatus("Opening RSS item...", "loading");
+  }
   try {
     const response = await request(`/api/rss/items/${encodeURIComponent(id)}`);
     if (!response.ok) throw new Error(await response.text());
     const item = await response.json();
     if (requestId !== state.rssItemRequestId) return;
-    renderRssDetailPage(item, { updateHistory });
+    const changed = !cachedItem || !sameRssItemDetail(cachedItem, item);
+    state.rssItemCache.set(id, item);
+    if (changed || !renderedCache) {
+      if (!renderedCache) setRssStatus("Rendering RSS item...", "loading");
+      await nextFrame();
+      if (requestId !== state.rssItemRequestId) return;
+      renderRssDetailPage(item, { updateHistory: false, saveScroll: false });
+    }
     markSelectedRssItem(true);
     setRssStatus("");
   } catch (error) {
     if (requestId !== state.rssItemRequestId) return;
     console.error(error);
-    setRssStatus(error.message || "RSS item failed.");
+    if (renderedCache) {
+      setRssStatus("");
+      showToast(error.message || "RSS item update failed.");
+    } else {
+      setRssStatus(error.message || "RSS item failed.", "error");
+    }
   }
 }
 
+function sameRssItemDetail(left, right) {
+  return rssItemDetailSignature(left) === rssItemDetailSignature(right);
+}
+
+function rssItemDetailSignature(item) {
+  return JSON.stringify({
+    id: item?.id || "",
+    feed_id: item?.feed_id || "",
+    feed_title: item?.feed_title || "",
+    feed_url: item?.feed_url || "",
+    title: item?.title || "",
+    url: item?.url || "",
+    author: item?.author || "",
+    published_at: item?.published_at || "",
+    updated_at: item?.updated_at || "",
+    first_seen_at: item?.first_seen_at || "",
+    fetched_at: item?.fetched_at || "",
+    read_at: item?.read_at || "",
+    starred_at: item?.starred_at || "",
+    content_source: item?.content_source || "",
+    extraction_quality: item?.extraction_quality ?? null,
+    html: item?.html || "",
+  });
+}
+
+function renderRssDetailShell(id, preview = {}, options = {}) {
+  state.rssSelectedItemId = id;
+  state.rssCurrentFeedId = "";
+  state.rssCurrentFeedTitle = "";
+  state.rssCurrentStarred = false;
+  state.currentFile = `rss:${id}`;
+  state.currentContent = "";
+  state.currentBlocks = [];
+  state.currentContentLoaded = false;
+  state.currentHighlightKeyword = "";
+  const meta = preview.meta ? `<p class="rss-detail-meta">${escapeHtml(preview.meta)}</p>` : "";
+  showPage(
+    preview.title || "RSS item",
+    `${meta}<div class="rss-detail-loading"><span></span><p>Loading item...</p></div>`,
+    "rss",
+    { ...options, editable: false, restoreReading: false, deferEnhancements: true },
+  );
+}
+
 function renderRssDetailPage(item, options = {}) {
+  const renderId = state.rssDetailRenderId + 1;
+  state.rssDetailRenderId = renderId;
   state.rssSelectedItemId = item.id;
   state.rssCurrentFeedId = item.feed_id || "";
   state.rssCurrentFeedTitle = item.feed_title || item.feed_url || "";
@@ -2595,16 +2755,25 @@ function renderRssDetailPage(item, options = {}) {
     item.title || "Untitled",
     `${metaHtml}${item.html?.trim() ? item.html : '<p class="empty">No content.</p>'}`,
     "rss",
-    { ...options, editable: false, restoreReading: false },
+    { ...options, editable: false, restoreReading: false, deferEnhancements: true },
   );
+  scheduleRssDetailEnhancements(renderId);
   updateRssPageActions();
+}
+
+function scheduleRssDetailEnhancements(renderId) {
+  scheduleIdleTask(() => {
+    if (renderId !== state.rssDetailRenderId || state.view !== "page") return;
+    updatePageOutline();
+    updateReadingProgress();
+  });
 }
 
 async function refreshRss() {
   if (state.rssRefreshing) return;
   state.rssRefreshing = true;
   setRssRefreshLoading(true);
-  setRssStatus("Refreshing...");
+  setRssStatus("Refreshing RSS...", "loading");
   try {
     const response = await request("/api/rss/refresh", {
       method: "POST",
@@ -2617,12 +2786,19 @@ async function refreshRss() {
     const removedText = removedItems ? `, ${removedItems} removed` : "";
     const failedFeeds = summary.failed || 0;
     const failedText = failedFeeds ? `, ${failedFeeds} failed` : "";
+    clearRssItemsCache();
+    if (removedItems) clearRssItemCache();
     showToast(`RSS refreshed. ${summary.new_items || 0} new${removedText}${failedText}.`);
-    await loadRssItems();
-    setRssStatus(failedFeeds ? `${failedFeeds} feed${failedFeeds === 1 ? "" : "s"} failed. Other feeds refreshed.` : "");
+    await loadRssItems({ force: true });
+    setRssStatus(
+      failedFeeds
+        ? `${failedFeeds} feed${failedFeeds === 1 ? "" : "s"} failed. Other feeds refreshed.`
+        : "",
+      failedFeeds ? "info" : "",
+    );
   } catch (error) {
     console.error(error);
-    setRssStatus(error.message || "RSS refresh failed.");
+    setRssStatus(error.message || "RSS refresh failed.", "error");
   } finally {
     state.rssRefreshing = false;
     setRssRefreshLoading(false);
@@ -2640,6 +2816,8 @@ async function toggleCurrentRssStar() {
     });
     if (!response.ok) throw new Error(await response.text());
     state.rssCurrentStarred = starred;
+    clearRssItemsCache();
+    updateCachedRssItem(id, { starred_at: starred ? new Date().toISOString() : null });
     updateRssPageActions();
     showToast(starred ? "Starred." : "Unstarred.");
   } catch (error) {
@@ -2673,6 +2851,7 @@ async function unsubscribeCurrentRssFeed() {
     state.rssSelectedItemId = "";
     state.rssCurrentFeedId = "";
     state.rssCurrentFeedTitle = "";
+    clearRssCaches();
     showToast(`Unsubscribed. ${summary.removed_items || 0} items removed.`);
     await showView("rss", { restoreScroll: false });
   } catch (error) {
@@ -2723,13 +2902,44 @@ function setRssRefreshLoading(loading) {
   setButtonIcon(button, loading ? "loader" : "rotate-ccw", loading ? "Refreshing..." : "Refresh");
 }
 
-function setRssStatus(message) {
-  el("rss-status").textContent = message;
-  el("rss-status").hidden = !message;
+function setRssStatus(message, kind = "") {
+  const status = el("rss-status");
+  status.textContent = message;
+  status.hidden = !message;
+  status.classList?.toggle("is-loading", kind === "loading");
+  status.classList?.toggle("is-error", kind === "error");
+  status.classList?.toggle("is-info", kind === "info");
 }
 
 function rssSearchQuery() {
   return el("rss-search-input").value.trim();
+}
+
+function rssItemsCacheKey() {
+  return `${state.rssFilter}\n${rssSearchQuery().toLowerCase()}`;
+}
+
+function clearRssItemsCache() {
+  state.rssItemsCache.clear();
+}
+
+function clearRssItemCache(id = "") {
+  if (id) {
+    state.rssItemCache.delete(id);
+  } else {
+    state.rssItemCache.clear();
+  }
+}
+
+function clearRssCaches() {
+  clearRssItemsCache();
+  clearRssItemCache();
+}
+
+function updateCachedRssItem(id, patch) {
+  const cached = state.rssItemCache.get(id);
+  if (!cached) return;
+  state.rssItemCache.set(id, { ...cached, ...patch });
 }
 
 async function clearRssSearch() {
@@ -2737,7 +2947,7 @@ async function clearRssSearch() {
   if (!el("rss-search-input").value) return;
   el("rss-search-input").value = "";
   updateRssSearchClear();
-  await loadRssItems();
+  await loadRssItems({ preferCache: true });
   el("rss-search-input").focus();
 }
 
@@ -2932,6 +3142,7 @@ function showPage(title, html, sourceView, options = {}) {
     updateHistory = true,
     saveScroll = true,
     restoreReading = true,
+    deferEnhancements = false,
   } = options;
   if (saveScroll) saveCurrentScrollPosition();
   if (sourceView === "todo" || sourceView === "find" || sourceView === "rss") {
@@ -2944,9 +3155,16 @@ function showPage(title, html, sourceView, options = {}) {
     view.hidden = true;
   }
   el("page-title").textContent = title;
-  setPageContentHtml(html);
-  updatePageOutline();
-  highlightPageContent(state.currentHighlightKeyword);
+  setPageContentHtml(html, { deferImages: deferEnhancements });
+  if (deferEnhancements) {
+    clearPageOutline();
+    if (state.currentHighlightKeyword) {
+      scheduleIdleTask(() => highlightPageContent(state.currentHighlightKeyword));
+    }
+  } else {
+    updatePageOutline();
+    highlightPageContent(state.currentHighlightKeyword);
+  }
   el("page-content").hidden = false;
   el("page-editor").hidden = true;
   el("page-editor-shell").hidden = true;
@@ -2977,13 +3195,13 @@ function showPage(title, html, sourceView, options = {}) {
   }
 }
 
-function setPageContentHtml(html) {
+function setPageContentHtml(html, options = {}) {
   const blocks = normalizeEditorBlocks(state.currentBlocks, { fallback: false });
   if (!blocks.length) {
-    setDeferredMarkdownHtml(el("page-content"), html);
+    setDeferredMarkdownHtml(el("page-content"), html, options);
     return;
   }
-  setDeferredMarkdownHtml(el("page-content"), pageBlocksHtml(blocks));
+  setDeferredMarkdownHtml(el("page-content"), pageBlocksHtml(blocks), options);
 }
 
 function pageBlocksHtml(blocks) {
@@ -4257,8 +4475,9 @@ function showToast(message) {
   }, TOAST_MS);
 }
 
-function setDeferredMarkdownHtml(root, html) {
+function setDeferredMarkdownHtml(root, html, options = {}) {
   if (!root) return;
+  const { deferImages = false } = options;
   const template = document.createElement("template");
   template.innerHTML = html || "";
   for (const img of template.content.querySelectorAll("img[src]")) {
@@ -4271,7 +4490,23 @@ function setDeferredMarkdownHtml(root, html) {
     img.fetchPriority = "low";
   }
   root.replaceChildren(template.content);
-  enhanceMarkdownImages(root);
+  if (deferImages) {
+    window.requestAnimationFrame(() => enhanceMarkdownImages(root));
+  } else {
+    enhanceMarkdownImages(root);
+  }
+}
+
+function nextFrame() {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
+function scheduleIdleTask(callback) {
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(callback, { timeout: 500 });
+  } else {
+    window.requestAnimationFrame(callback);
+  }
 }
 
 function markdownImageObserver() {

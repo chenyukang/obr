@@ -109,6 +109,7 @@ pub(crate) struct MarkQuery {
 pub(crate) struct RssItemsQuery {
     state: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
     q: Option<String>,
 }
 
@@ -172,6 +173,12 @@ struct RssItemDetailResponse {
     #[serde(flatten)]
     item: RssItemDetail,
     html: String,
+}
+
+#[derive(Serialize)]
+struct RssItemsResponse {
+    items: Vec<rss::RssItemSummary>,
+    next_offset: Option<usize>,
 }
 
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
@@ -436,16 +443,40 @@ pub(crate) async fn rss_items(
     Query(query): Query<RssItemsQuery>,
 ) -> AppResult<Response> {
     let Some(reader) = &state.rss_reader else {
-        return Ok(Json(Vec::<rss::RssItemSummary>::new()).into_response());
+        return Ok(Json(RssItemsResponse {
+            items: Vec::new(),
+            next_offset: None,
+        })
+        .into_response());
     };
     let filter = match query.state.as_deref() {
         Some("all") => RssItemFilter::All,
         _ => RssItemFilter::Unread,
     };
-    Ok(
-        Json(reader.list_items(filter, query.limit.unwrap_or(50), query.q.as_deref())?)
-            .into_response(),
-    )
+    let reader = reader.clone();
+    let list_reader = reader.clone();
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let offset = query.offset.unwrap_or_default();
+    let search = query.q.clone();
+    let mut items = tokio::task::spawn_blocking(move || {
+        list_reader.list_items(filter, limit + 1, offset, search.as_deref())
+    })
+    .await
+    .context("join RSS items task")??;
+    let next_offset = if items.len() > limit {
+        items.truncate(limit);
+        Some(offset.saturating_add(limit))
+    } else {
+        None
+    };
+    let warm_reader = reader.clone();
+    let warm_ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        if let Err(err) = warm_reader.warm_item_html_cache(&warm_ids) {
+            warn!(error = %err, "warm RSS item HTML cache failed");
+        }
+    });
+    Ok(Json(RssItemsResponse { items, next_offset }).into_response())
 }
 
 pub(crate) async fn rss_item(
@@ -455,15 +486,24 @@ pub(crate) async fn rss_item(
     let Some(reader) = &state.rss_reader else {
         return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
     };
-    let Some(mut item) = reader.get_item(&id)? else {
+    let reader = reader.clone();
+    let response =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<RssItemDetailResponse>> {
+            let Some(mut item) = reader.get_item(&id)? else {
+                return Ok(None);
+            };
+            if item.read_at.is_none() && reader.mark_item_read(&id, true)? {
+                item.read_at = Some(Utc::now().to_rfc3339());
+            }
+            let html = reader.rendered_item_html(&mut item)?;
+            Ok(Some(RssItemDetailResponse { item, html }))
+        })
+        .await
+        .context("join RSS item task")??;
+    let Some(response) = response else {
         return Ok((StatusCode::NOT_FOUND, "RSS item not found").into_response());
     };
-    if item.read_at.is_none() && reader.mark_item_read(&id, true)? {
-        item.read_at = Some(Utc::now().to_rfc3339());
-    }
-    let html =
-        render_markdown_html_for_file(&item.content_markdown, &format!("rss/{}.md", item.id));
-    Ok(Json(RssItemDetailResponse { item, html }).into_response())
+    Ok(Json(response).into_response())
 }
 
 pub(crate) async fn rss_mark_read(
