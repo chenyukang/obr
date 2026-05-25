@@ -1269,6 +1269,44 @@ main {
   margin: 0;
 }
 
+.rss-detail-frame-shell {
+  margin-top: 10px;
+}
+
+.rss-detail-frame {
+  display: block;
+  width: 100%;
+  height: min(74dvh, 900px);
+  min-height: 520px;
+  border: 0;
+  background: #ffffff;
+}
+
+.rss-frame-document {
+  min-height: auto;
+  margin: 0;
+  background: #ffffff;
+  color: #1f2f37;
+  font-size: 16px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.rss-frame-content {
+  max-width: 100%;
+  padding: 0 2px 28px;
+}
+
+.rss-frame-content img,
+.rss-frame-content video {
+  max-width: 100%;
+  height: auto;
+}
+
+.rss-frame-content table {
+  max-width: 100%;
+}
+
 .empty {
   margin: 0;
   color: var(--muted);

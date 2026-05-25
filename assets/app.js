@@ -120,6 +120,7 @@ const RECENT_EDITS_KEY = "obr.recent-edits";
 const SEARCH_CACHE_KEY = "obr.search-cache";
 const SEARCH_CACHE_LIMIT = 24;
 const RSS_ITEMS_PAGE_SIZE = 20;
+const RSS_IFRAME_SANDBOX = "allow-popups";
 const OUTBOX_KEY = "obr.offline.outbox";
 const APP_CONFIG_KEY = "obr.app-config";
 const CLIENT_ID_KEY = "obr.client-id";
@@ -2751,14 +2752,50 @@ function renderRssDetailPage(item, options = {}) {
       ${item.url ? `<a href="${escapeHtmlAttr(item.url)}" target="_blank" rel="noopener noreferrer">Original</a>` : ""}
     </p>
   `;
+  const bodyHtml = item.html?.trim() ? item.html : '<p class="empty">No content.</p>';
   showPage(
     item.title || "Untitled",
-    `${metaHtml}${item.html?.trim() ? item.html : '<p class="empty">No content.</p>'}`,
+    `${metaHtml}<div class="rss-detail-frame-shell" data-rss-frame-root></div>`,
     "rss",
     { ...options, editable: false, restoreReading: false, deferEnhancements: true },
   );
+  renderRssSandboxFrame(
+    el("page-content").querySelector("[data-rss-frame-root]"),
+    bodyHtml,
+    item.title || "RSS content",
+  );
   scheduleRssDetailEnhancements(renderId);
   updateRssPageActions();
+}
+
+function renderRssSandboxFrame(root, html, title = "RSS content") {
+  if (!root) return;
+  const iframe = document.createElement("iframe");
+  iframe.className = "rss-detail-frame";
+  iframe.title = title;
+  iframe.setAttribute("sandbox", RSS_IFRAME_SANDBOX);
+  iframe.setAttribute("referrerpolicy", "no-referrer");
+  iframe.setAttribute("loading", "lazy");
+  iframe.srcdoc = rssFrameDocumentHtml(html);
+  root.replaceChildren(iframe);
+}
+
+function rssFrameDocumentHtml(html) {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <base target="_blank">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body class="markdown rss-frame-document">
+  <main class="rss-frame-content">
+    ${html || '<p class="empty">No content.</p>'}
+  </main>
+</body>
+</html>`;
 }
 
 function scheduleRssDetailEnhancements(renderId) {

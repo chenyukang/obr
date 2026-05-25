@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
+    ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -18,6 +19,7 @@ use reqwest::{
 };
 use rs_trafilatura::{Options as ExtractOptions, extract_bytes_with_options};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
+use scraper::{Html, Selector};
 use serde::Serialize;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -32,9 +34,24 @@ use crate::{
 const RSS_SCHEMA_VERSION: i64 = 4;
 const CONTENT_DIR: &str = "content";
 const HTML_DIR: &str = "html";
+const SOURCE_HTML_DIR: &str = "source-html";
 const USER_AGENT_VALUE: &str = concat!("Obr/", env!("CARGO_PKG_VERSION"), " RSS Reader");
 const MIN_ARTICLE_MARKDOWN_CHARS: usize = 160;
 const RSS_LIST_SUMMARY_CHARS: usize = 420;
+const ARTICLE_FALLBACK_SELECTORS: &[&str] = &[
+    "article",
+    "main article",
+    "main",
+    "[role='main']",
+    ".post-content",
+    ".entry-content",
+    ".article-content",
+    ".content",
+    ".post",
+    ".article",
+    "#content",
+    "#main",
+];
 
 #[derive(Clone)]
 pub(crate) struct RssReader {
@@ -44,6 +61,7 @@ pub(crate) struct RssReader {
     db_path: PathBuf,
     content_dir: PathBuf,
     html_dir: PathBuf,
+    source_html_dir: PathBuf,
     refresh_minutes: u64,
     max_items_per_feed: usize,
     fetch_full_content: bool,
@@ -135,6 +153,8 @@ pub(crate) struct RssItemDetail {
     pub(crate) content_markdown: String,
     #[serde(skip_serializing)]
     pub(crate) html_path: Option<String>,
+    #[serde(skip_serializing)]
+    pub(crate) source_html_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +205,7 @@ struct ItemCandidate {
     updated_at: Option<String>,
     summary_md: Option<String>,
     content_markdown: String,
+    source_html: Option<String>,
     content_source: String,
     extraction_quality: Option<f64>,
 }
@@ -198,10 +219,13 @@ impl RssReader {
         let db_path = data_dir.join("rss.sqlite");
         let content_dir = data_dir.join(CONTENT_DIR);
         let html_dir = data_dir.join(HTML_DIR);
+        let source_html_dir = data_dir.join(SOURCE_HTML_DIR);
         fs::create_dir_all(&content_dir)
             .with_context(|| format!("create RSS content dir {}", content_dir.display()))?;
         fs::create_dir_all(&html_dir)
             .with_context(|| format!("create RSS HTML dir {}", html_dir.display()))?;
+        fs::create_dir_all(&source_html_dir)
+            .with_context(|| format!("create RSS source HTML dir {}", source_html_dir.display()))?;
         init_db(&db_path)?;
         let client = Client::builder()
             .user_agent(USER_AGENT_VALUE)
@@ -216,6 +240,7 @@ impl RssReader {
             db_path,
             content_dir,
             html_dir,
+            source_html_dir,
             refresh_minutes: config.rss_refresh_minutes,
             max_items_per_feed: config.rss_max_items_per_feed,
             fetch_full_content: config.rss_fetch_full_content,
@@ -420,7 +445,7 @@ impl RssReader {
                 "SELECT i.id, i.feed_id, COALESCE(f.title, f.url), f.url, i.title, i.url,
                         i.author, i.published_at, i.updated_at, i.first_seen_at, i.fetched_at,
                         i.read_at, i.starred_at, i.content_source, i.extraction_quality,
-                        i.content_path, i.summary_md, i.html_path
+                        i.content_path, i.summary_md, i.html_path, i.source_html_path
                  FROM items i
                  JOIN feeds f ON f.id = i.feed_id
                  WHERE i.id = ?1",
@@ -445,6 +470,7 @@ impl RssReader {
                         row.get::<_, Option<String>>(15)?,
                         row.get::<_, Option<String>>(16)?,
                         row.get::<_, Option<String>>(17)?,
+                        row.get::<_, Option<String>>(18)?,
                     ))
                 },
             )
@@ -469,6 +495,7 @@ impl RssReader {
             content_path,
             summary_md,
             html_path,
+            source_html_path,
         )) = row
         else {
             return Ok(None);
@@ -501,6 +528,7 @@ impl RssReader {
             content_path,
             content_markdown,
             html_path,
+            source_html_path,
         }))
     }
 
@@ -512,7 +540,7 @@ impl RssReader {
             .and_then(|path| fs::read_to_string(&path).ok().map(|html| (path, html)))
             .filter(|(_, html)| !html.trim().is_empty())
         {
-            let resolved_html = resolve_rss_html_image_sources(&cached_html, &item.url);
+            let resolved_html = normalize_rss_display_html(&cached_html, &item.url);
             if resolved_html != cached_html {
                 fs::write(&cached_path, &resolved_html)
                     .with_context(|| format!("update RSS HTML {}", cached_path.display()))?;
@@ -520,9 +548,18 @@ impl RssReader {
             return Ok(resolved_html);
         }
 
-        let html =
-            render_markdown_html_for_file(&item.content_markdown, &format!("rss/{}.md", item.id));
-        let html = resolve_rss_html_image_sources(&html, &item.url);
+        let source_html = item
+            .source_html_path
+            .as_deref()
+            .and_then(|path| self.source_html_file_path(path))
+            .and_then(|path| fs::read_to_string(path).ok())
+            .filter(|html| !html.trim().is_empty());
+        let html = render_rss_display_html(
+            source_html.as_deref(),
+            &item.content_markdown,
+            &item.id,
+            &item.url,
+        );
         let html_path = format!("{HTML_DIR}/{}.html", item.id);
         self.write_item_html(&html_path, &html)?;
         let conn = self.connection()?;
@@ -663,21 +700,23 @@ impl RssReader {
             .collect::<HashSet<_>>();
         let mut conn = self.connection()?;
         let removed_items = {
-            let mut stmt =
-                conn.prepare("SELECT id, feed_id, content_path, html_path FROM items")?;
+            let mut stmt = conn.prepare(
+                "SELECT id, feed_id, content_path, html_path, source_html_path FROM items",
+            )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })?;
             let mut removed_items = Vec::new();
             for row in rows {
-                let (id, feed_id, content_path, html_path) = row?;
+                let (id, feed_id, content_path, html_path, source_html_path) = row?;
                 if !active_feed_ids.contains(&feed_id) {
-                    removed_items.push((id, content_path, html_path));
+                    removed_items.push((id, content_path, html_path, source_html_path));
                 }
             }
             removed_items
@@ -700,7 +739,7 @@ impl RssReader {
         }
 
         let tx = conn.transaction()?;
-        for (id, _, _) in &removed_items {
+        for (id, _, _, _) in &removed_items {
             tx.execute("DELETE FROM items WHERE id = ?1", params![id])?;
         }
         for id in &removed_feeds {
@@ -708,9 +747,10 @@ impl RssReader {
         }
         tx.commit()?;
 
-        for (_, content_path, html_path) in &removed_items {
+        for (_, content_path, html_path, source_html_path) in &removed_items {
             self.remove_data_file(content_path.as_deref(), CONTENT_DIR, "content");
             self.remove_data_file(html_path.as_deref(), HTML_DIR, "HTML cache");
+            self.remove_data_file(source_html_path.as_deref(), SOURCE_HTML_DIR, "source HTML");
         }
 
         Ok(PruneStats {
@@ -727,6 +767,10 @@ impl RssReader {
         data_file_path(&self.data_dir, html_path, HTML_DIR)
     }
 
+    fn source_html_file_path(&self, source_html_path: &str) -> Option<PathBuf> {
+        data_file_path(&self.data_dir, source_html_path, SOURCE_HTML_DIR)
+    }
+
     fn write_item_html(&self, html_path: &str, html: &str) -> Result<()> {
         let path = self
             .html_file_path(html_path)
@@ -734,6 +778,21 @@ impl RssReader {
         fs::create_dir_all(&self.html_dir)
             .with_context(|| format!("create RSS HTML dir {}", self.html_dir.display()))?;
         fs::write(&path, html).with_context(|| format!("write RSS HTML {}", path.display()))?;
+        Ok(())
+    }
+
+    fn write_item_source_html(&self, source_html_path: &str, html: &str) -> Result<()> {
+        let path = self
+            .source_html_file_path(source_html_path)
+            .with_context(|| format!("unsafe RSS source HTML path {source_html_path}"))?;
+        fs::create_dir_all(&self.source_html_dir).with_context(|| {
+            format!(
+                "create RSS source HTML dir {}",
+                self.source_html_dir.display()
+            )
+        })?;
+        fs::write(&path, html)
+            .with_context(|| format!("write RSS source HTML {}", path.display()))?;
         Ok(())
     }
 
@@ -845,6 +904,7 @@ impl RssReader {
         let updated_at = entry.updated.as_ref().map(date_to_string);
         let summary_md = entry_summary_markdown(entry);
         let feed_content_md = entry_content_markdown(entry);
+        let feed_source_html = entry_content_html(entry).or_else(|| entry_summary_html(entry));
         let mut content_source = if feed_content_md.is_some() {
             "feed_content"
         } else {
@@ -856,19 +916,22 @@ impl RssReader {
             .clone()
             .or_else(|| summary_md.clone())
             .unwrap_or_default();
+        let mut source_html = feed_source_html.clone();
 
         if self.fetch_full_content
             && is_http_url(&url)
-            && let Ok(article) = self.fetch_article_markdown(&url).await
+            && let Ok(article) = self.fetch_article_content(&url).await
             && article.markdown.trim().len() >= MIN_ARTICLE_MARKDOWN_CHARS
         {
-            let (markdown, source) = article_markdown_preserving_feed_images(
-                article.markdown,
+            let (markdown, selected_html, source, quality) = article_content_preserving_feed_images(
+                article,
                 feed_content_md.as_deref(),
+                feed_source_html.as_deref(),
             );
             content_source = source.to_string();
-            extraction_quality = (source == "article").then_some(article.quality);
+            extraction_quality = (source == "article").then_some(quality);
             content_markdown = markdown;
+            source_html = selected_html;
         }
 
         Ok(ItemCandidate {
@@ -883,12 +946,13 @@ impl RssReader {
             updated_at,
             summary_md,
             content_markdown,
+            source_html,
             content_source,
             extraction_quality,
         })
     }
 
-    async fn fetch_article_markdown(&self, url: &str) -> Result<ArticleMarkdown> {
+    async fn fetch_article_content(&self, url: &str) -> Result<ArticleContent> {
         let response = self
             .client
             .get(url)
@@ -916,11 +980,21 @@ impl RssReader {
         let markdown = extracted
             .content_markdown
             .filter(|markdown| !markdown.trim().is_empty())
-            .unwrap_or(extracted.content_text);
-        Ok(ArticleMarkdown {
+            .unwrap_or_else(|| extracted.content_text.clone());
+        let article = ArticleContent {
             markdown: normalize_markdown(&markdown),
+            html: extracted
+                .content_html
+                .filter(|html| !html.trim().is_empty()),
             quality: extracted.extraction_quality,
-        })
+        };
+        let raw_html = String::from_utf8_lossy(&bytes);
+        if let Some(fallback) = fallback_article_content_from_html(&raw_html)
+            && should_use_fallback_article_content(&article, &fallback)
+        {
+            return Ok(fallback);
+        }
+        Ok(article)
     }
 
     fn feed_cache(&self, feed_url: &str) -> Result<FeedCache> {
@@ -1018,9 +1092,20 @@ impl RssReader {
         let content_markdown = normalize_markdown(&item.content_markdown);
         fs::write(&absolute_content_path, &content_markdown)
             .with_context(|| format!("write RSS item {}", absolute_content_path.display()))?;
+        let source_html_path = if let Some(source_html) = item.source_html.as_deref() {
+            let source_html_path = format!("{SOURCE_HTML_DIR}/{}.html", item.id);
+            self.write_item_source_html(&source_html_path, source_html)?;
+            Some(source_html_path)
+        } else {
+            None
+        };
         let html_path = format!("{HTML_DIR}/{}.html", item.id);
-        let html = render_markdown_html_for_file(&content_markdown, &format!("rss/{}.md", item.id));
-        let html = resolve_rss_html_image_sources(&html, &item.url);
+        let html = render_rss_display_html(
+            item.source_html.as_deref(),
+            &content_markdown,
+            &item.id,
+            &item.url,
+        );
         self.write_item_html(&html_path, &html)?;
         let search_text = build_item_search_text(
             &item.title,
@@ -1036,9 +1121,10 @@ impl RssReader {
             "INSERT OR IGNORE INTO items (
                 id, feed_id, feed_url, guid, url, title, author, published_at,
                 updated_at, sort_at, summary_md, content_path, content_source,
-                extraction_quality, first_seen_at, fetched_at, read_at, html_path, search_text
+                extraction_quality, first_seen_at, fetched_at, read_at, html_path,
+                source_html_path, search_text
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, ?16, ?17)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, ?16, ?17, ?18)",
             params![
                 item.id,
                 item.feed_id,
@@ -1056,6 +1142,7 @@ impl RssReader {
                 item.extraction_quality,
                 seen_at,
                 html_path,
+                source_html_path,
                 search_text,
             ],
         )?;
@@ -1085,12 +1172,37 @@ impl RssReader {
                 .with_context(|| format!("write RSS item {}", absolute_content_path.display()))?;
         }
 
+        let source_html_path = if let Some(source_html) = item.source_html.as_deref() {
+            let source_html_path = existing
+                .source_html_path
+                .clone()
+                .unwrap_or_else(|| format!("{SOURCE_HTML_DIR}/{}.html", item.id));
+            self.write_item_source_html(&source_html_path, source_html)?;
+            Some(source_html_path)
+        } else {
+            existing.source_html_path.clone()
+        };
         let html_path = existing
             .html_path
             .clone()
             .unwrap_or_else(|| format!("{HTML_DIR}/{}.html", item.id));
-        let html = render_markdown_html_for_file(&content_markdown, &format!("rss/{}.md", item.id));
-        let html = resolve_rss_html_image_sources(&html, &item.url);
+        let existing_source_html = if item.source_html.is_some() {
+            None
+        } else {
+            source_html_path
+                .as_deref()
+                .and_then(|path| self.source_html_file_path(path))
+                .and_then(|path| fs::read_to_string(path).ok())
+                .filter(|html| !html.trim().is_empty())
+        };
+        let html = render_rss_display_html(
+            item.source_html
+                .as_deref()
+                .or(existing_source_html.as_deref()),
+            &content_markdown,
+            &item.id,
+            &item.url,
+        );
         let existing_html = self
             .html_file_path(&html_path)
             .and_then(|path| fs::read_to_string(path).ok())
@@ -1115,7 +1227,7 @@ impl RssReader {
                  author = ?7, published_at = ?8, updated_at = ?9, sort_at = ?10,
                  summary_md = ?11, content_path = ?12, content_source = ?13,
                  extraction_quality = ?14, fetched_at = ?15, html_path = ?16,
-                 search_text = ?17
+                 source_html_path = ?17, search_text = ?18
              WHERE id = ?1",
             params![
                 item.id,
@@ -1134,6 +1246,7 @@ impl RssReader {
                 item.extraction_quality,
                 now_string(),
                 html_path,
+                source_html_path,
                 search_text,
             ],
         )?;
@@ -1142,9 +1255,70 @@ impl RssReader {
 }
 
 #[derive(Debug)]
-struct ArticleMarkdown {
+struct ArticleContent {
     markdown: String,
+    html: Option<String>,
     quality: f64,
+}
+
+#[derive(Debug)]
+struct ArticleFallbackCandidate {
+    markdown: String,
+    text_len: usize,
+}
+
+fn fallback_article_content_from_html(html: &str) -> Option<ArticleContent> {
+    let document = Html::parse_document(html);
+    let mut best: Option<ArticleFallbackCandidate> = None;
+    for selector in ARTICLE_FALLBACK_SELECTORS {
+        let Ok(selector) = Selector::parse(selector) else {
+            continue;
+        };
+        for element in document.select(&selector) {
+            let element_html = element.inner_html();
+            let markdown = markup_to_markdown(&element_html, "text/html");
+            let text_len = article_markdown_text_len(&markdown);
+            if text_len < MIN_ARTICLE_MARKDOWN_CHARS {
+                continue;
+            }
+            let replace = best
+                .as_ref()
+                .map(|candidate| text_len > candidate.text_len)
+                .unwrap_or(true);
+            if replace {
+                best = Some(ArticleFallbackCandidate { markdown, text_len });
+            }
+        }
+    }
+
+    best.map(|candidate| ArticleContent {
+        markdown: candidate.markdown,
+        html: None,
+        quality: 0.5,
+    })
+}
+
+fn should_use_fallback_article_content(
+    article: &ArticleContent,
+    fallback: &ArticleContent,
+) -> bool {
+    let article_len = article_markdown_text_len(&article.markdown);
+    let fallback_len = article_markdown_text_len(&fallback.markdown);
+    if fallback_len < MIN_ARTICLE_MARKDOWN_CHARS {
+        return false;
+    }
+    if article_len < MIN_ARTICLE_MARKDOWN_CHARS {
+        return true;
+    }
+    if fallback_len >= article_len.saturating_mul(2) {
+        return true;
+    }
+    let article_links = markdown_link_count(&article.markdown);
+    article_links >= 3 && article_len < 1_000 && fallback_len >= article_len + 250
+}
+
+fn article_markdown_text_len(markdown: &str) -> usize {
+    markdown.chars().filter(|ch| !ch.is_whitespace()).count()
 }
 
 pub(crate) fn disabled_status(config: &Config) -> RssStatus {
@@ -1194,6 +1368,7 @@ fn init_db(path: &Path) -> Result<()> {
             summary_md TEXT,
             content_path TEXT,
             html_path TEXT,
+            source_html_path TEXT,
             search_text TEXT,
             content_source TEXT NOT NULL,
             extraction_quality REAL,
@@ -1210,6 +1385,7 @@ fn init_db(path: &Path) -> Result<()> {
     )?;
     ensure_column(&conn, "items", "starred_at", "TEXT")?;
     ensure_column(&conn, "items", "html_path", "TEXT")?;
+    ensure_column(&conn, "items", "source_html_path", "TEXT")?;
     ensure_column(&conn, "items", "search_text", "TEXT")?;
     ensure_column(&conn, "items", "sort_at", "TEXT")?;
     conn.execute(
@@ -1227,6 +1403,7 @@ fn init_db(path: &Path) -> Result<()> {
     )?;
     if let Some(data_dir) = path.parent() {
         backfill_email_markdown_content(&conn, data_dir)?;
+        backfill_rss_display_html(&conn, data_dir)?;
         backfill_item_search_text(&conn, data_dir)?;
     }
     conn.pragma_update(None, "user_version", RSS_SCHEMA_VERSION)?;
@@ -1293,8 +1470,7 @@ fn backfill_email_markdown_content(conn: &Connection, data_dir: &Path) -> Result
         fs::write(&absolute_content_path, &cleaned_content)
             .with_context(|| format!("write RSS item {}", absolute_content_path.display()))?;
         let html_path = html_path.unwrap_or_else(|| format!("{HTML_DIR}/{id}.html"));
-        let html = render_markdown_html_for_file(&cleaned_content, &format!("rss/{id}.md"));
-        let html = resolve_rss_html_image_sources(&html, &url);
+        let html = render_rss_display_html(None, &cleaned_content, &id, &url);
         let absolute_html_path = data_file_path(data_dir, &html_path, HTML_DIR)
             .with_context(|| format!("unsafe RSS HTML path {html_path}"))?;
         if let Some(parent) = absolute_html_path.parent() {
@@ -1313,6 +1489,65 @@ fn backfill_email_markdown_content(conn: &Connection, data_dir: &Path) -> Result
         conn.execute(
             "UPDATE items SET html_path = ?2, search_text = ?3 WHERE id = ?1",
             params![id, html_path, search_text],
+        )?;
+    }
+    Ok(())
+}
+
+fn backfill_rss_display_html(conn: &Connection, data_dir: &Path) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id, url, content_path, html_path, source_html_path
+         FROM items
+         WHERE content_path IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, url, content_path, html_path, source_html_path) in rows {
+        let Some(content_path) = content_path else {
+            continue;
+        };
+        let Some(absolute_content_path) = data_file_path(data_dir, &content_path, CONTENT_DIR)
+        else {
+            continue;
+        };
+        let Ok(existing_content) = fs::read_to_string(&absolute_content_path) else {
+            continue;
+        };
+        let content_markdown = normalize_markdown(&existing_content);
+        if content_markdown != existing_content {
+            fs::write(&absolute_content_path, &content_markdown)
+                .with_context(|| format!("write RSS item {}", absolute_content_path.display()))?;
+        }
+
+        let source_html = source_html_path
+            .as_deref()
+            .and_then(|path| data_file_path(data_dir, path, SOURCE_HTML_DIR))
+            .and_then(|path| fs::read_to_string(path).ok())
+            .filter(|html| !html.trim().is_empty());
+        let html_path = html_path.unwrap_or_else(|| format!("{HTML_DIR}/{id}.html"));
+        let html = render_rss_display_html(source_html.as_deref(), &content_markdown, &id, &url);
+        let absolute_html_path = data_file_path(data_dir, &html_path, HTML_DIR)
+            .with_context(|| format!("unsafe RSS HTML path {html_path}"))?;
+        let existing_html = fs::read_to_string(&absolute_html_path).unwrap_or_default();
+        if existing_html != html {
+            if let Some(parent) = absolute_html_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create RSS HTML dir {}", parent.display()))?;
+            }
+            fs::write(&absolute_html_path, html)
+                .with_context(|| format!("write RSS HTML {}", absolute_html_path.display()))?;
+        }
+        conn.execute(
+            "UPDATE items SET html_path = ?2 WHERE id = ?1",
+            params![id, html_path],
         )?;
     }
     Ok(())
@@ -1504,8 +1739,28 @@ fn entry_content_markdown(entry: &Entry) -> Option<String> {
         .filter(|markdown| !markdown.trim().is_empty())
 }
 
+fn entry_summary_html(entry: &Entry) -> Option<String> {
+    entry
+        .summary
+        .as_ref()
+        .and_then(text_to_html)
+        .filter(|html| !html.trim().is_empty())
+}
+
+fn entry_content_html(entry: &Entry) -> Option<String> {
+    entry
+        .content
+        .as_ref()
+        .and_then(content_to_html)
+        .filter(|html| !html.trim().is_empty())
+}
+
 fn text_to_markdown(text: &Text) -> String {
     markup_to_markdown(&text.content, text.content_type.as_str())
+}
+
+fn text_to_html(text: &Text) -> Option<String> {
+    markup_to_html(&text.content, text.content_type.as_str())
 }
 
 fn content_to_markdown(content: &Content) -> Option<String> {
@@ -1515,6 +1770,13 @@ fn content_to_markdown(content: &Content) -> Option<String> {
         .map(|body| markup_to_markdown(body, content.content_type.as_str()))
 }
 
+fn content_to_html(content: &Content) -> Option<String> {
+    content
+        .body
+        .as_deref()
+        .and_then(|body| markup_to_html(body, content.content_type.as_str()))
+}
+
 fn markup_to_markdown(content: &str, content_type: &str) -> String {
     let markdown = if content_type.contains("html") || content_type.contains("xhtml") {
         clean_html_email_markdown(&html2markdown::convert(content))
@@ -1522,6 +1784,60 @@ fn markup_to_markdown(content: &str, content_type: &str) -> String {
         content.to_string()
     };
     normalize_markdown(&markdown)
+}
+
+fn markup_to_html(content: &str, content_type: &str) -> Option<String> {
+    (content_type.contains("html") || content_type.contains("xhtml")).then(|| content.to_string())
+}
+
+fn render_rss_display_html(
+    source_html: Option<&str>,
+    content_markdown: &str,
+    item_id: &str,
+    base_url: &str,
+) -> String {
+    if let Some(source_html) = source_html.filter(|html| !html.trim().is_empty()) {
+        return normalize_rss_display_html(source_html, base_url);
+    }
+    let html = render_markdown_html_for_file(content_markdown, &format!("rss/{item_id}.md"));
+    normalize_rss_display_html(&html, base_url)
+}
+
+fn normalize_rss_display_html(html: &str, base_url: &str) -> String {
+    let html = sanitize_rss_display_html(html);
+    let html = resolve_rss_html_image_sources(&html, base_url);
+    let html = resolve_rss_html_picture_sources(&html, base_url);
+    let html = resolve_rss_html_anchor_hrefs(&html, base_url);
+    ensure_rss_html_anchor_attributes(&html)
+}
+
+fn sanitize_rss_display_html(html: &str) -> String {
+    let mut cleaner = ammonia::Builder::default();
+    cleaner
+        .add_tags([
+            "article",
+            "section",
+            "figure",
+            "figcaption",
+            "picture",
+            "source",
+            "table",
+            "thead",
+            "tbody",
+            "tfoot",
+            "tr",
+            "th",
+            "td",
+        ])
+        .add_tag_attributes("a", ["href", "title", "target"])
+        .add_tag_attributes(
+            "img",
+            ["src", "alt", "title", "width", "height", "srcset", "sizes"],
+        )
+        .add_tag_attributes("source", ["src", "srcset", "type", "media", "sizes"])
+        .add_tag_attributes("th", ["colspan", "rowspan"])
+        .add_tag_attributes("td", ["colspan", "rowspan"]);
+    cleaner.clean(html).to_string()
 }
 
 fn normalize_markdown(markdown: &str) -> String {
@@ -1795,27 +2111,34 @@ fn rss_item_sort_at(published_at: Option<&str>, updated_at: Option<&str>) -> Opt
         .map(ToString::to_string)
 }
 
-fn article_markdown_preserving_feed_images(
-    article_markdown: String,
+fn article_content_preserving_feed_images(
+    article: ArticleContent,
     feed_content_markdown: Option<&str>,
-) -> (String, &'static str) {
+    feed_source_html: Option<&str>,
+) -> (String, Option<String>, &'static str, f64) {
+    let article_quality = article.quality;
     let Some(feed_markdown) = feed_content_markdown else {
-        return (article_markdown, "article");
+        return (article.markdown, article.html, "article", article_quality);
     };
-    let article_images = markdown_image_count(&article_markdown);
+    let article_images = markdown_image_count(&article.markdown);
     let feed_images = markdown_image_count(feed_markdown);
-    let article_links = markdown_link_count(&article_markdown);
+    let article_links = markdown_link_count(&article.markdown);
     let feed_links = markdown_link_count(feed_markdown);
-    let article_len = article_markdown.trim().len();
+    let article_len = article.markdown.trim().len();
     let feed_len = feed_markdown.trim().len();
     let feed_is_link_poor = article_links >= 2 && feed_links.saturating_mul(2) < article_links;
     if feed_images > article_images
         && !feed_is_link_poor
         && feed_len >= article_len.saturating_mul(3) / 5
     {
-        (feed_markdown.to_string(), "feed_content")
+        (
+            feed_markdown.to_string(),
+            feed_source_html.map(ToString::to_string),
+            "feed_content",
+            article_quality,
+        )
     } else {
-        (article_markdown, "article")
+        (article.markdown, article.html, "article", article_quality)
     }
 }
 
@@ -1855,7 +2178,88 @@ fn resolve_rss_html_image_sources(html: &str, base_url: &str) -> String {
         let tag_end = start + tag_end_offset + 1;
         let tag = &html[start..tag_end];
         if is_img_tag(tag) {
-            output.push_str(&resolve_img_tag_src(tag, &base));
+            output.push_str(&resolve_media_tag_sources(tag, &base));
+        } else {
+            output.push_str(tag);
+        }
+        offset = tag_end;
+    }
+
+    output.push_str(&html[offset..]);
+    output
+}
+
+fn resolve_rss_html_picture_sources(html: &str, base_url: &str) -> String {
+    let Ok(base) = Url::parse(base_url) else {
+        return html.to_string();
+    };
+    let mut output = String::with_capacity(html.len());
+    let mut offset = 0;
+
+    while let Some(relative_start) = find_case_insensitive(&html[offset..], "<source") {
+        let start = offset + relative_start;
+        output.push_str(&html[offset..start]);
+        let Some(tag_end_offset) = html[start..].find('>') else {
+            output.push_str(&html[start..]);
+            return output;
+        };
+        let tag_end = start + tag_end_offset + 1;
+        let tag = &html[start..tag_end];
+        if is_source_tag(tag) {
+            output.push_str(&resolve_media_tag_sources(tag, &base));
+        } else {
+            output.push_str(tag);
+        }
+        offset = tag_end;
+    }
+
+    output.push_str(&html[offset..]);
+    output
+}
+
+fn resolve_rss_html_anchor_hrefs(html: &str, base_url: &str) -> String {
+    let Ok(base) = Url::parse(base_url) else {
+        return html.to_string();
+    };
+    let mut output = String::with_capacity(html.len());
+    let mut offset = 0;
+
+    while let Some(relative_start) = find_case_insensitive(&html[offset..], "<a") {
+        let start = offset + relative_start;
+        output.push_str(&html[offset..start]);
+        let Some(tag_end_offset) = html[start..].find('>') else {
+            output.push_str(&html[start..]);
+            return output;
+        };
+        let tag_end = start + tag_end_offset + 1;
+        let tag = &html[start..tag_end];
+        if is_anchor_tag(tag) {
+            output.push_str(&resolve_anchor_tag_href(tag, &base));
+        } else {
+            output.push_str(tag);
+        }
+        offset = tag_end;
+    }
+
+    output.push_str(&html[offset..]);
+    output
+}
+
+fn ensure_rss_html_anchor_attributes(html: &str) -> String {
+    let mut output = String::with_capacity(html.len());
+    let mut offset = 0;
+
+    while let Some(relative_start) = find_case_insensitive(&html[offset..], "<a") {
+        let start = offset + relative_start;
+        output.push_str(&html[offset..start]);
+        let Some(tag_end_offset) = html[start..].find('>') else {
+            output.push_str(&html[start..]);
+            return output;
+        };
+        let tag_end = start + tag_end_offset + 1;
+        let tag = &html[start..tag_end];
+        if is_anchor_tag(tag) {
+            output.push_str(&ensure_anchor_tag_attributes(tag));
         } else {
             output.push_str(tag);
         }
@@ -1867,36 +2271,120 @@ fn resolve_rss_html_image_sources(html: &str, base_url: &str) -> String {
 }
 
 fn is_img_tag(tag: &str) -> bool {
-    let mut chars = tag.chars();
-    matches!(chars.next(), Some('<'))
-        && matches!(chars.next(), Some(ch) if ch.eq_ignore_ascii_case(&'i'))
-        && matches!(chars.next(), Some(ch) if ch.eq_ignore_ascii_case(&'m'))
-        && matches!(chars.next(), Some(ch) if ch.eq_ignore_ascii_case(&'g'))
-        && chars
-            .next()
-            .map(|ch| ch.is_ascii_whitespace() || ch == '/' || ch == '>')
-            .unwrap_or(true)
+    is_html_tag(tag, "img")
 }
 
-fn resolve_img_tag_src(tag: &str, base: &Url) -> String {
-    let Some(src_range) = find_html_attr_value(tag, "src") else {
+fn is_anchor_tag(tag: &str) -> bool {
+    is_html_tag(tag, "a")
+}
+
+fn is_source_tag(tag: &str) -> bool {
+    is_html_tag(tag, "source")
+}
+
+fn is_html_tag(tag: &str, name: &str) -> bool {
+    let mut chars = tag.chars();
+    if !matches!(chars.next(), Some('<')) {
+        return false;
+    }
+    for expected in name.chars() {
+        if !matches!(chars.next(), Some(ch) if ch.eq_ignore_ascii_case(&expected)) {
+            return false;
+        }
+    }
+    chars
+        .next()
+        .map(|ch| ch.is_ascii_whitespace() || ch == '/' || ch == '>')
+        .unwrap_or(true)
+}
+
+fn resolve_media_tag_sources(tag: &str, base: &Url) -> String {
+    let tag = resolve_tag_url_attr(tag, "src", base);
+    resolve_tag_srcset_attr(&tag, base)
+}
+
+fn resolve_tag_url_attr(tag: &str, attr_name: &str, base: &Url) -> String {
+    let Some(value_range) = find_html_attr_value(tag, attr_name) else {
         return tag.to_string();
     };
-    let src = &tag[src_range.clone()];
-    let resolved = resolve_rss_image_src(src, base);
-    if resolved == src {
+    let value = &tag[value_range.clone()];
+    let resolved = resolve_rss_url_attr(value, base);
+    if resolved == value {
         return tag.to_string();
     }
-    let resolved = escape_html_attr(&resolved);
+    replace_html_attr_value(tag, value_range, &resolved)
+}
 
-    let mut output = String::with_capacity(tag.len() + resolved.len().saturating_sub(src.len()));
-    output.push_str(&tag[..src_range.start]);
-    output.push_str(&resolved);
-    output.push_str(&tag[src_range.end..]);
+fn resolve_tag_srcset_attr(tag: &str, base: &Url) -> String {
+    let Some(srcset_range) = find_html_attr_value(tag, "srcset") else {
+        return tag.to_string();
+    };
+    let srcset = &tag[srcset_range.clone()];
+    let resolved = resolve_rss_srcset_attr(srcset, base);
+    if resolved == srcset {
+        return tag.to_string();
+    }
+    replace_html_attr_value(tag, srcset_range, &resolved)
+}
+
+fn resolve_anchor_tag_href(tag: &str, base: &Url) -> String {
+    let Some(href_range) = find_html_attr_value(tag, "href") else {
+        return tag.to_string();
+    };
+    let href = &tag[href_range.clone()];
+    let resolved = resolve_rss_url_attr(href, base);
+    if resolved == href {
+        return tag.to_string();
+    }
+    replace_html_attr_value(tag, href_range, &resolved)
+}
+
+fn replace_html_attr_value(tag: &str, value_range: Range<usize>, value: &str) -> String {
+    let escaped = escape_html_attr(value);
+    let mut output = String::with_capacity(tag.len() + escaped.len().saturating_sub(value.len()));
+    output.push_str(&tag[..value_range.start]);
+    output.push_str(&escaped);
+    output.push_str(&tag[value_range.end..]);
     output
 }
 
-fn find_html_attr_value(tag: &str, attr_name: &str) -> Option<std::ops::Range<usize>> {
+fn ensure_anchor_tag_attributes(tag: &str) -> String {
+    let Some(href_range) = find_html_attr_value(tag, "href") else {
+        return tag.to_string();
+    };
+    let href = decode_html_attr_entities(&tag[href_range]);
+    if !matches!(
+        Url::parse(href.trim()).map(|url| matches!(url.scheme(), "http" | "https")),
+        Ok(true)
+    ) {
+        return tag.to_string();
+    }
+
+    let mut attrs = String::new();
+    if !has_html_attr(tag, "target") {
+        attrs.push_str(r#" target="_blank""#);
+    }
+    if !has_html_attr(tag, "rel") {
+        attrs.push_str(r#" rel="noopener noreferrer""#);
+    }
+    if attrs.is_empty() {
+        return tag.to_string();
+    }
+    let Some(insert_at) = tag.rfind('>') else {
+        return tag.to_string();
+    };
+    let mut output = String::with_capacity(tag.len() + attrs.len());
+    output.push_str(&tag[..insert_at]);
+    output.push_str(&attrs);
+    output.push_str(&tag[insert_at..]);
+    output
+}
+
+fn has_html_attr(tag: &str, attr_name: &str) -> bool {
+    find_html_attr_value(tag, attr_name).is_some()
+}
+
+fn find_html_attr_value(tag: &str, attr_name: &str) -> Option<Range<usize>> {
     let bytes = tag.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -1957,26 +2445,53 @@ fn find_html_attr_value(tag: &str, attr_name: &str) -> Option<std::ops::Range<us
     None
 }
 
-fn resolve_rss_image_src(src: &str, base: &Url) -> String {
-    let decoded = decode_html_attr_entities(src);
+fn resolve_rss_url_attr(value: &str, base: &Url) -> String {
+    let decoded = decode_html_attr_entities(value);
     let trimmed = decoded.trim();
     if trimmed.is_empty()
         || trimmed.starts_with('#')
         || trimmed.starts_with("data:")
         || trimmed.starts_with("blob:")
         || trimmed.starts_with("cid:")
+        || trimmed.starts_with("mailto:")
+        || trimmed.starts_with("tel:")
     {
-        return src.to_string();
+        return value.to_string();
     }
 
     let Ok(resolved) = base.join(trimmed) else {
-        return src.to_string();
+        return value.to_string();
     };
     if matches!(resolved.scheme(), "http" | "https") {
         resolved.to_string()
     } else {
-        src.to_string()
+        value.to_string()
     }
+}
+
+fn resolve_rss_srcset_attr(value: &str, base: &Url) -> String {
+    value
+        .split(',')
+        .map(|candidate| {
+            let trimmed = candidate.trim();
+            if trimmed.is_empty() {
+                return String::new();
+            }
+            let url_end = trimmed
+                .char_indices()
+                .find_map(|(index, ch)| ch.is_ascii_whitespace().then_some(index))
+                .unwrap_or(trimmed.len());
+            let url = &trimmed[..url_end];
+            let descriptor = trimmed[url_end..].trim();
+            let resolved = resolve_rss_url_attr(url, base);
+            if descriptor.is_empty() {
+                resolved
+            } else {
+                format!("{resolved} {descriptor}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn decode_html_attr_entities(value: &str) -> String {
@@ -2204,18 +2719,49 @@ mod tests {
     }
 
     #[test]
+    fn render_rss_display_html_prefers_sanitized_source_html() {
+        let html = render_rss_display_html(
+            Some(
+                r#"<article><h2><a href="/story?x=1&amp;y=2">Story</a></h2><p><img src="/img/a.jpg" srcset="/img/a.jpg 1x, b.jpg 2x"></p><script>alert(1)</script></article>"#,
+            ),
+            "Fallback **markdown**",
+            "item-id",
+            "https://example.test/posts/base/",
+        );
+
+        assert!(html.contains(r#"href="https://example.test/story?x=1&amp;y=2""#));
+        assert!(html.contains(r#"target="_blank""#));
+        assert!(html.contains(r#"rel="noopener noreferrer""#));
+        assert!(html.contains(r#"src="https://example.test/img/a.jpg""#));
+        assert!(html.contains(
+            r#"srcset="https://example.test/img/a.jpg 1x, https://example.test/posts/base/b.jpg 2x""#
+        ));
+        assert!(!html.contains("Fallback"));
+        assert!(!html.contains("<script"));
+    }
+
+    #[test]
     fn article_markdown_uses_feed_content_when_extraction_drops_images() {
-        let article = "Intro\n\nText\n\nEnding".to_string();
+        let article = ArticleContent {
+            markdown: "Intro\n\nText\n\nEnding".to_string(),
+            html: Some("<p>Intro</p><p>Text</p><p>Ending</p>".to_string()),
+            quality: 1.0,
+        };
         let feed = "Intro\n\n![](https://example.test/a.png)\n\nText\n\nEnding";
-        let (markdown, source) = article_markdown_preserving_feed_images(article, Some(feed));
+        let feed_html =
+            r#"<p>Intro</p><p><img src="https://example.test/a.png"></p><p>Text</p><p>Ending</p>"#;
+        let (markdown, html, source, quality) =
+            article_content_preserving_feed_images(article, Some(feed), Some(feed_html));
 
         assert_eq!(source, "feed_content");
+        assert_eq!(quality, 1.0);
         assert!(markdown.contains("https://example.test/a.png"));
+        assert_eq!(html.as_deref(), Some(feed_html));
     }
 
     #[test]
     fn article_markdown_keeps_article_when_feed_drops_links() {
-        let article = [
+        let article_markdown = [
             "Intro",
             "[First](https://example.test/one)",
             "[Second](https://example.test/two)",
@@ -2223,22 +2769,77 @@ mod tests {
             "Ending",
         ]
         .join("\n\n");
+        let article = ArticleContent {
+            markdown: article_markdown,
+            html: Some(
+                r#"<p>Intro</p><p><a href="https://example.test/one">First</a></p>"#.to_string(),
+            ),
+            quality: 1.0,
+        };
         let feed = "Intro\n\n![](https://example.test/a.png)\n\nFirst\n\nSecond\n\nText\n\nEnding";
-        let (markdown, source) = article_markdown_preserving_feed_images(article, Some(feed));
+        let (markdown, html, source, _) =
+            article_content_preserving_feed_images(article, Some(feed), None);
 
         assert_eq!(source, "article");
         assert!(markdown.contains("[First](https://example.test/one)"));
+        assert!(html.unwrap().contains("href=\"https://example.test/one\""));
         assert!(!markdown.contains("https://example.test/a.png"));
     }
 
     #[test]
     fn article_markdown_keeps_article_when_feed_is_only_a_short_teaser() {
-        let article = "Long article ".repeat(40);
+        let article = ArticleContent {
+            markdown: "Long article ".repeat(40),
+            html: Some("<p>Long article</p>".to_string()),
+            quality: 1.0,
+        };
         let feed = "![](https://example.test/a.png)\n\nTeaser";
-        let (markdown, source) = article_markdown_preserving_feed_images(article, Some(feed));
+        let (markdown, html, source, _) =
+            article_content_preserving_feed_images(article, Some(feed), None);
 
         assert_eq!(source, "article");
+        assert!(html.unwrap().contains("Long article"));
         assert!(!markdown.contains("https://example.test/a.png"));
+    }
+
+    #[test]
+    fn article_fallback_recovers_plain_text_content_container() {
+        let html = r#"
+        <!doctype html>
+        <html><body>
+          <nav><a href="/thoughts">thoughts</a></nav>
+          <div class="content"><h3>omarchy is not a distro</h3>
+omarchy is <a href="https://dhh.dk/">DHH</a>'s latest infatuation - omarchy
+<a href="https://github.com/basecamp/omarchy">describes itself</a> like so:
+
+> Omarchy is a beautiful, modern & opinionated Linux distribution by DHH.
+
+as a longtime frequenter of <a href="https://old.reddit.com/r/unixporn/">r/unixporn</a>,
+it was immediately apparent to me that omarchy is not a linux distribution in any traditional sense.
+
+the whole thing should probably just be a few gists.
+
+<h3>~~example time~~</h3>
+SUPER + SHIFT + ALT + A: opens "https://grok.com"
+SUPER + SHIFT + C: opens "https://app.hey.com/calendar/weeks/"
+
+what are we doing?? these are not the kinds of packages that any sane distro would ship.
+<a href="https://bsky.app/profile/example.test">~ jes</a>
+          </div>
+        </body></html>
+        "#;
+        let fallback = fallback_article_content_from_html(html).unwrap();
+        let broken = ArticleContent {
+            markdown: "### omarchy is not a distro\n\n[DHH](https://dhh.dk/)[describes itself](https://github.com/basecamp/omarchy)[r/unixporn](https://old.reddit.com/r/unixporn/)### ~~example time~~\n\n[~ jes](https://bsky.app/profile/example.test)\n".to_string(),
+            html: None,
+            quality: 0.75,
+        };
+
+        assert!(fallback.markdown.contains("latest infatuation"));
+        assert!(fallback.markdown.contains("not a linux distribution"));
+        assert!(fallback.markdown.contains("SUPER + SHIFT + ALT + A"));
+        assert!(fallback.html.is_none());
+        assert!(should_use_fallback_article_content(&broken, &fallback));
     }
 
     #[test]
@@ -2255,6 +2856,81 @@ mod tests {
         assert!(
             fs::read_to_string(&html_path)?.contains(r#"src="https://example.test/img/a.jpg""#)
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_item_writes_source_html_and_renders_it_for_details() -> Result<()> {
+        let (reader, root) = test_reader()?;
+        let feed_url = "https://example.test/feed.xml";
+        let feed_id = stable_id("feed", feed_url);
+        let item_id = stable_id("item", "source-html-item");
+        let checked_at = now_string();
+        reader.upsert_feed(FeedUpdate {
+            id: &feed_id,
+            url: feed_url,
+            title: "Example feed",
+            site_url: None,
+            etag: None,
+            last_modified: None,
+            checked_at: &checked_at,
+        })?;
+
+        reader.insert_item(ItemCandidate {
+            id: item_id.clone(),
+            feed_id,
+            feed_url: feed_url.to_string(),
+            guid: "source-html-item".to_string(),
+            url: "https://example.test/posts/story/".to_string(),
+            title: "Source HTML post".to_string(),
+            author: None,
+            published_at: None,
+            updated_at: None,
+            summary_md: Some("Summary".to_string()),
+            content_markdown: "Fallback markdown".to_string(),
+            source_html: Some(
+                r#"<p><a href="/source">Source link</a></p><p><img src="/img/source.jpg"></p>"#
+                    .to_string(),
+            ),
+            content_source: "article".to_string(),
+            extraction_quality: Some(1.0),
+        })?;
+
+        let mut item = reader.get_item(&item_id)?.unwrap();
+        let source_path = item.source_html_path.clone().unwrap();
+        let html = reader.rendered_item_html(&mut item)?;
+
+        assert!(reader.source_html_file_path(&source_path).unwrap().exists());
+        assert!(html.contains(r#"href="https://example.test/source""#));
+        assert!(html.contains(r#"src="https://example.test/img/source.jpg""#));
+        assert!(!html.contains("Fallback markdown"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn init_db_backfills_existing_html_cache_with_display_renderer() -> Result<()> {
+        let (reader, root) = test_reader()?;
+        let item_id = insert_test_item(&reader, "https://example.test/feed.xml", "html-backfill")?;
+        let content_path = reader.content_dir.join(format!("{item_id}.md"));
+        let html_path = reader.html_dir.join(format!("{item_id}.html"));
+        fs::write(
+            &content_path,
+            "## **1. **[What would you do?](/story)\n\nBody\n",
+        )?;
+        fs::write(
+            &html_path,
+            r#"<h2>**1. <a href="/story">What would you do?</a></h2>"#,
+        )?;
+
+        init_db(&reader.db_path)?;
+
+        let content = fs::read_to_string(&content_path)?;
+        let html = fs::read_to_string(&html_path)?;
+        assert!(!content.contains("**1."));
+        assert!(!html.contains("**1."));
+        assert!(html.contains(r#"href="https://example.test/story""#));
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -2279,6 +2955,7 @@ mod tests {
             updated_at: None,
             summary_md: Some("Updated summary".to_string()),
             content_markdown: "Full text\n\n![](/images/a.png)".to_string(),
+            source_html: None,
             content_source: "feed_content".to_string(),
             extraction_quality: None,
         })?);
@@ -2360,6 +3037,7 @@ mod tests {
             updated_at: None,
             summary_md: Some("Summary".to_string()),
             content_markdown: "Full text".to_string(),
+            source_html: None,
             content_source: "summary".to_string(),
             extraction_quality: None,
         })?;
@@ -2409,6 +3087,7 @@ mod tests {
             updated_at: None,
             summary_md: Some("Summary".to_string()),
             content_markdown: "Full text".to_string(),
+            source_html: None,
             content_source: "summary".to_string(),
             extraction_quality: None,
         })?;
@@ -2568,6 +3247,7 @@ mod tests {
             updated_at: None,
             summary_md: Some("Summary".to_string()),
             content_markdown: "Full text".to_string(),
+            source_html: None,
             content_source: "summary".to_string(),
             extraction_quality: None,
         })?;
@@ -2634,6 +3314,7 @@ mod tests {
             content_path: Some("content/item.md".to_string()),
             content_markdown: "raw markdown should not cross the wire".to_string(),
             html_path: Some("html/item.html".to_string()),
+            source_html_path: Some("source-html/item.html".to_string()),
         };
 
         let value = serde_json::to_value(detail)?;
@@ -2641,6 +3322,7 @@ mod tests {
         assert!(value.get("content_markdown").is_none());
         assert!(value.get("content_path").is_none());
         assert!(value.get("html_path").is_none());
+        assert!(value.get("source_html_path").is_none());
         assert_eq!(
             value.get("title").and_then(|title| title.as_str()),
             Some("Title")
@@ -2712,6 +3394,7 @@ mod tests {
             updated_at: None,
             summary_md: Some("Summary".to_string()),
             content_markdown: "Full text".to_string(),
+            source_html: None,
             content_source: "summary".to_string(),
             extraction_quality: None,
         })?;
@@ -2724,9 +3407,11 @@ mod tests {
         let data_dir = root.join("data").join("rss");
         let content_dir = data_dir.join(CONTENT_DIR);
         let html_dir = data_dir.join(HTML_DIR);
+        let source_html_dir = data_dir.join(SOURCE_HTML_DIR);
         fs::create_dir_all(&vault_path)?;
         fs::create_dir_all(&content_dir)?;
         fs::create_dir_all(&html_dir)?;
+        fs::create_dir_all(&source_html_dir)?;
         let db_path = data_dir.join("rss.sqlite");
         init_db(&db_path)?;
         Ok((
@@ -2737,6 +3422,7 @@ mod tests {
                 db_path,
                 content_dir,
                 html_dir,
+                source_html_dir,
                 refresh_minutes: 30,
                 max_items_per_feed: 20,
                 fetch_full_content: false,

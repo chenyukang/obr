@@ -55,6 +55,21 @@ const sandbox = {
     getElementById(id) {
       return elements[id] || null;
     },
+    createElement(tagName) {
+      return {
+        tagName: tagName.toUpperCase(),
+        className: "",
+        title: "",
+        attributes: {},
+        srcdoc: "",
+        setAttribute(name, value) {
+          this.attributes[name] = String(value);
+        },
+        getAttribute(name) {
+          return this.attributes[name] || null;
+        },
+      };
+    },
     querySelectorAll() {
       return [];
     },
@@ -106,6 +121,9 @@ this.__obrTest = {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  renderRssSandboxFrame,
+  rssFrameDocumentHtml,
+  RSS_IFRAME_SANDBOX,
 };`,
   sandbox,
 );
@@ -131,6 +149,9 @@ const {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  renderRssSandboxFrame,
+  rssFrameDocumentHtml,
+  RSS_IFRAME_SANDBOX,
 } = sandbox.__obrTest;
 
 function assertSource(expected) {
@@ -440,11 +461,43 @@ function assertRssCacheSignatures() {
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, read_at: "2026-05-25T00:00:01Z" }), false);
 }
 
+function assertRssSandboxFrame() {
+  assert.strictEqual(RSS_IFRAME_SANDBOX, "allow-popups");
+  assert(!RSS_IFRAME_SANDBOX.includes("allow-scripts"));
+  assert(!RSS_IFRAME_SANDBOX.includes("allow-same-origin"));
+  assert(!RSS_IFRAME_SANDBOX.includes("allow-forms"));
+
+  const doc = rssFrameDocumentHtml("<p>Hello</p>");
+  assert(doc.includes('<base target="_blank">'));
+  assert(doc.includes('<link rel="stylesheet" href="/assets/style.css">'));
+  assert(doc.includes("<p>Hello</p>"));
+
+  let child = null;
+  renderRssSandboxFrame(
+    {
+      replaceChildren(node) {
+        child = node;
+      },
+    },
+    "<p>Hello</p>",
+    "Post",
+  );
+
+  assert(child);
+  assert.strictEqual(child.tagName, "IFRAME");
+  assert.strictEqual(child.className, "rss-detail-frame");
+  assert.strictEqual(child.title, "Post");
+  assert.strictEqual(child.getAttribute("sandbox"), "allow-popups");
+  assert.strictEqual(child.getAttribute("referrerpolicy"), "no-referrer");
+  assert(child.srcdoc.includes("<p>Hello</p>"));
+}
+
 (async () => {
   await assertRssMarkReadFromList();
   await assertRssPagination();
   await assertRssListCacheRefresh();
   assertRssCacheSignatures();
+  assertRssSandboxFrame();
 })()
   .then(() => {
     console.log("editor and RSS regression tests passed");
