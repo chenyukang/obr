@@ -145,6 +145,10 @@ rss_data_dir = "data/rss"
 rss_refresh_minutes = 30
 rss_max_items_per_feed = 20
 rss_fetch_full_content = true
+rss_ai_summary_enabled = true
+rss_ai_summary_chars = 200
+deepseek_api_base = "https://api.deepseek.com"
+deepseek_model = "deepseek-v4-flash"
 passkey_store_path = "data/passkeys.json"
 webauthn_rp_name = "Obr"
 "#,

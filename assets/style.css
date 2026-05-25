@@ -1247,6 +1247,95 @@ main {
   font-weight: 800;
 }
 
+.rss-summary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.rss-summary-button .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.rss-summary-button.is-loading .icon {
+  animation: obr-spin 850ms linear infinite;
+}
+
+.rss-summary-button[disabled] {
+  opacity: 0.72;
+}
+
+.rss-ai-summary {
+  margin: 0 0 18px;
+  border-left: 3px solid var(--green);
+  padding-left: 12px;
+  color: #1f2f37;
+}
+
+.rss-ai-summary summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 850;
+  list-style: none;
+}
+
+.rss-ai-summary summary::-webkit-details-marker {
+  display: none;
+}
+
+.rss-ai-summary summary::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.rss-ai-summary[open] summary::before {
+  transform: rotate(45deg);
+}
+
+.rss-ai-summary summary span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.rss-ai-summary p {
+  margin: 10px 0 0;
+  color: #2c3b42;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.rss-ai-summary-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.rss-ai-summary-pending .icon {
+  width: 15px;
+  height: 15px;
+  animation: obr-spin 850ms linear infinite;
+}
+
 .rss-detail-loading {
   display: grid;
   justify-items: center;

@@ -15,12 +15,12 @@ use feed_rs::{
 };
 use reqwest::{
     Client, StatusCode,
-    header::{ETAG, HeaderMap, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED},
+    header::{CONTENT_TYPE, ETAG, HeaderMap, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED},
 };
 use rs_trafilatura::{Options as ExtractOptions, extract_bytes_with_options};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use scraper::{Html, Selector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 use url::Url;
@@ -31,13 +31,14 @@ use crate::{
     markdown::{escape_html_attr, render_markdown_html_for_file},
 };
 
-const RSS_SCHEMA_VERSION: i64 = 4;
+const RSS_SCHEMA_VERSION: i64 = 5;
 const CONTENT_DIR: &str = "content";
 const HTML_DIR: &str = "html";
 const SOURCE_HTML_DIR: &str = "source-html";
 const USER_AGENT_VALUE: &str = concat!("Obr/", env!("CARGO_PKG_VERSION"), " RSS Reader");
 const MIN_ARTICLE_MARKDOWN_CHARS: usize = 160;
 const RSS_LIST_SUMMARY_CHARS: usize = 420;
+const RSS_AI_SUMMARY_INPUT_CHARS: usize = 12_000;
 const ARTICLE_FALLBACK_SELECTORS: &[&str] = &[
     "article",
     "main article",
@@ -65,6 +66,7 @@ pub(crate) struct RssReader {
     refresh_minutes: u64,
     max_items_per_feed: usize,
     fetch_full_content: bool,
+    ai_summary: Option<AiSummaryConfig>,
     client: Client,
     refresh_lock: Arc<Mutex<()>>,
 }
@@ -145,6 +147,9 @@ pub(crate) struct RssItemDetail {
     pub(crate) fetched_at: Option<String>,
     pub(crate) read_at: Option<String>,
     pub(crate) starred_at: Option<String>,
+    pub(crate) ai_summary_zh: Option<String>,
+    pub(crate) ai_summary_model: Option<String>,
+    pub(crate) ai_summary_at: Option<String>,
     pub(crate) content_source: String,
     pub(crate) extraction_quality: Option<f64>,
     #[serde(skip_serializing)]
@@ -206,8 +211,67 @@ struct ItemCandidate {
     summary_md: Option<String>,
     content_markdown: String,
     source_html: Option<String>,
+    ai_summary: Option<AiSummary>,
     content_source: String,
     extraction_quality: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct AiSummaryConfig {
+    api_key: String,
+    api_base: String,
+    model: String,
+    target_chars: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AiSummary {
+    content: String,
+    model: String,
+    summarized_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ItemIdentity {
+    id: String,
+    guid: String,
+    url: String,
+}
+
+#[derive(Serialize)]
+struct DeepSeekChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<DeepSeekMessage<'a>>,
+    temperature: f32,
+    stream: bool,
+    thinking: DeepSeekThinking<'a>,
+}
+
+#[derive(Serialize)]
+struct DeepSeekMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Serialize)]
+struct DeepSeekThinking<'a> {
+    #[serde(rename = "type")]
+    r#type: &'a str,
+}
+
+#[derive(Deserialize)]
+struct DeepSeekChatResponse {
+    choices: Vec<DeepSeekChoice>,
+}
+
+#[derive(Deserialize)]
+struct DeepSeekChoice {
+    message: DeepSeekResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct DeepSeekResponseMessage {
+    content: Option<String>,
 }
 
 impl RssReader {
@@ -233,6 +297,7 @@ impl RssReader {
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .context("build RSS HTTP client")?;
+        let ai_summary = ai_summary_config(config);
         Ok(Some(Arc::new(Self {
             vault_path: config.vault_path.clone(),
             feeds_path: config.rss_feeds_path.clone(),
@@ -244,6 +309,7 @@ impl RssReader {
             refresh_minutes: config.rss_refresh_minutes,
             max_items_per_feed: config.rss_max_items_per_feed,
             fetch_full_content: config.rss_fetch_full_content,
+            ai_summary,
             client,
             refresh_lock: Arc::new(Mutex::new(())),
         })))
@@ -444,7 +510,8 @@ impl RssReader {
             .query_row(
                 "SELECT i.id, i.feed_id, COALESCE(f.title, f.url), f.url, i.title, i.url,
                         i.author, i.published_at, i.updated_at, i.first_seen_at, i.fetched_at,
-                        i.read_at, i.starred_at, i.content_source, i.extraction_quality,
+                        i.read_at, i.starred_at, i.ai_summary_zh, i.ai_summary_model,
+                        i.ai_summary_at, i.content_source, i.extraction_quality,
                         i.content_path, i.summary_md, i.html_path, i.source_html_path
                  FROM items i
                  JOIN feeds f ON f.id = i.feed_id
@@ -465,12 +532,15 @@ impl RssReader {
                         row.get::<_, Option<String>>(10)?,
                         row.get::<_, Option<String>>(11)?,
                         row.get::<_, Option<String>>(12)?,
-                        row.get::<_, String>(13)?,
-                        row.get::<_, Option<f64>>(14)?,
+                        row.get::<_, Option<String>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
                         row.get::<_, Option<String>>(15)?,
-                        row.get::<_, Option<String>>(16)?,
-                        row.get::<_, Option<String>>(17)?,
+                        row.get::<_, String>(16)?,
+                        row.get::<_, Option<f64>>(17)?,
                         row.get::<_, Option<String>>(18)?,
+                        row.get::<_, Option<String>>(19)?,
+                        row.get::<_, Option<String>>(20)?,
+                        row.get::<_, Option<String>>(21)?,
                     ))
                 },
             )
@@ -490,6 +560,9 @@ impl RssReader {
             fetched_at,
             read_at,
             starred_at,
+            ai_summary_zh,
+            ai_summary_model,
+            ai_summary_at,
             content_source,
             extraction_quality,
             content_path,
@@ -523,6 +596,9 @@ impl RssReader {
             fetched_at,
             read_at,
             starred_at,
+            ai_summary_zh,
+            ai_summary_model,
+            ai_summary_at,
             content_source,
             extraction_quality,
             content_path,
@@ -591,6 +667,43 @@ impl RssReader {
         Ok(warmed)
     }
 
+    pub(crate) fn can_summarize_items(&self) -> bool {
+        self.ai_summary.is_some()
+    }
+
+    pub(crate) async fn summarize_item(&self, id: &str) -> Result<Option<RssItemDetail>> {
+        let Some(mut item) = self.get_item(id)? else {
+            return Ok(None);
+        };
+        if item
+            .ai_summary_zh
+            .as_deref()
+            .is_some_and(|summary| !summary.trim().is_empty())
+        {
+            return Ok(Some(item));
+        }
+        let config = self
+            .ai_summary
+            .clone()
+            .ok_or_else(|| anyhow!("RSS AI summary is not configured"))?;
+        let Some(content) = self
+            .fetch_ai_summary(&config, &item.title, &item.url, &item.content_markdown)
+            .await?
+        else {
+            bail!("RSS item does not have enough content to summarize");
+        };
+        let summary = AiSummary {
+            content,
+            model: config.model,
+            summarized_at: now_string(),
+        };
+        self.save_item_ai_summary(&item, &summary)?;
+        item.ai_summary_zh = Some(summary.content);
+        item.ai_summary_model = Some(summary.model);
+        item.ai_summary_at = Some(summary.summarized_at);
+        Ok(Some(item))
+    }
+
     pub(crate) fn mark_item_read(&self, id: &str, read: bool) -> Result<bool> {
         let conn = self.connection()?;
         let changed = if read {
@@ -617,6 +730,33 @@ impl RssReader {
                 params![id],
             )?
         };
+        Ok(changed > 0)
+    }
+
+    fn save_item_ai_summary(&self, item: &RssItemDetail, summary: &AiSummary) -> Result<bool> {
+        let search_text = [
+            item.title.as_str(),
+            item.url.as_str(),
+            item.author.as_deref().unwrap_or_default(),
+            item.content_markdown.as_str(),
+            summary.content.as_str(),
+        ]
+        .join("\n")
+        .to_lowercase();
+        let conn = self.connection()?;
+        let changed = conn.execute(
+            "UPDATE items
+             SET ai_summary_zh = ?2, ai_summary_model = ?3, ai_summary_at = ?4,
+                 search_text = ?5
+             WHERE id = ?1",
+            params![
+                &item.id,
+                &summary.content,
+                &summary.model,
+                &summary.summarized_at,
+                search_text,
+            ],
+        )?;
         Ok(changed > 0)
     }
 
@@ -868,8 +1008,12 @@ impl RssReader {
 
         let mut stats = FeedRefreshStats::default();
         for entry in feed.entries.iter().take(self.max_items_per_feed) {
-            let candidate = self.item_candidate(&feed_id, feed_url, entry).await?;
-            if self.item_exists(&candidate.id)? {
+            let identity = item_identity(feed_url, entry);
+            let exists = self.item_exists(&identity.id)?;
+            let candidate = self
+                .item_candidate(&feed_id, feed_url, entry, identity, !exists)
+                .await?;
+            if exists {
                 self.update_existing_item(candidate)?;
                 continue;
             }
@@ -884,14 +1028,10 @@ impl RssReader {
         feed_id: &str,
         feed_url: &str,
         entry: &Entry,
+        identity: ItemIdentity,
+        include_ai_summary: bool,
     ) -> Result<ItemCandidate> {
-        let url = entry_url(entry).unwrap_or_else(|| entry.id.clone());
-        let guid = if entry.id.trim().is_empty() {
-            url.clone()
-        } else {
-            entry.id.clone()
-        };
-        let id = stable_id("item", &format!("{feed_url}\n{guid}"));
+        let ItemIdentity { id, guid, url } = identity;
         let title = entry_title(entry)
             .or_else(|| (!url.trim().is_empty()).then(|| url.clone()))
             .unwrap_or_else(|| "Untitled".to_string());
@@ -934,6 +1074,13 @@ impl RssReader {
             source_html = selected_html;
         }
 
+        let ai_summary = if include_ai_summary {
+            self.ai_summary_for_item(&id, &title, &url, &content_markdown)
+                .await
+        } else {
+            None
+        };
+
         Ok(ItemCandidate {
             id,
             feed_id: feed_id.to_string(),
@@ -947,9 +1094,108 @@ impl RssReader {
             summary_md,
             content_markdown,
             source_html,
+            ai_summary,
             content_source,
             extraction_quality,
         })
+    }
+
+    async fn ai_summary_for_item(
+        &self,
+        id: &str,
+        title: &str,
+        url: &str,
+        content_markdown: &str,
+    ) -> Option<AiSummary> {
+        let config = self.ai_summary.as_ref()?;
+        if !should_ai_summarize_rss_item(title, content_markdown) {
+            return None;
+        }
+        match self
+            .fetch_ai_summary(config, title, url, content_markdown)
+            .await
+        {
+            Ok(Some(content)) => Some(AiSummary {
+                content,
+                model: config.model.clone(),
+                summarized_at: now_string(),
+            }),
+            Ok(None) => None,
+            Err(err) => {
+                warn!(
+                    item = %id,
+                    url = %url,
+                    error = %err,
+                    "RSS AI summary failed"
+                );
+                None
+            }
+        }
+    }
+
+    async fn fetch_ai_summary(
+        &self,
+        config: &AiSummaryConfig,
+        title: &str,
+        url: &str,
+        content_markdown: &str,
+    ) -> Result<Option<String>> {
+        let input = ai_summary_input(title, url, content_markdown);
+        if input.trim().chars().count() < 80 {
+            return Ok(None);
+        }
+        let endpoint = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
+        let user_prompt = format!(
+            "请用约 {} 个中文字符总结这篇 RSS 文章；50 到 500 字之间都可以，自然完整优先。保留关键信息、人物、结论和有用细节。\n\n{}",
+            config.target_chars, input
+        );
+        let request = DeepSeekChatRequest {
+            model: &config.model,
+            messages: vec![
+                DeepSeekMessage {
+                    role: "system",
+                    content: "你是一个 RSS 阅读助手。请把英文文章总结成自然、准确的中文。只输出中文总结，不要标题、项目符号、免责声明或额外说明。",
+                },
+                DeepSeekMessage {
+                    role: "user",
+                    content: &user_prompt,
+                },
+            ],
+            temperature: 0.2,
+            stream: false,
+            thinking: DeepSeekThinking { r#type: "disabled" },
+        };
+        let request_body =
+            serde_json::to_vec(&request).context("serialize DeepSeek RSS summary request")?;
+        let response = self
+            .client
+            .post(endpoint)
+            .bearer_auth(&config.api_key)
+            .header(CONTENT_TYPE, "application/json")
+            .body(request_body)
+            .send()
+            .await
+            .context("request DeepSeek RSS summary")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("read DeepSeek RSS summary response")?;
+        if !status.is_success() {
+            bail!(
+                "DeepSeek summary returned HTTP {}: {}",
+                status,
+                truncate_chars(&body, 240)
+            );
+        }
+        let completion: DeepSeekChatResponse =
+            serde_json::from_str(&body).context("parse DeepSeek RSS summary response")?;
+        let content = completion
+            .choices
+            .into_iter()
+            .find_map(|choice| choice.message.content)
+            .and_then(|content| clean_ai_summary(&content));
+        Ok(content)
     }
 
     async fn fetch_article_content(&self, url: &str) -> Result<ArticleContent> {
@@ -1112,8 +1358,22 @@ impl RssReader {
             &item.url,
             item.author.as_deref(),
             item.summary_md.as_deref(),
+            item.ai_summary
+                .as_ref()
+                .map(|summary| summary.content.as_str()),
             &content_markdown,
         );
+        let (ai_summary_zh, ai_summary_model, ai_summary_at) = item
+            .ai_summary
+            .as_ref()
+            .map(|summary| {
+                (
+                    Some(summary.content.as_str()),
+                    Some(summary.model.as_str()),
+                    Some(summary.summarized_at.as_str()),
+                )
+            })
+            .unwrap_or((None, None, None));
         let seen_at = now_string();
         let sort_at = rss_item_sort_at(item.published_at.as_deref(), item.updated_at.as_deref());
         let conn = self.connection()?;
@@ -1122,28 +1382,32 @@ impl RssReader {
                 id, feed_id, feed_url, guid, url, title, author, published_at,
                 updated_at, sort_at, summary_md, content_path, content_source,
                 extraction_quality, first_seen_at, fetched_at, read_at, html_path,
-                source_html_path, search_text
+                source_html_path, search_text, ai_summary_zh, ai_summary_model,
+                ai_summary_at
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, ?16, ?17, ?18)",
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
-                item.id,
-                item.feed_id,
-                item.feed_url,
-                item.guid,
-                item.url,
-                item.title,
-                item.author,
-                item.published_at,
-                item.updated_at,
+                &item.id,
+                &item.feed_id,
+                &item.feed_url,
+                &item.guid,
+                &item.url,
+                &item.title,
+                item.author.as_deref(),
+                item.published_at.as_deref(),
+                item.updated_at.as_deref(),
                 sort_at,
-                item.summary_md,
+                item.summary_md.as_deref(),
                 content_path,
-                item.content_source,
+                &item.content_source,
                 item.extraction_quality,
                 seen_at,
                 html_path,
                 source_html_path,
                 search_text,
+                ai_summary_zh,
+                ai_summary_model,
+                ai_summary_at,
             ],
         )?;
         Ok(())
@@ -1212,11 +1476,25 @@ impl RssReader {
             self.write_item_html(&html_path, &html)?;
         }
 
+        let ai_summary_zh = item
+            .ai_summary
+            .as_ref()
+            .map(|summary| summary.content.as_str());
+        let ai_summary_model = item
+            .ai_summary
+            .as_ref()
+            .map(|summary| summary.model.as_str());
+        let ai_summary_at = item
+            .ai_summary
+            .as_ref()
+            .map(|summary| summary.summarized_at.as_str());
+        let effective_ai_summary = ai_summary_zh.or(existing.ai_summary_zh.as_deref());
         let search_text = build_item_search_text(
             &item.title,
             &item.url,
             item.author.as_deref(),
             item.summary_md.as_deref(),
+            effective_ai_summary,
             &content_markdown,
         );
         let sort_at = rss_item_sort_at(item.published_at.as_deref(), item.updated_at.as_deref());
@@ -1227,27 +1505,33 @@ impl RssReader {
                  author = ?7, published_at = ?8, updated_at = ?9, sort_at = ?10,
                  summary_md = ?11, content_path = ?12, content_source = ?13,
                  extraction_quality = ?14, fetched_at = ?15, html_path = ?16,
-                 source_html_path = ?17, search_text = ?18
+                 source_html_path = ?17, search_text = ?18,
+                 ai_summary_zh = COALESCE(?19, ai_summary_zh),
+                 ai_summary_model = CASE WHEN ?19 IS NULL THEN ai_summary_model ELSE ?20 END,
+                 ai_summary_at = CASE WHEN ?19 IS NULL THEN ai_summary_at ELSE ?21 END
              WHERE id = ?1",
             params![
-                item.id,
-                item.feed_id,
-                item.feed_url,
-                item.guid,
-                item.url,
-                item.title,
-                item.author,
-                item.published_at,
-                item.updated_at,
+                &item.id,
+                &item.feed_id,
+                &item.feed_url,
+                &item.guid,
+                &item.url,
+                &item.title,
+                item.author.as_deref(),
+                item.published_at.as_deref(),
+                item.updated_at.as_deref(),
                 sort_at,
-                item.summary_md,
+                item.summary_md.as_deref(),
                 content_path,
-                item.content_source,
+                &item.content_source,
                 item.extraction_quality,
                 now_string(),
                 html_path,
                 source_html_path,
                 search_text,
+                ai_summary_zh,
+                ai_summary_model,
+                ai_summary_at,
             ],
         )?;
         Ok(content_changed || html_changed)
@@ -1366,6 +1650,9 @@ fn init_db(path: &Path) -> Result<()> {
             updated_at TEXT,
             sort_at TEXT,
             summary_md TEXT,
+            ai_summary_zh TEXT,
+            ai_summary_model TEXT,
+            ai_summary_at TEXT,
             content_path TEXT,
             html_path TEXT,
             source_html_path TEXT,
@@ -1388,6 +1675,9 @@ fn init_db(path: &Path) -> Result<()> {
     ensure_column(&conn, "items", "source_html_path", "TEXT")?;
     ensure_column(&conn, "items", "search_text", "TEXT")?;
     ensure_column(&conn, "items", "sort_at", "TEXT")?;
+    ensure_column(&conn, "items", "ai_summary_zh", "TEXT")?;
+    ensure_column(&conn, "items", "ai_summary_model", "TEXT")?;
+    ensure_column(&conn, "items", "ai_summary_at", "TEXT")?;
     conn.execute(
         "UPDATE items
          SET sort_at = COALESCE(NULLIF(published_at, ''), NULLIF(updated_at, ''))",
@@ -1435,7 +1725,7 @@ fn open_connection(path: &Path) -> Result<Connection> {
 
 fn backfill_email_markdown_content(conn: &Connection, data_dir: &Path) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, url, author, summary_md, content_path, html_path
+        "SELECT id, title, url, author, summary_md, ai_summary_zh, content_path, html_path
          FROM items
          WHERE content_path IS NOT NULL",
     )?;
@@ -1448,10 +1738,11 @@ fn backfill_email_markdown_content(conn: &Connection, data_dir: &Path) -> Result
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, title, url, author, summary_md, content_path, html_path) in rows {
+    for (id, title, url, author, summary_md, ai_summary_zh, content_path, html_path) in rows {
         let Some(content_path) = content_path else {
             continue;
         };
@@ -1484,6 +1775,7 @@ fn backfill_email_markdown_content(conn: &Connection, data_dir: &Path) -> Result
             &url,
             author.as_deref(),
             summary_md.as_deref(),
+            ai_summary_zh.as_deref(),
             &cleaned_content,
         );
         conn.execute(
@@ -1555,7 +1847,7 @@ fn backfill_rss_display_html(conn: &Connection, data_dir: &Path) -> Result<()> {
 
 fn backfill_item_search_text(conn: &Connection, data_dir: &Path) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, url, author, summary_md, content_path
+        "SELECT id, title, url, author, summary_md, ai_summary_zh, content_path
          FROM items
          WHERE search_text IS NULL OR search_text = ''",
     )?;
@@ -1567,6 +1859,7 @@ fn backfill_item_search_text(conn: &Connection, data_dir: &Path) -> Result<()> {
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1574,7 +1867,7 @@ fn backfill_item_search_text(conn: &Connection, data_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    for (id, title, url, author, summary_md, content_path) in rows {
+    for (id, title, url, author, summary_md, ai_summary_zh, content_path) in rows {
         let content_markdown = content_path
             .as_deref()
             .and_then(|path| data_file_path(data_dir, path, CONTENT_DIR))
@@ -1585,6 +1878,7 @@ fn backfill_item_search_text(conn: &Connection, data_dir: &Path) -> Result<()> {
             &url,
             author.as_deref(),
             summary_md.as_deref(),
+            ai_summary_zh.as_deref(),
             &content_markdown,
         );
         conn.execute(
@@ -1606,6 +1900,113 @@ fn data_file_path(data_dir: &Path, relative_path: &str, root_dir: &str) -> Optio
         return None;
     }
     Some(data_dir.join(path))
+}
+
+fn ai_summary_config(config: &Config) -> Option<AiSummaryConfig> {
+    if !config.rss_ai_summary_enabled {
+        return None;
+    }
+    let api_key = config
+        .deepseek_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())?;
+    Some(AiSummaryConfig {
+        api_key: api_key.to_string(),
+        api_base: config.deepseek_api_base.trim().to_string(),
+        model: config.deepseek_model.trim().to_string(),
+        target_chars: config.rss_ai_summary_chars,
+    })
+}
+
+fn item_identity(feed_url: &str, entry: &Entry) -> ItemIdentity {
+    let url = entry_url(entry).unwrap_or_else(|| entry.id.clone());
+    let guid = if entry.id.trim().is_empty() {
+        url.clone()
+    } else {
+        entry.id.clone()
+    };
+    let id = stable_id("item", &format!("{feed_url}\n{guid}"));
+    ItemIdentity { id, guid, url }
+}
+
+fn should_ai_summarize_rss_item(title: &str, content_markdown: &str) -> bool {
+    let sample = format!("{title}\n\n{}", take_chars(content_markdown, 4_000));
+    let mut han = 0usize;
+    let mut meaningful = 0usize;
+    for ch in sample.chars() {
+        if ch.is_whitespace() || ch.is_ascii_punctuation() {
+            continue;
+        }
+        if is_han_char(ch) {
+            han += 1;
+            meaningful += 1;
+        } else if ch.is_alphanumeric() {
+            meaningful += 1;
+        }
+    }
+    if meaningful < 40 {
+        return false;
+    }
+    !(han >= 20 && han.saturating_mul(100) >= meaningful.saturating_mul(15))
+}
+
+fn is_han_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{2A6DF}'
+            | '\u{2A700}'..='\u{2B73F}'
+            | '\u{2B740}'..='\u{2B81F}'
+            | '\u{2B820}'..='\u{2CEAF}'
+            | '\u{2CEB0}'..='\u{2EBEF}'
+            | '\u{30000}'..='\u{3134F}'
+    )
+}
+
+fn ai_summary_input(title: &str, url: &str, content_markdown: &str) -> String {
+    let mut input = String::new();
+    input.push_str("Title: ");
+    input.push_str(title.trim());
+    input.push_str("\nURL: ");
+    input.push_str(url.trim());
+    input.push_str("\n\nContent:\n");
+    input.push_str(&take_chars(content_markdown, RSS_AI_SUMMARY_INPUT_CHARS));
+    input
+}
+
+fn clean_ai_summary(content: &str) -> Option<String> {
+    let cleaned = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cleaned = cleaned
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
+        .trim();
+    let cleaned = cleaned
+        .strip_prefix("中文总结：")
+        .or_else(|| cleaned.strip_prefix("总结："))
+        .or_else(|| cleaned.strip_prefix("摘要："))
+        .unwrap_or(cleaned)
+        .trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
+fn take_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    let mut output = value.chars().take(limit).collect::<String>();
+    if value.chars().count() > limit {
+        output.push_str("...");
+    }
+    output
 }
 
 fn parse_feed_urls(raw: &str) -> Vec<String> {
@@ -1653,6 +2054,7 @@ fn build_item_search_text(
     url: &str,
     author: Option<&str>,
     summary_md: Option<&str>,
+    ai_summary_zh: Option<&str>,
     content_markdown: &str,
 ) -> String {
     [
@@ -1660,6 +2062,7 @@ fn build_item_search_text(
         url,
         author.unwrap_or_default(),
         summary_md.unwrap_or_default(),
+        ai_summary_zh.unwrap_or_default(),
         content_markdown,
     ]
     .join("\n")
@@ -1843,12 +2246,72 @@ fn sanitize_rss_display_html(html: &str) -> String {
 fn normalize_markdown(markdown: &str) -> String {
     let normalized = markdown.replace("\r\n", "\n").replace('\r', "\n");
     let normalized = clean_markdown_heading_strong_markers(&normalized);
+    let normalized = clean_leading_orphan_metadata_bullets(&normalized);
     let trimmed = normalized.trim();
     if trimmed.is_empty() {
         String::new()
     } else {
         format!("{trimmed}\n")
     }
+}
+
+fn clean_leading_orphan_metadata_bullets(markdown: &str) -> String {
+    let lines = markdown.lines().collect::<Vec<_>>();
+    let mut index = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let start = index;
+    let mut bullet_count = 0usize;
+    let mut saw_metadata = false;
+
+    while index < lines.len() {
+        let line = lines[index];
+        if line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        if line.trim() != "-" {
+            break;
+        }
+
+        bullet_count += 1;
+        index += 1;
+        while index < lines.len() {
+            let line = lines[index];
+            let trimmed = line.trim();
+            if trimmed == "-" {
+                break;
+            }
+            if !trimmed.is_empty() && !is_markdown_code_indent(line) {
+                break;
+            }
+            if is_article_metadata_fragment(trimmed) {
+                saw_metadata = true;
+            }
+            index += 1;
+        }
+    }
+
+    while index < lines.len() && lines[index].trim().is_empty() {
+        index += 1;
+    }
+    if bullet_count >= 3 && saw_metadata && index < lines.len() {
+        lines[index..].join("\n")
+    } else {
+        lines[start..].join("\n")
+    }
+}
+
+fn is_markdown_code_indent(line: &str) -> bool {
+    line.starts_with('\t') || line.starts_with("    ")
+}
+
+fn is_article_metadata_fragment(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    matches!(lower.as_str(), "content type" | "topic" | "tags")
+        || lower.contains("min read")
+        || lower.contains("project updates")
 }
 
 fn clean_markdown_heading_strong_markers(markdown: &str) -> String {
@@ -2705,6 +3168,69 @@ mod tests {
     }
 
     #[test]
+    fn normalize_markdown_drops_leading_metadata_bullet_code_blocks() {
+        let markdown = normalize_markdown(
+            r#"
+-
+    [Project updates](https://example.test/content-type/project-updates/)
+
+    •
+
+    2 min read # Article title
+-
+    By [Author](https://example.test/author)
+-
+    Content type
+-
+    [Project updates](https://example.test/content-type/project-updates/)
+-
+    Topic
+-
+    [Tools](https://example.test/topic/tools/)
+
+Today, real article text starts here.
+"#,
+        );
+
+        assert!(markdown.starts_with("Today, real article text starts here."));
+        assert!(!markdown.contains("Project updates"));
+        assert!(!markdown.contains("Content type"));
+    }
+
+    #[test]
+    fn normalize_markdown_keeps_regular_leading_lists() {
+        let markdown = normalize_markdown(
+            r#"
+- First point
+- Second point
+
+Body
+"#,
+        );
+
+        assert!(markdown.starts_with("- First point"));
+        assert!(markdown.contains("- Second point"));
+    }
+
+    #[test]
+    fn ai_summary_detection_skips_chinese_and_accepts_english() {
+        let chinese = "这是一篇中文文章，讨论本地优先软件、RSS 阅读器和移动端体验。".repeat(20);
+        let english = "This article explains how local-first RSS readers can cache article metadata, preserve links, and keep the reading interface responsive. ".repeat(20);
+
+        assert!(!should_ai_summarize_rss_item("中文文章", &chinese));
+        assert!(should_ai_summarize_rss_item("Local-first RSS", &english));
+    }
+
+    #[test]
+    fn clean_ai_summary_preserves_natural_length() {
+        let long_summary = format!("中文总结：{}", "这段总结不应该被服务端硬截断。".repeat(60));
+        let cleaned = clean_ai_summary(&long_summary).unwrap();
+
+        assert!(cleaned.starts_with("这段总结"));
+        assert!(cleaned.chars().count() > 500);
+    }
+
+    #[test]
     fn resolves_rss_html_image_sources_against_item_url() {
         let html = r#"<p><img src="/img/a.jpg"><IMG alt="b" SRC='b.png'><img src="https://cdn.example.test/c.png"><img src="/img/query.jpg?a=1&amp;b=2"><img src="data:image/png;base64,abc"><image src="/not-img"></p>"#;
         let resolved =
@@ -2893,6 +3419,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
                 r#"<p><a href="/source">Source link</a></p><p><img src="/img/source.jpg"></p>"#
                     .to_string(),
             ),
+            ai_summary: None,
             content_source: "article".to_string(),
             extraction_quality: Some(1.0),
         })?;
@@ -2956,6 +3483,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             summary_md: Some("Updated summary".to_string()),
             content_markdown: "Full text\n\n![](/images/a.png)".to_string(),
             source_html: None,
+            ai_summary: None,
             content_source: "feed_content".to_string(),
             extraction_quality: None,
         })?);
@@ -3038,6 +3566,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             summary_md: Some("Summary".to_string()),
             content_markdown: "Full text".to_string(),
             source_html: None,
+            ai_summary: None,
             content_source: "summary".to_string(),
             extraction_quality: None,
         })?;
@@ -3088,6 +3617,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             summary_md: Some("Summary".to_string()),
             content_markdown: "Full text".to_string(),
             source_html: None,
+            ai_summary: None,
             content_source: "summary".to_string(),
             extraction_quality: None,
         })?;
@@ -3143,6 +3673,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
                     &format!("https://example.test/{item_id}"),
                     None,
                     Some("Borrow checker links"),
+                    None,
                     "A lifetimes deep dive.\n",
                 ),
                 item_id,
@@ -3171,6 +3702,82 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
     }
 
     #[test]
+    fn insert_item_stores_ai_summary_for_detail_and_search() -> Result<()> {
+        let (reader, root) = test_reader()?;
+        let feed_url = "https://example.test/feed.xml";
+        let feed_id = stable_id("feed", feed_url);
+        let item_id = stable_id("item", "ai-summary-item");
+        reader.upsert_feed(FeedUpdate {
+            id: &feed_id,
+            url: feed_url,
+            title: "Example feed",
+            site_url: None,
+            etag: None,
+            last_modified: None,
+            checked_at: &now_string(),
+        })?;
+        reader.insert_item(ItemCandidate {
+            id: item_id.clone(),
+            feed_id,
+            feed_url: feed_url.to_string(),
+            guid: "ai-summary-item".to_string(),
+            url: "https://example.test/ai-summary-item".to_string(),
+            title: "English post".to_string(),
+            author: None,
+            published_at: None,
+            updated_at: None,
+            summary_md: Some("Summary".to_string()),
+            content_markdown: "Full text".to_string(),
+            source_html: None,
+            ai_summary: Some(AiSummary {
+                content: "这是一段自动中文摘要，包含可搜索关键词。".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                summarized_at: "2026-05-25T00:00:00Z".to_string(),
+            }),
+            content_source: "summary".to_string(),
+            extraction_quality: None,
+        })?;
+
+        let item = reader.get_item(&item_id)?.unwrap();
+        let matches = reader.list_items(RssItemFilter::Unread, 10, 0, Some("可搜索关键词"))?;
+
+        assert_eq!(
+            item.ai_summary_zh.as_deref(),
+            Some("这是一段自动中文摘要，包含可搜索关键词。")
+        );
+        assert_eq!(item.ai_summary_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(matches.len(), 1);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn save_item_ai_summary_updates_detail_and_search() -> Result<()> {
+        let (reader, root) = test_reader()?;
+        let item_id = insert_test_item(&reader, "https://example.test/feed.xml", "manual-summary")?;
+        let item = reader.get_item(&item_id)?.unwrap();
+        reader.save_item_ai_summary(
+            &item,
+            &AiSummary {
+                content: "手动生成的中文总结，包含手动关键词。".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                summarized_at: "2026-05-25T00:00:00Z".to_string(),
+            },
+        )?;
+
+        let item = reader.get_item(&item_id)?.unwrap();
+        let matches = reader.list_items(RssItemFilter::Unread, 10, 0, Some("手动关键词"))?;
+
+        assert_eq!(
+            item.ai_summary_zh.as_deref(),
+            Some("手动生成的中文总结，包含手动关键词。")
+        );
+        assert_eq!(matches.len(), 1);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn list_items_returns_short_summary_preview() -> Result<()> {
         let (reader, root) = test_reader()?;
         let item_id = insert_test_item(&reader, "https://example.test/feed.xml", "long-summary")?;
@@ -3185,6 +3792,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
                     "https://example.test/long-summary",
                     None,
                     Some(&"x".repeat(RSS_LIST_SUMMARY_CHARS + 200)),
+                    None,
                     "Full text",
                 ),
                 item_id,
@@ -3248,6 +3856,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             summary_md: Some("Summary".to_string()),
             content_markdown: "Full text".to_string(),
             source_html: None,
+            ai_summary: None,
             content_source: "summary".to_string(),
             extraction_quality: None,
         })?;
@@ -3309,6 +3918,9 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             fetched_at: None,
             read_at: None,
             starred_at: None,
+            ai_summary_zh: Some("中文总结".to_string()),
+            ai_summary_model: Some("deepseek-v4-flash".to_string()),
+            ai_summary_at: Some("2026-05-25T00:00:01Z".to_string()),
             content_source: "summary".to_string(),
             extraction_quality: None,
             content_path: Some("content/item.md".to_string()),
@@ -3326,6 +3938,12 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
         assert_eq!(
             value.get("title").and_then(|title| title.as_str()),
             Some("Title")
+        );
+        assert_eq!(
+            value
+                .get("ai_summary_zh")
+                .and_then(|summary| summary.as_str()),
+            Some("中文总结")
         );
         Ok(())
     }
@@ -3395,6 +4013,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             summary_md: Some("Summary".to_string()),
             content_markdown: "Full text".to_string(),
             source_html: None,
+            ai_summary: None,
             content_source: "summary".to_string(),
             extraction_quality: None,
         })?;
@@ -3426,6 +4045,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
                 refresh_minutes: 30,
                 max_items_per_feed: 20,
                 fetch_full_content: false,
+                ai_summary: None,
                 client: Client::builder().build()?,
                 refresh_lock: Arc::new(Mutex::new(())),
             },

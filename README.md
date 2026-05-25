@@ -102,6 +102,12 @@ rss_data_dir = "data/rss"
 rss_refresh_minutes = 30
 rss_max_items_per_feed = 20
 rss_fetch_full_content = true
+rss_ai_summary_enabled = true
+rss_ai_summary_chars = 200
+# Optional: enables Chinese summaries for newly fetched non-Chinese posts.
+deepseek_api_key = "sk-..."
+deepseek_api_base = "https://api.deepseek.com"
+deepseek_model = "deepseek-v4-flash"
 ```
 
 `rss_feeds_path` is relative to `vault_path` and should contain one RSS, Atom,
@@ -117,6 +123,13 @@ source of truth: removing a feed URL from the file removes that feed's stored
 items and article Markdown on the next scan. The RSS detail page also has an
 Unsubscribe action, which removes the feed URL from `rss_feeds_path` and prunes
 that feed's cached items immediately.
+
+If `deepseek_api_key` is configured and `rss_ai_summary_enabled = true`, newly
+fetched non-Chinese posts are sent to the configured OpenAI-compatible chat API
+for an automatic Chinese summary. `rss_ai_summary_chars` is a soft target for
+the prompt, not a hard server-side truncation limit; the default asks for about
+200 Chinese characters and allows the model to stay natural. Existing items are
+not summarized again during ordinary refreshes.
 
 ## Security Model
 

@@ -27,6 +27,7 @@ const state = {
   rssFilter: "unread",
   rssItemsRequestId: 0,
   rssItemRequestId: 0,
+  rssSummaryRequestId: 0,
   rssDetailRenderId: 0,
   rssItemsCache: new Map(),
   rssItemCache: new Map(),
@@ -161,6 +162,8 @@ const ICONS = {
     '<circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path>',
   shuffle:
     '<path d="m18 14 4 4-4 4"></path><path d="m18 2 4 4-4 4"></path><path d="M2 18h1.9a6 6 0 0 0 5.2-3l5.8-10A6 6 0 0 1 20.1 2H22"></path><path d="M2 6h1.9a6 6 0 0 1 5.2 3l.7 1.2"></path><path d="M14.9 19a6 6 0 0 0 5.2 3H22"></path>',
+  sparkles:
+    '<path d="M11.5 2.5 13 8l5.5 1.5L13 11l-1.5 5.5L10 11 4.5 9.5 10 8z"></path><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"></path><path d="M5 14l.7 1.8L7.5 16.5l-1.8.7L5 19l-.7-1.8-1.8-.7 1.8-.7z"></path>',
   star:
     '<path d="M11.5 2.8a.55.55 0 0 1 1 0l2.3 4.7a2.1 2.1 0 0 0 1.6 1.2l5.2.8a.55.55 0 0 1 .3.9l-3.8 3.7a2.1 2.1 0 0 0-.6 1.9l.9 5.2a.55.55 0 0 1-.8.6L13 19.3a2.1 2.1 0 0 0-2 0l-4.6 2.4a.55.55 0 0 1-.8-.6l.9-5.2a2.1 2.1 0 0 0-.6-1.9L2.1 10.4a.55.55 0 0 1 .3-.9l5.2-.8a2.1 2.1 0 0 0 1.6-1.2z"></path>',
   "trash-2":
@@ -335,6 +338,13 @@ function bindEvents() {
     if (blockEdit) {
       event.preventDefault();
       await openBlockEditorAt(Number(blockEdit.dataset.blockIndex || 0));
+      return;
+    }
+
+    const rssSummary = event.target.closest("[data-rss-summary]");
+    if (rssSummary) {
+      event.preventDefault();
+      await summarizeCurrentRssItem(rssSummary);
       return;
     }
 
@@ -2703,6 +2713,9 @@ function rssItemDetailSignature(item) {
     fetched_at: item?.fetched_at || "",
     read_at: item?.read_at || "",
     starred_at: item?.starred_at || "",
+    ai_summary_zh: item?.ai_summary_zh || "",
+    ai_summary_model: item?.ai_summary_model || "",
+    ai_summary_at: item?.ai_summary_at || "",
     content_source: item?.content_source || "",
     extraction_quality: item?.extraction_quality ?? null,
     html: item?.html || "",
@@ -2750,12 +2763,13 @@ function renderRssDetailPage(item, options = {}) {
       ${feedSourceHtml}
       ${publishedAt ? `<span>${escapeHtml(publishedAt)}</span>` : ""}
       ${item.url ? `<a href="${escapeHtmlAttr(item.url)}" target="_blank" rel="noopener noreferrer">Original</a>` : ""}
+      ${rssSummaryActionHtml(item)}
     </p>
   `;
   const bodyHtml = item.html?.trim() ? item.html : '<p class="empty">No content.</p>';
   showPage(
     item.title || "Untitled",
-    `${metaHtml}<div class="rss-detail-frame-shell" data-rss-frame-root></div>`,
+    `${metaHtml}${rssAiSummaryHtml(item)}<div class="rss-detail-frame-shell" data-rss-frame-root></div>`,
     "rss",
     { ...options, editable: false, restoreReading: false, deferEnhancements: true },
   );
@@ -2766,6 +2780,78 @@ function renderRssDetailPage(item, options = {}) {
   );
   scheduleRssDetailEnhancements(renderId);
   updateRssPageActions();
+}
+
+function rssAiSummaryHtml(item) {
+  const summary = (item?.ai_summary_zh || "").trim();
+  if (!summary) return "";
+  const model = (item?.ai_summary_model || "").trim();
+  const meta = model ? `<span>${escapeHtml(model)}</span>` : "";
+  return `
+    <details class="rss-ai-summary">
+      <summary><strong>中文总结</strong>${meta}</summary>
+      <p>${escapeHtml(summary).replace(/\n/g, "<br>")}</p>
+    </details>
+  `;
+}
+
+function rssSummaryActionHtml(item) {
+  if ((item?.ai_summary_zh || "").trim()) return "";
+  if (!item?.id) return "";
+  return `<button class="rss-summary-button" type="button" data-rss-summary="${escapeHtmlAttr(item.id)}">${iconSvg("sparkles")}<span>Summary</span></button>`;
+}
+
+async function summarizeCurrentRssItem(button) {
+  const id = button?.dataset?.rssSummary || state.rssSelectedItemId;
+  if (!id) return;
+  const requestId = state.rssSummaryRequestId + 1;
+  state.rssSummaryRequestId = requestId;
+  button.disabled = true;
+  button.classList.add("is-loading");
+  button.setAttribute("aria-busy", "true");
+  button.innerHTML = `${iconSvg("loader")}<span>Summarizing</span>`;
+  renderRssSummaryPending();
+  setRssStatus("Summarizing RSS item...", "loading");
+  try {
+    const response = await request(`/api/rss/items/${encodeURIComponent(id)}/summary`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 120000,
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const item = await response.json();
+    if (requestId !== state.rssSummaryRequestId) return;
+    state.rssItemCache.set(id, item);
+    renderRssDetailPage(item, { updateHistory: false, saveScroll: false });
+    setRssStatus("");
+    showToast("Summary ready.");
+  } catch (error) {
+    if (requestId !== state.rssSummaryRequestId) return;
+    console.error(error);
+    button.disabled = false;
+    button.classList.remove("is-loading");
+    button.removeAttribute("aria-busy");
+    button.innerHTML = `${iconSvg("sparkles")}<span>Summary</span>`;
+    clearRssSummaryPending();
+    setRssStatus(error.message || "Summary failed.", "error");
+  }
+}
+
+function renderRssSummaryPending() {
+  const content = el("page-content");
+  if (!content || content.querySelector("[data-rss-summary-pending]")) return;
+  const frameRoot = content.querySelector("[data-rss-frame-root]");
+  const pending = document.createElement("div");
+  pending.className = "rss-ai-summary rss-ai-summary-pending";
+  pending.dataset.rssSummaryPending = "1";
+  pending.setAttribute("role", "status");
+  pending.setAttribute("aria-live", "polite");
+  pending.innerHTML = `${iconSvg("loader")}<span>Generating summary...</span>`;
+  content.insertBefore(pending, frameRoot || content.firstChild);
+}
+
+function clearRssSummaryPending() {
+  el("page-content")?.querySelector("[data-rss-summary-pending]")?.remove();
 }
 
 function renderRssSandboxFrame(root, html, title = "RSS content") {

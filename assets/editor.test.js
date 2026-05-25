@@ -7,6 +7,22 @@ const pageEditor = { value: "", hidden: false };
 let activeBlockTextarea = null;
 let rssListHtml = "";
 let rssListWrites = 0;
+let pendingSummaryNode = null;
+const rssFrameRootNode = { dataset: { rssFrameRoot: "1" } };
+const pageContent = {
+  hidden: false,
+  firstChild: rssFrameRootNode,
+  insertedBefore: null,
+  querySelector(selector) {
+    if (selector === "[data-rss-summary-pending]") return pendingSummaryNode;
+    if (selector === "[data-rss-frame-root]") return rssFrameRootNode;
+    return null;
+  },
+  insertBefore(node, referenceNode) {
+    pendingSummaryNode = node;
+    this.insertedBefore = referenceNode;
+  },
+};
 const rssList = {
   get innerHTML() {
     return rssListHtml;
@@ -36,6 +52,7 @@ const pageBlockEditor = {
   },
 };
 const elements = {
+  "page-content": pageContent,
   "page-editor": pageEditor,
   "page-block-editor": pageBlockEditor,
   "rss-list": rssList,
@@ -59,6 +76,8 @@ const sandbox = {
       return {
         tagName: tagName.toUpperCase(),
         className: "",
+        dataset: {},
+        innerHTML: "",
         title: "",
         attributes: {},
         srcdoc: "",
@@ -67,6 +86,9 @@ const sandbox = {
         },
         getAttribute(name) {
           return this.attributes[name] || null;
+        },
+        remove() {
+          if (pendingSummaryNode === this) pendingSummaryNode = null;
         },
       };
     },
@@ -121,6 +143,10 @@ this.__obrTest = {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  rssAiSummaryHtml,
+  rssSummaryActionHtml,
+  renderRssSummaryPending,
+  clearRssSummaryPending,
   renderRssSandboxFrame,
   rssFrameDocumentHtml,
   RSS_IFRAME_SANDBOX,
@@ -149,6 +175,10 @@ const {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  rssAiSummaryHtml,
+  rssSummaryActionHtml,
+  renderRssSummaryPending,
+  clearRssSummaryPending,
   renderRssSandboxFrame,
   rssFrameDocumentHtml,
   RSS_IFRAME_SANDBOX,
@@ -454,11 +484,53 @@ function assertRssCacheSignatures() {
     first_seen_at: "2026-05-25T00:00:00Z",
     read_at: null,
     starred_at: null,
+    ai_summary_zh: "中文总结",
+    ai_summary_model: "deepseek-v4-flash",
     html: "<p>A</p>",
   };
   assert.strictEqual(sameRssItemDetail(detail, { ...detail }), true);
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, html: "<p>B</p>" }), false);
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, read_at: "2026-05-25T00:00:01Z" }), false);
+  assert.strictEqual(sameRssItemDetail(detail, { ...detail, ai_summary_zh: "新的总结" }), false);
+}
+
+function assertRssAiSummaryHtml() {
+  assert.strictEqual(rssAiSummaryHtml({}), "");
+  assert(rssSummaryActionHtml({ id: "rss-1" }).includes('data-rss-summary="rss-1"'));
+  assert(rssSummaryActionHtml({ id: "rss-1" }).includes("Summary"));
+  assert.strictEqual(rssSummaryActionHtml({ id: "rss-1", ai_summary_zh: "已有总结" }), "");
+  const html = rssAiSummaryHtml({
+    ai_summary_zh: "第一行\n第二行 <script>",
+    ai_summary_model: "deepseek-v4-flash",
+  });
+
+  assert(html.includes('<details class="rss-ai-summary">'));
+  assert(!html.includes("<details open"));
+  assert(html.includes("中文总结"));
+  assert(html.includes("deepseek-v4-flash"));
+  assert(html.includes("第一行<br>第二行 &lt;script&gt;"));
+}
+
+function assertRssSummaryLoadingState() {
+  pendingSummaryNode = null;
+  pageContent.insertedBefore = null;
+
+  renderRssSummaryPending();
+
+  assert(pendingSummaryNode);
+  assert.strictEqual(pendingSummaryNode.className, "rss-ai-summary rss-ai-summary-pending");
+  assert.strictEqual(pendingSummaryNode.dataset.rssSummaryPending, "1");
+  assert.strictEqual(pendingSummaryNode.getAttribute("role"), "status");
+  assert.strictEqual(pendingSummaryNode.getAttribute("aria-live"), "polite");
+  assert(pendingSummaryNode.innerHTML.includes("Generating summary"));
+  assert.strictEqual(pageContent.insertedBefore, rssFrameRootNode);
+
+  const firstPendingNode = pendingSummaryNode;
+  renderRssSummaryPending();
+  assert.strictEqual(pendingSummaryNode, firstPendingNode);
+
+  clearRssSummaryPending();
+  assert.strictEqual(pendingSummaryNode, null);
 }
 
 function assertRssSandboxFrame() {
@@ -497,6 +569,8 @@ function assertRssSandboxFrame() {
   await assertRssPagination();
   await assertRssListCacheRefresh();
   assertRssCacheSignatures();
+  assertRssAiSummaryHtml();
+  assertRssSummaryLoadingState();
   assertRssSandboxFrame();
 })()
   .then(() => {

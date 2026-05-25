@@ -62,6 +62,16 @@ pub(crate) struct Config {
     pub(crate) rss_max_items_per_feed: usize,
     #[serde(default = "default_rss_fetch_full_content")]
     pub(crate) rss_fetch_full_content: bool,
+    #[serde(default = "default_rss_ai_summary_enabled")]
+    pub(crate) rss_ai_summary_enabled: bool,
+    #[serde(default = "default_rss_ai_summary_chars")]
+    pub(crate) rss_ai_summary_chars: usize,
+    #[serde(default)]
+    pub(crate) deepseek_api_key: Option<String>,
+    #[serde(default = "default_deepseek_api_base")]
+    pub(crate) deepseek_api_base: String,
+    #[serde(default = "default_deepseek_model")]
+    pub(crate) deepseek_model: String,
 }
 
 fn default_session_days() -> u64 {
@@ -118,6 +128,22 @@ fn default_rss_max_items_per_feed() -> usize {
 
 fn default_rss_fetch_full_content() -> bool {
     true
+}
+
+fn default_rss_ai_summary_enabled() -> bool {
+    true
+}
+
+fn default_rss_ai_summary_chars() -> usize {
+    200
+}
+
+fn default_deepseek_api_base() -> String {
+    "https://api.deepseek.com".to_string()
+}
+
+fn default_deepseek_model() -> String {
+    "deepseek-v4-flash".to_string()
 }
 
 impl Config {
@@ -188,6 +214,22 @@ impl Config {
             }
             if self.rss_data_dir.as_os_str().is_empty() {
                 bail!("rss_data_dir cannot be empty");
+            }
+            if self.rss_ai_summary_enabled && self.rss_ai_summary_chars == 0 {
+                bail!("rss_ai_summary_chars must be greater than 0");
+            }
+            if self.rss_ai_summary_enabled
+                && self
+                    .deepseek_api_key
+                    .as_deref()
+                    .is_some_and(|key| !key.trim().is_empty())
+            {
+                if self.deepseek_api_base.trim().is_empty() {
+                    bail!("deepseek_api_base cannot be empty");
+                }
+                if self.deepseek_model.trim().is_empty() {
+                    bail!("deepseek_model cannot be empty");
+                }
             }
         }
         match (&self.password_hash, &self.password) {
@@ -327,6 +369,11 @@ mod tests {
             rss_refresh_minutes: 30,
             rss_max_items_per_feed: 20,
             rss_fetch_full_content: true,
+            rss_ai_summary_enabled: true,
+            rss_ai_summary_chars: 200,
+            deepseek_api_key: None,
+            deepseek_api_base: "https://api.deepseek.com".to_string(),
+            deepseek_model: "deepseek-v4-flash".to_string(),
         }
     }
 

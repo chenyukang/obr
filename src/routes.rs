@@ -536,6 +536,30 @@ pub(crate) async fn rss_star(
     }
 }
 
+pub(crate) async fn rss_summarize(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
+    };
+    if !reader.can_summarize_items() {
+        return Ok((StatusCode::BAD_REQUEST, "RSS AI summary is not configured").into_response());
+    }
+    let reader = reader.clone();
+    let Some(mut item) = reader.summarize_item(&id).await? else {
+        return Ok((StatusCode::NOT_FOUND, "RSS item not found").into_response());
+    };
+    let render_reader = reader.clone();
+    let response = tokio::task::spawn_blocking(move || -> anyhow::Result<RssItemDetailResponse> {
+        let html = render_reader.rendered_item_html(&mut item)?;
+        Ok(RssItemDetailResponse { item, html })
+    })
+    .await
+    .context("join RSS summarize task")??;
+    Ok(Json(response).into_response())
+}
+
 pub(crate) async fn rss_unsubscribe(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
