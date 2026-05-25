@@ -29,6 +29,10 @@ pub(crate) struct Config {
     pub(crate) log_path: PathBuf,
     #[serde(default = "default_log_level")]
     pub(crate) log_level: String,
+    #[serde(default)]
+    pub(crate) dark_mode_start: Option<String>,
+    #[serde(default)]
+    pub(crate) dark_mode_end: Option<String>,
     pub(crate) username: String,
     #[serde(default)]
     pub(crate) password_hash: Option<String>,
@@ -183,7 +187,22 @@ impl Config {
             )
         })?;
         config.validate_auth_config()?;
+        config.validate_dark_mode_config()?;
         Ok(config)
+    }
+
+    fn validate_dark_mode_config(&self) -> Result<()> {
+        match (&self.dark_mode_start, &self.dark_mode_end) {
+            (Some(start), Some(end)) => {
+                parse_clock_time(start)
+                    .ok_or_else(|| anyhow!("invalid dark_mode_start, expected HH:MM"))?;
+                parse_clock_time(end)
+                    .ok_or_else(|| anyhow!("invalid dark_mode_end, expected HH:MM"))?;
+            }
+            (None, None) => {}
+            _ => bail!("configure both dark_mode_start and dark_mode_end, or neither"),
+        }
+        Ok(())
     }
 
     fn validate_auth_config(&self) -> Result<()> {
@@ -305,6 +324,20 @@ impl Config {
     }
 }
 
+fn parse_clock_time(value: &str) -> Option<u16> {
+    let (hour, minute) = value.trim().split_once(':')?;
+    if hour.len() != 2 || minute.len() != 2 {
+        return None;
+    }
+    let hour = hour.parse::<u16>().ok()?;
+    let minute = minute.parse::<u16>().ok()?;
+    if hour < 24 && minute < 60 {
+        Some(hour * 60 + minute)
+    } else {
+        None
+    }
+}
+
 fn normalize_vault_relative_path(
     path: PathBuf,
     field: &str,
@@ -352,6 +385,8 @@ mod tests {
             todo_path: PathBuf::from("Posts/todo.md"),
             log_path: PathBuf::from("logs/obr.log"),
             log_level: "info".to_string(),
+            dark_mode_start: None,
+            dark_mode_end: None,
             username: "admin".to_string(),
             password_hash: None,
             password: Some("secret".to_string()),
@@ -390,6 +425,22 @@ mod tests {
         config.allow_plaintext_password = true;
 
         assert!(config.validate_auth_config().is_ok());
+    }
+
+    #[test]
+    fn dark_mode_schedule_requires_valid_clock_range() {
+        let mut config = test_config();
+        assert!(config.validate_dark_mode_config().is_ok());
+
+        config.dark_mode_start = Some("21:00".to_string());
+        config.dark_mode_end = Some("07:30".to_string());
+        assert!(config.validate_dark_mode_config().is_ok());
+
+        config.dark_mode_end = Some("7:30".to_string());
+        assert!(config.validate_dark_mode_config().is_err());
+
+        config.dark_mode_end = None;
+        assert!(config.validate_dark_mode_config().is_err());
     }
 
     #[test]

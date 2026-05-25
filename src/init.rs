@@ -133,6 +133,9 @@ image_dir = "Pics"
 todo_path = "Posts/todo.md"
 log_path = "logs/obr.log"
 log_level = "info"
+# Times are interpreted in the browser/system local timezone.
+# dark_mode_start = "21:00"
+# dark_mode_end = "07:00"
 username = "admin"
 password_hash = "{password_hash}"
 allow_plaintext_password = false

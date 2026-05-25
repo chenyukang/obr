@@ -8,6 +8,10 @@ log_path = "logs/obr.log"
 # Simple levels work here: "trace", "debug", "info", "warn", "error".
 # Full tracing filters also work, for example: "obr=debug".
 log_level = "info"
+# Optional automatic dark-mode window. Times are interpreted in the browser/system local timezone.
+# Configure both values or leave both commented out. Overnight ranges such as 21:00-07:00 are supported.
+# dark_mode_start = "21:00"
+# dark_mode_end = "07:00"
 username = "admin"
 # Generate interactively with:
 #   ./target/release/obr hash-password

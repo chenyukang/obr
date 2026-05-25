@@ -165,6 +165,7 @@ pub(crate) struct RssItemDetail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RssItemFilter {
     Unread,
+    Done,
     All,
 }
 
@@ -456,9 +457,11 @@ impl RssReader {
         );
         let mut clauses = Vec::new();
         let mut values = vec![Value::Integer(summary_chars)];
-        if filter == RssItemFilter::Unread {
-            clauses.push("i.read_at IS NULL".to_string());
-        }
+        match filter {
+            RssItemFilter::Unread => clauses.push("i.read_at IS NULL".to_string()),
+            RssItemFilter::Done => clauses.push("i.read_at IS NOT NULL".to_string()),
+            RssItemFilter::All => {}
+        };
         for term in &search_terms {
             clauses.push(
                 "(COALESCE(i.search_text, '') LIKE ? ESCAPE '\\'
@@ -475,10 +478,20 @@ impl RssReader {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
-        sql.push_str(
-            " ORDER BY i.sort_at IS NULL, i.sort_at DESC, i.first_seen_at DESC
-              LIMIT ? OFFSET ?",
-        );
+        let order_by = match filter {
+            RssItemFilter::Unread => {
+                " ORDER BY i.sort_at IS NULL, i.sort_at DESC, i.first_seen_at DESC"
+            }
+            RssItemFilter::Done => {
+                " ORDER BY i.read_at DESC,
+                           i.sort_at IS NULL, i.sort_at DESC, i.first_seen_at DESC"
+            }
+            RssItemFilter::All => {
+                " ORDER BY i.sort_at IS NULL, i.sort_at DESC, i.first_seen_at DESC"
+            }
+        };
+        sql.push_str(order_by);
+        sql.push_str(" LIMIT ? OFFSET ?");
         values.push(Value::Integer(limit as i64));
         values.push(Value::Integer(offset));
         let mut stmt = conn.prepare(&sql)?;
@@ -1689,6 +1702,15 @@ fn init_db(path: &Path) -> Result<()> {
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_items_sort ON items(sort_at DESC)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_items_done_sort
+            ON items(
+                read_at DESC,
+                sort_at DESC,
+                first_seen_at DESC
+            )",
         [],
     )?;
     if let Some(data_dir) = path.parent() {
@@ -3828,6 +3850,75 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
         assert_eq!(page_two.len(), 1);
         assert_eq!(page_one[0].id, first);
         assert_eq!(page_two[0].id, second);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_done_items_orders_recent_read_activity_first() -> Result<()> {
+        let (reader, root) = test_reader()?;
+        let feed_url = "https://example.test/feed.xml";
+        let unread = insert_test_item(&reader, feed_url, "unread-fetched-later")?;
+        let older_read = insert_test_item(&reader, feed_url, "older-read")?;
+        let newer_read = insert_test_item(&reader, feed_url, "newer-read")?;
+        let conn = reader.connection()?;
+        conn.execute(
+            "UPDATE items SET fetched_at = ?1, first_seen_at = ?1 WHERE id = ?2",
+            params!["2099-01-01T00:00:00Z", unread],
+        )?;
+        conn.execute(
+            "UPDATE items SET read_at = ?1 WHERE id = ?2",
+            params!["2026-05-25T00:00:01Z", older_read],
+        )?;
+        conn.execute(
+            "UPDATE items SET read_at = ?1 WHERE id = ?2",
+            params!["2026-05-25T00:00:02Z", newer_read],
+        )?;
+
+        let done = reader.list_items(RssItemFilter::Done, 10, 0, None)?;
+
+        assert_eq!(done.len(), 2);
+        assert_eq!(done[0].id, newer_read);
+        assert_eq!(done[1].id, older_read);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_all_items_orders_by_article_time() -> Result<()> {
+        let (reader, root) = test_reader()?;
+        let feed_url = "https://example.test/feed.xml";
+        let newer = insert_test_item(&reader, feed_url, "newer-published")?;
+        let older = insert_test_item(&reader, feed_url, "older-published")?;
+        let conn = reader.connection()?;
+        conn.execute(
+            "UPDATE items SET sort_at = ?1, first_seen_at = ?2, fetched_at = ?2 WHERE id = ?3",
+            params!["2026-05-25T00:00:00Z", "2000-01-01T00:00:02Z", newer],
+        )?;
+        conn.execute(
+            "UPDATE items SET sort_at = ?1, first_seen_at = ?2, fetched_at = ?2 WHERE id = ?3",
+            params!["2020-01-01T00:00:00Z", "2000-01-01T00:00:01Z", older],
+        )?;
+
+        let unread = reader.list_items(RssItemFilter::Unread, 10, 0, None)?;
+        assert_eq!(unread[0].id, newer);
+        assert_eq!(unread[1].id, older);
+
+        assert!(reader.mark_item_read(&older, true)?);
+        conn.execute(
+            "UPDATE items SET read_at = ?1 WHERE id = ?2",
+            params!["2026-05-25T00:00:00Z", older],
+        )?;
+        let all = reader.list_items(RssItemFilter::All, 10, 0, None)?;
+        let unread_after_read = reader.list_items(RssItemFilter::Unread, 10, 0, None)?;
+        let done = reader.list_items(RssItemFilter::Done, 10, 0, None)?;
+
+        assert_eq!(all[0].id, newer);
+        assert_eq!(all[1].id, older);
+        assert_eq!(unread_after_read.len(), 1);
+        assert_eq!(unread_after_read[0].id, newer);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].id, older);
         fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -166,6 +166,8 @@ struct AppConfigResponse {
     image_dir: String,
     todo_path: String,
     todo_file: String,
+    dark_mode_start: Option<String>,
+    dark_mode_end: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -418,6 +420,8 @@ pub(crate) async fn app_config(State(state): State<Arc<AppState>>) -> AppResult<
         image_dir: vault_rel_path(&state.config.image_dir),
         todo_path: todo_file.trim_end_matches(".md").to_string(),
         todo_file,
+        dark_mode_start: state.config.dark_mode_start.clone(),
+        dark_mode_end: state.config.dark_mode_end.clone(),
     })
     .into_response())
 }
@@ -450,6 +454,7 @@ pub(crate) async fn rss_items(
         .into_response());
     };
     let filter = match query.state.as_deref() {
+        Some("done") => RssItemFilter::Done,
         Some("all") => RssItemFilter::All,
         _ => RssItemFilter::Unread,
     };

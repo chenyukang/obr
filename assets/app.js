@@ -35,6 +35,7 @@ const state = {
   rssCurrentFeedId: "",
   rssCurrentFeedTitle: "",
   rssCurrentStarred: false,
+  rssCurrentHasSummary: false,
   rssRefreshing: false,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
@@ -74,6 +75,9 @@ const state = {
   imageQueue: [],
   imageActiveLoads: 0,
   loadedImageUrls: new Set(),
+  themeMode: "auto",
+  themeIsDark: false,
+  themeTimer: 0,
   pagePrefetchQueue: [],
   pagePrefetching: false,
   pagePrefetchScheduled: false,
@@ -86,6 +90,8 @@ const state = {
     imageDir: "Pics",
     todoPath: "Posts/todo",
     todoFile: "Posts/todo.md",
+    darkModeStart: "",
+    darkModeEnd: "",
   },
   confirmResolve: null,
 };
@@ -121,6 +127,9 @@ const RECENT_EDITS_KEY = "obr.recent-edits";
 const SEARCH_CACHE_KEY = "obr.search-cache";
 const SEARCH_CACHE_LIMIT = 24;
 const RSS_ITEMS_PAGE_SIZE = 20;
+const THEME_MODE_KEY = "obr.theme-mode";
+const LIGHT_THEME_COLOR = "#eef5f3";
+const DARK_THEME_COLOR = "#111c18";
 const OUTBOX_KEY = "obr.offline.outbox";
 const APP_CONFIG_KEY = "obr.app-config";
 const CLIENT_ID_KEY = "obr.client-id";
@@ -149,6 +158,7 @@ const ICONS = {
   "log-out":
     '<path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>',
   minus: '<path d="M5 12h14"></path>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 7.4A9 9 0 1 1 12 3z"></path>',
   key: '<path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-2.8-2.8L21 2"></path><path d="m15 5 4 4"></path><path d="m13 7 4 4"></path>',
   pencil:
     '<path d="M21.2 6.8a1 1 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8L2 21.4a.5.5 0 0 0 .6.6L7 20.7a2 2 0 0 0 .8-.5z"></path><path d="m15 5 4 4"></path>',
@@ -165,15 +175,18 @@ const ICONS = {
     '<path d="M11.5 2.5 13 8l5.5 1.5L13 11l-1.5 5.5L10 11 4.5 9.5 10 8z"></path><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"></path><path d="M5 14l.7 1.8L7.5 16.5l-1.8.7L5 19l-.7-1.8-1.8-.7 1.8-.7z"></path>',
   star:
     '<path d="M11.5 2.8a.55.55 0 0 1 1 0l2.3 4.7a2.1 2.1 0 0 0 1.6 1.2l5.2.8a.55.55 0 0 1 .3.9l-3.8 3.7a2.1 2.1 0 0 0-.6 1.9l.9 5.2a.55.55 0 0 1-.8.6L13 19.3a2.1 2.1 0 0 0-2 0l-4.6 2.4a.55.55 0 0 1-.8-.6l.9-5.2a2.1 2.1 0 0 0-.6-1.9L2.1 10.4a.55.55 0 0 1 .3-.9l5.2-.8a2.1 2.1 0 0 0 1.6-1.2z"></path>',
+  sun: '<circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.9 4.9 1.4 1.4"></path><path d="m17.7 17.7 1.4 1.4"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.3 17.7-1.4 1.4"></path><path d="m19.1 4.9-1.4 1.4"></path>',
   "trash-2":
     '<path d="M3 6h18"></path><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path>',
   x: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
+  restoreThemeMode();
   installIcons();
   restoreLoadedImageUrls();
   restoreAppConfig();
+  applyTheme();
   bindEvents();
   initializeAppHistory({ view: "day" });
   void registerServiceWorker();
@@ -209,6 +222,12 @@ function bindEvents() {
   window.addEventListener("scroll", handleWindowScroll, { passive: true });
   document.addEventListener("keydown", handleGlobalKeydown);
   el("random-note-button").addEventListener("click", openRandomNote);
+  el("theme-toggle-button").addEventListener("click", toggleThemeMode);
+  window
+    .matchMedia?.("(prefers-color-scheme: dark)")
+    ?.addEventListener?.("change", () => {
+      if (state.themeMode === "auto") applyTheme();
+    });
   el("update-banner").addEventListener("click", applyServiceWorkerUpdate);
   el("outbox-button").addEventListener("click", toggleOutboxPanel);
   el("outbox-close").addEventListener("click", hideOutboxPanel);
@@ -310,6 +329,7 @@ function bindEvents() {
     window.clearTimeout(state.rssSearchTimer);
     await loadRssItems({ preferCache: true });
   });
+  el("rss-search-toggle").addEventListener("click", toggleRssSearch);
   el("rss-search-input").addEventListener("input", () => {
     updateRssSearchClear();
     window.clearTimeout(state.rssSearchTimer);
@@ -318,7 +338,11 @@ function bindEvents() {
   el("rss-search-input").addEventListener("keydown", async (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
-      await clearRssSearch();
+      if (rssSearchQuery()) {
+        await clearRssSearch();
+      } else {
+        setRssSearchOpen(false, { focusToggle: true });
+      }
     }
   });
   el("rss-search-clear").addEventListener("click", clearRssSearch);
@@ -329,6 +353,7 @@ function bindEvents() {
   el("edit-button").addEventListener("click", toggleEdit);
   el("rss-star-button").addEventListener("click", toggleCurrentRssStar);
   el("rss-unsubscribe-button").addEventListener("click", unsubscribeCurrentRssFeed);
+  el("rss-summary-floating-button").addEventListener("click", handleRssSummaryFloatingClick);
   el("page-new-block-button").addEventListener("click", openNewBlockAtEnd);
 
   el("page-content").addEventListener("pointerup", rememberReadBlockFromPointer);
@@ -337,13 +362,6 @@ function bindEvents() {
     if (blockEdit) {
       event.preventDefault();
       await openBlockEditorAt(Number(blockEdit.dataset.blockIndex || 0));
-      return;
-    }
-
-    const rssSummary = event.target.closest("[data-rss-summary]");
-    if (rssSummary) {
-      event.preventDefault();
-      await summarizeCurrentRssItem(rssSummary);
       return;
     }
 
@@ -1231,6 +1249,7 @@ async function refreshAppConfig() {
     const config = normalizeAppConfig(await response.json());
     state.appConfig = config;
     localStorage.setItem(APP_CONFIG_KEY, JSON.stringify(config));
+    applyTheme();
   } catch (error) {
     console.error(error);
   }
@@ -1246,7 +1265,120 @@ function normalizeAppConfig(config = {}) {
   const todoPath = stripMarkdownExtension(
     cleanRelPath(config.todo_path || config.todoPath || todoFile),
   );
-  return { dailyDir, entryDir, imageDir, todoPath, todoFile };
+  return {
+    dailyDir,
+    entryDir,
+    imageDir,
+    todoPath,
+    todoFile,
+    darkModeStart: cleanClockTime(config.dark_mode_start || config.darkModeStart || ""),
+    darkModeEnd: cleanClockTime(config.dark_mode_end || config.darkModeEnd || ""),
+  };
+}
+
+function restoreThemeMode() {
+  state.themeMode = normalizeThemeMode(localStorage.getItem(THEME_MODE_KEY));
+}
+
+function normalizeThemeMode(value) {
+  return value === "dark" || value === "light" || value === "auto" ? value : "auto";
+}
+
+function cleanClockTime(value) {
+  const text = String(value || "").trim();
+  return parseClockMinutes(text) === null ? "" : text;
+}
+
+function parseClockMinutes(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return null;
+  return hour * 60 + minute;
+}
+
+function scheduledDarkMode(date = new Date(), config = state.appConfig) {
+  const start = parseClockMinutes(config.darkModeStart);
+  const end = parseClockMinutes(config.darkModeEnd);
+  if (start === null || end === null || start === end) return null;
+  const now = date.getHours() * 60 + date.getMinutes();
+  return start < end ? now >= start && now < end : now >= start || now < end;
+}
+
+function resolveThemeIsDark(date = new Date()) {
+  if (state.themeMode === "dark") return true;
+  if (state.themeMode === "light") return false;
+  const scheduled = scheduledDarkMode(date);
+  if (scheduled !== null) return scheduled;
+  return Boolean(window.matchMedia?.("(prefers-color-scheme: dark)")?.matches);
+}
+
+function applyTheme(date = new Date()) {
+  const isDark = resolveThemeIsDark(date);
+  state.themeIsDark = isDark;
+  document.documentElement.classList.toggle("theme-dark", isDark);
+  document.documentElement.classList.toggle("theme-light", !isDark);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute(
+    "content",
+    isDark ? DARK_THEME_COLOR : LIGHT_THEME_COLOR,
+  );
+  updateThemeButton();
+  scheduleThemeUpdate();
+}
+
+function toggleThemeMode() {
+  const nextMode =
+    state.themeMode === "auto"
+      ? state.themeIsDark
+        ? "light"
+        : "dark"
+      : state.themeMode === "dark"
+        ? "light"
+        : "auto";
+  state.themeMode = nextMode;
+  localStorage.setItem(THEME_MODE_KEY, nextMode);
+  applyTheme();
+  showToast(themeStatusLabel());
+}
+
+function updateThemeButton() {
+  const button = el("theme-toggle-button");
+  if (!button) return;
+  const icon = state.themeIsDark ? "moon" : "sun";
+  const label = themeStatusLabel();
+  setButtonIcon(button, icon, label);
+  button.setAttribute("aria-label", label);
+  button.title = `${label}. Click to switch theme.`;
+}
+
+function themeStatusLabel() {
+  const mode = state.themeMode === "auto" ? "Auto" : state.themeMode === "dark" ? "Dark" : "Light";
+  const active = state.themeIsDark ? "dark" : "light";
+  const schedule = darkModeScheduleLabel();
+  return schedule && state.themeMode === "auto"
+    ? `Theme: ${mode} ${active} (${schedule})`
+    : `Theme: ${mode} ${active}`;
+}
+
+function darkModeScheduleLabel() {
+  return state.appConfig.darkModeStart && state.appConfig.darkModeEnd
+    ? `${state.appConfig.darkModeStart}-${state.appConfig.darkModeEnd}`
+    : "";
+}
+
+function scheduleThemeUpdate() {
+  window.clearTimeout(state.themeTimer);
+  const now = new Date();
+  const delay =
+    state.themeMode === "auto"
+      ? Math.max(1000, 61000 - now.getSeconds() * 1000 - now.getMilliseconds())
+      : 0;
+  if (delay) {
+    state.themeTimer = window.setTimeout(() => applyTheme(), delay);
+  } else {
+    state.themeTimer = 0;
+  }
 }
 
 function cleanRelPath(value) {
@@ -2548,6 +2680,8 @@ function renderRssItems(items, options = {}) {
       ? "No RSS matches."
       : state.rssFilter === "unread"
         ? "No unread items."
+        : state.rssFilter === "done"
+          ? "No done items."
         : "No RSS items.";
     list.innerHTML = `<p class="empty">${empty}</p>`;
     markSelectedRssItem();
@@ -2641,6 +2775,7 @@ async function markRssItemReadFromList(id, button) {
       }
     } else {
       markRssRowRead(id);
+      await loadRssItems({ force: true });
     }
   } catch (error) {
     console.error(error);
@@ -2672,6 +2807,8 @@ async function openRssItem(id, options = {}) {
     const item = await response.json();
     if (requestId !== state.rssItemRequestId) return;
     const changed = !cachedItem || !sameRssItemDetail(cachedItem, item);
+    const becameRead = !cachedItem?.read_at && Boolean(item.read_at);
+    if (becameRead) clearRssItemsCache();
     state.rssItemCache.set(id, item);
     if (changed || !renderedCache) {
       if (!renderedCache) setRssStatus("Rendering RSS item...", "loading");
@@ -2726,6 +2863,7 @@ function renderRssDetailShell(id, preview = {}, options = {}) {
   state.rssCurrentFeedId = "";
   state.rssCurrentFeedTitle = "";
   state.rssCurrentStarred = false;
+  state.rssCurrentHasSummary = false;
   state.currentFile = `rss:${id}`;
   state.currentContent = "";
   state.currentBlocks = [];
@@ -2747,6 +2885,7 @@ function renderRssDetailPage(item, options = {}) {
   state.rssCurrentFeedId = item.feed_id || "";
   state.rssCurrentFeedTitle = item.feed_title || item.feed_url || "";
   state.rssCurrentStarred = Boolean(item.starred_at);
+  state.rssCurrentHasSummary = Boolean((item.ai_summary_zh || "").trim());
   state.currentFile = `rss:${item.id}`;
   state.currentContent = item.content_markdown || "";
   state.currentBlocks = [];
@@ -2762,7 +2901,6 @@ function renderRssDetailPage(item, options = {}) {
       ${feedSourceHtml}
       ${publishedAt ? `<span class="rss-detail-time">${escapeHtml(publishedAt)}</span>` : ""}
       ${item.url ? `<a class="rss-detail-original" href="${escapeHtmlAttr(item.url)}" target="_blank" rel="noopener noreferrer">Original</a>` : ""}
-      ${rssSummaryActionHtml(item)}
     </p>
   `;
   showPage(
@@ -2794,12 +2932,6 @@ function rssAiSummaryHtml(item, options = {}) {
   `;
 }
 
-function rssSummaryActionHtml(item) {
-  if ((item?.ai_summary_zh || "").trim()) return "";
-  if (!item?.id) return "";
-  return `<button class="rss-summary-button" type="button" data-rss-summary="${escapeHtmlAttr(item.id)}" aria-label="Summary" title="Summary">${iconSvg("sparkles")}<span>Summary</span></button>`;
-}
-
 async function summarizeCurrentRssItem(button) {
   const id = button?.dataset?.rssSummary || state.rssSelectedItemId;
   if (!id) return;
@@ -2811,7 +2943,7 @@ async function summarizeCurrentRssItem(button) {
   button.setAttribute("aria-label", "Summarizing");
   button.title = "Summarizing";
   button.innerHTML = `${iconSvg("loader")}<span>Summarizing</span>`;
-  renderRssSummaryPending();
+  focusRssSummaryTarget(renderRssSummaryPending());
   setRssStatus("Summarizing RSS item...", "loading");
   try {
     const response = await request(`/api/rss/items/${encodeURIComponent(id)}/summary`, {
@@ -2828,6 +2960,7 @@ async function summarizeCurrentRssItem(button) {
       saveScroll: false,
       expandAiSummary: true,
     });
+    focusRssSummary();
     setRssStatus("");
     showToast("Summary ready.");
   } catch (error) {
@@ -2846,7 +2979,9 @@ async function summarizeCurrentRssItem(button) {
 
 function renderRssSummaryPending() {
   const content = el("page-content");
-  if (!content || content.querySelector("[data-rss-summary-pending]")) return;
+  if (!content) return null;
+  const existing = content.querySelector("[data-rss-summary-pending]");
+  if (existing) return existing;
   const bodyRoot = content.querySelector("[data-rss-body]");
   const pending = document.createElement("div");
   pending.className = "rss-ai-summary rss-ai-summary-pending";
@@ -2855,10 +2990,33 @@ function renderRssSummaryPending() {
   pending.setAttribute("aria-live", "polite");
   pending.innerHTML = `${iconSvg("loader")}<span>Generating summary...</span>`;
   content.insertBefore(pending, bodyRoot || content.firstChild);
+  return pending;
 }
 
 function clearRssSummaryPending() {
   el("page-content")?.querySelector("[data-rss-summary-pending]")?.remove();
+}
+
+async function handleRssSummaryFloatingClick(event) {
+  event.preventDefault();
+  const button = event.currentTarget;
+  if (focusRssSummary()) return;
+  await summarizeCurrentRssItem(button);
+}
+
+function focusRssSummary() {
+  const summary = el("page-content")?.querySelector(".rss-ai-summary");
+  if (!summary) return false;
+  if (summary.tagName === "DETAILS") summary.open = true;
+  focusRssSummaryTarget(summary);
+  return true;
+}
+
+function focusRssSummaryTarget(target) {
+  if (!target) return;
+  target.setAttribute("tabindex", "-1");
+  scrollToElementWithStickyOffset(target);
+  window.requestAnimationFrame(() => target.focus({ preventScroll: true }));
 }
 
 function scheduleRssDetailEnhancements(renderId) {
@@ -2969,6 +3127,30 @@ function updateRssPageActions() {
   unsubscribeButton.hidden = false;
   starButton.classList.toggle("is-starred", state.rssCurrentStarred);
   setButtonIcon(starButton, "star", state.rssCurrentStarred ? "Starred" : "Star");
+  updateRssSummaryFloatingButton();
+}
+
+function updateRssSummaryFloatingButton() {
+  const button = el("rss-summary-floating-button");
+  if (!button) return;
+  const isRssDetail =
+    state.view === "page" &&
+    state.currentFile?.startsWith("rss:") &&
+    Boolean(state.rssSelectedItemId) &&
+    el("page-editor").hidden;
+  button.hidden = !isRssDetail;
+  if (!isRssDetail) return;
+  const hasSummary = Boolean(el("page-content")?.querySelector(".rss-ai-summary"));
+  state.rssCurrentHasSummary = hasSummary;
+  const label = hasSummary ? "Show summary" : "Generate summary";
+  button.dataset.rssSummary = state.rssSelectedItemId;
+  button.classList.toggle("has-summary", hasSummary);
+  button.disabled = false;
+  button.classList.remove("is-loading");
+  button.removeAttribute("aria-busy");
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  setButtonIcon(button, "sparkles", label);
 }
 
 function updateRssFilterButtons() {
@@ -2997,9 +3179,12 @@ function markRssRowRead(id) {
 
 function setRssRefreshLoading(loading) {
   const button = el("rss-refresh-button");
+  const label = loading ? "Refreshing RSS..." : "Refresh RSS";
   button.disabled = loading;
   button.classList.toggle("is-loading", loading);
-  setButtonIcon(button, loading ? "loader" : "rotate-ccw", loading ? "Refreshing..." : "Refresh");
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  setButtonIcon(button, loading ? "loader" : "rotate-ccw", label);
 }
 
 function setRssStatus(message, kind = "") {
@@ -3013,6 +3198,37 @@ function setRssStatus(message, kind = "") {
 
 function rssSearchQuery() {
   return el("rss-search-input").value.trim();
+}
+
+function toggleRssSearch() {
+  const form = el("rss-search-form");
+  if (form.hidden) {
+    setRssSearchOpen(true, { focusInput: true, selectInput: true });
+    return;
+  }
+  if (rssSearchQuery()) {
+    el("rss-search-input").focus();
+    el("rss-search-input").select();
+  } else {
+    setRssSearchOpen(false, { focusToggle: true });
+  }
+}
+
+function setRssSearchOpen(open, options = {}) {
+  const form = el("rss-search-form");
+  const toggle = el("rss-search-toggle");
+  form.hidden = !open;
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  toggle.classList.toggle("is-active", open);
+  if (open && options.focusInput) {
+    window.requestAnimationFrame(() => {
+      const input = el("rss-search-input");
+      input.focus();
+      if (options.selectInput) input.select();
+    });
+  } else if (!open && options.focusToggle) {
+    toggle.focus();
+  }
 }
 
 function rssItemsCacheKey() {
@@ -3044,15 +3260,21 @@ function updateCachedRssItem(id, patch) {
 
 async function clearRssSearch() {
   window.clearTimeout(state.rssSearchTimer);
-  if (!el("rss-search-input").value) return;
+  if (!el("rss-search-input").value) {
+    setRssSearchOpen(false, { focusToggle: true });
+    return;
+  }
   el("rss-search-input").value = "";
   updateRssSearchClear();
   await loadRssItems({ preferCache: true });
+  setRssSearchOpen(true);
   el("rss-search-input").focus();
 }
 
 function updateRssSearchClear() {
-  el("rss-search-clear").hidden = !el("rss-search-input").value;
+  const hasQuery = Boolean(el("rss-search-input").value);
+  el("rss-search-clear").hidden = !hasQuery;
+  if (hasQuery && el("rss-search-form").hidden) setRssSearchOpen(true);
 }
 
 function renderRecentPanel() {
@@ -3275,6 +3497,7 @@ function showPage(title, html, sourceView, options = {}) {
   el("page-new-block-button").hidden = !editable || title === "NoPage";
   el("rss-star-button").hidden = true;
   el("rss-unsubscribe-button").hidden = true;
+  el("rss-summary-floating-button").hidden = true;
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
@@ -3326,6 +3549,7 @@ function clearPageOutline() {
   state.pageOutline = [];
   state.currentOutlineId = "";
   el("toc-button").hidden = true;
+  el("rss-summary-floating-button").hidden = true;
   closeTocPanel();
 }
 
@@ -3430,6 +3654,10 @@ function handleTocListClick(event) {
 }
 
 function scrollToHeading(target) {
+  scrollToElementWithStickyOffset(target);
+}
+
+function scrollToElementWithStickyOffset(target) {
   const top =
     target.getBoundingClientRect().top + window.scrollY - stickyHeaderOffset();
   window.scrollTo({
@@ -3573,6 +3801,7 @@ async function openPageEditor(mode, options = {}) {
   content.hidden = true;
   el("page-new-block-button").hidden = true;
   el("toc-button").hidden = true;
+  el("rss-summary-floating-button").hidden = true;
   closeTocPanel();
   updateReadingProgress();
   showPageDraftBanner(draft !== null);

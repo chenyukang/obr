@@ -8,6 +8,13 @@ let activeBlockTextarea = null;
 let rssListHtml = "";
 let rssListWrites = 0;
 let pendingSummaryNode = null;
+let scrolledTo = null;
+const topbarNode = {
+  hidden: false,
+  getBoundingClientRect() {
+    return { top: 0, bottom: 64 };
+  },
+};
 const rssBodyNode = { dataset: { rssBody: "1" } };
 const pageContent = {
   hidden: false,
@@ -51,12 +58,44 @@ const pageBlockEditor = {
     return [];
   },
 };
+const rssSearchInput = {
+  value: "",
+  focused: false,
+  selected: false,
+  focus() {
+    this.focused = true;
+  },
+  select() {
+    this.selected = true;
+  },
+};
+const rssSearchForm = { hidden: true };
+const rssSearchToggle = {
+  attributes: {},
+  focused: false,
+  active: false,
+  classList: {
+    toggle(_name, active) {
+      rssSearchToggle.active = active;
+    },
+  },
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  },
+  focus() {
+    this.focused = true;
+  },
+};
 const elements = {
   "page-content": pageContent,
   "page-editor": pageEditor,
   "page-block-editor": pageBlockEditor,
   "rss-list": rssList,
-  "rss-search-input": { value: "" },
+  "rss-search-form": rssSearchForm,
+  "rss-search-input": rssSearchInput,
+  "rss-search-toggle": rssSearchToggle,
+  "rss-search-clear": { hidden: true },
+  "update-banner": { hidden: true },
   "rss-status": {
     textContent: "",
     hidden: true,
@@ -71,6 +110,10 @@ const sandbox = {
     addEventListener() {},
     getElementById(id) {
       return elements[id] || null;
+    },
+    querySelector(selector) {
+      if (selector === ".topbar") return topbarNode;
+      return null;
     },
     createElement(tagName) {
       return {
@@ -109,7 +152,16 @@ const sandbox = {
   },
   FormData: class FormData {},
   URLSearchParams,
-  window: {},
+  window: {
+    innerHeight: 700,
+    scrollY: 500,
+    scrollTo(options) {
+      scrolledTo = options;
+    },
+    requestAnimationFrame(callback) {
+      callback();
+    },
+  },
   navigator: {},
   localStorage: {
     getItem() { return null; },
@@ -143,11 +195,17 @@ this.__obrTest = {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  normalizeAppConfig,
+  parseClockMinutes,
+  scheduledDarkMode,
   rssDetailBodyHtml,
   rssAiSummaryHtml,
-  rssSummaryActionHtml,
   renderRssSummaryPending,
   clearRssSummaryPending,
+  focusRssSummaryTarget,
+  setRssSearchOpen,
+  toggleRssSearch,
+  updateRssSearchClear,
 };`,
   sandbox,
 );
@@ -173,11 +231,17 @@ const {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  normalizeAppConfig,
+  parseClockMinutes,
+  scheduledDarkMode,
   rssDetailBodyHtml,
   rssAiSummaryHtml,
-  rssSummaryActionHtml,
   renderRssSummaryPending,
   clearRssSummaryPending,
+  focusRssSummaryTarget,
+  setRssSearchOpen,
+  toggleRssSearch,
+  updateRssSearchClear,
 } = sandbox.__obrTest;
 
 function assertSource(expected) {
@@ -490,6 +554,41 @@ function assertRssCacheSignatures() {
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, ai_summary_zh: "新的总结" }), false);
 }
 
+function assertThemeSchedule() {
+  assert.strictEqual(parseClockMinutes("21:30"), 1290);
+  assert.strictEqual(parseClockMinutes("7:30"), null);
+  assert.strictEqual(parseClockMinutes("24:00"), null);
+  assert.strictEqual(
+    scheduledDarkMode(new Date("2026-05-25T22:00:00"), {
+      darkModeStart: "21:00",
+      darkModeEnd: "07:00",
+    }),
+    true,
+  );
+  assert.strictEqual(
+    scheduledDarkMode(new Date("2026-05-25T12:00:00"), {
+      darkModeStart: "21:00",
+      darkModeEnd: "07:00",
+    }),
+    false,
+  );
+  assert.strictEqual(
+    scheduledDarkMode(new Date("2026-05-25T08:00:00"), {
+      darkModeStart: "07:00",
+      darkModeEnd: "21:00",
+    }),
+    true,
+  );
+  assert.strictEqual(scheduledDarkMode(new Date(), {}), null);
+
+  const config = normalizeAppConfig({
+    dark_mode_start: "20:00",
+    dark_mode_end: "08:00",
+  });
+  assert.strictEqual(config.darkModeStart, "20:00");
+  assert.strictEqual(config.darkModeEnd, "08:00");
+}
+
 function assertRssAiSummaryHtml() {
   const bodyHtml = rssDetailBodyHtml({ html: "<p>Hello</p>" });
   assert(bodyHtml.includes('<article class="rss-detail-body" data-rss-body>'));
@@ -500,9 +599,6 @@ function assertRssAiSummaryHtml() {
   );
 
   assert.strictEqual(rssAiSummaryHtml({}), "");
-  assert(rssSummaryActionHtml({ id: "rss-1" }).includes('data-rss-summary="rss-1"'));
-  assert(rssSummaryActionHtml({ id: "rss-1" }).includes("Summary"));
-  assert.strictEqual(rssSummaryActionHtml({ id: "rss-1", ai_summary_zh: "已有总结" }), "");
   const html = rssAiSummaryHtml({
     ai_summary_zh: "第一行\n第二行 <script>",
     ai_summary_model: "deepseek-v4-flash",
@@ -522,9 +618,10 @@ function assertRssSummaryLoadingState() {
   pendingSummaryNode = null;
   pageContent.insertedBefore = null;
 
-  renderRssSummaryPending();
+  const pending = renderRssSummaryPending();
 
   assert(pendingSummaryNode);
+  assert.strictEqual(pending, pendingSummaryNode);
   assert.strictEqual(pendingSummaryNode.className, "rss-ai-summary rss-ai-summary-pending");
   assert.strictEqual(pendingSummaryNode.dataset.rssSummaryPending, "1");
   assert.strictEqual(pendingSummaryNode.getAttribute("role"), "status");
@@ -533,11 +630,65 @@ function assertRssSummaryLoadingState() {
   assert.strictEqual(pageContent.insertedBefore, rssBodyNode);
 
   const firstPendingNode = pendingSummaryNode;
-  renderRssSummaryPending();
+  assert.strictEqual(renderRssSummaryPending(), firstPendingNode);
   assert.strictEqual(pendingSummaryNode, firstPendingNode);
 
   clearRssSummaryPending();
   assert.strictEqual(pendingSummaryNode, null);
+}
+
+function assertRssSummaryFocusUsesStickyOffset() {
+  scrolledTo = null;
+  const target = {
+    attributes: {},
+    focused: false,
+    focusOptions: null,
+    getBoundingClientRect() {
+      return { top: 320 };
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    focus(options) {
+      this.focused = true;
+      this.focusOptions = options;
+    },
+  };
+
+  focusRssSummaryTarget(target);
+
+  assert.strictEqual(target.attributes.tabindex, "-1");
+  assert.strictEqual(scrolledTo.top, 744);
+  assert.strictEqual(scrolledTo.behavior, "smooth");
+  assert.strictEqual(target.focused, true);
+  assert.strictEqual(target.focusOptions.preventScroll, true);
+}
+
+function assertRssSearchDisclosure() {
+  rssSearchInput.value = "";
+  rssSearchInput.focused = false;
+  rssSearchInput.selected = false;
+  rssSearchToggle.focused = false;
+  rssSearchForm.hidden = true;
+
+  toggleRssSearch();
+
+  assert.strictEqual(rssSearchForm.hidden, false);
+  assert.strictEqual(rssSearchToggle.attributes["aria-expanded"], "true");
+  assert.strictEqual(rssSearchToggle.active, true);
+  assert.strictEqual(rssSearchInput.focused, true);
+  assert.strictEqual(rssSearchInput.selected, true);
+
+  rssSearchInput.value = "rust";
+  updateRssSearchClear();
+  assert.strictEqual(elements["rss-search-clear"].hidden, false);
+
+  rssSearchInput.value = "";
+  setRssSearchOpen(false, { focusToggle: true });
+  assert.strictEqual(rssSearchForm.hidden, true);
+  assert.strictEqual(rssSearchToggle.attributes["aria-expanded"], "false");
+  assert.strictEqual(rssSearchToggle.active, false);
+  assert.strictEqual(rssSearchToggle.focused, true);
 }
 
 (async () => {
@@ -545,8 +696,11 @@ function assertRssSummaryLoadingState() {
   await assertRssPagination();
   await assertRssListCacheRefresh();
   assertRssCacheSignatures();
+  assertThemeSchedule();
   assertRssAiSummaryHtml();
   assertRssSummaryLoadingState();
+  assertRssSummaryFocusUsesStickyOffset();
+  assertRssSearchDisclosure();
 })()
   .then(() => {
     console.log("editor and RSS regression tests passed");

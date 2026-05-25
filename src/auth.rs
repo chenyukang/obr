@@ -221,6 +221,8 @@ mod tests {
             todo_path: PathBuf::from("Posts/todo.md"),
             log_path: PathBuf::from("logs/obr.log"),
             log_level: "info".to_string(),
+            dark_mode_start: None,
+            dark_mode_end: None,
             username: "admin".to_string(),
             password_hash,
             password,

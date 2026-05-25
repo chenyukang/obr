@@ -91,6 +91,23 @@ These vault layout paths are relative to `vault_path`. Parent path components su
 
 Runtime cache data is separate from the vault and is written under the gitignored `data` directory in the process working directory.
 
+## Appearance
+
+Obr has a dark-mode toggle in the top-right toolbar. The button switches the
+current appearance and can return to automatic mode; the manual choice is stored
+in the browser.
+
+To make automatic mode switch at a fixed local time window, configure both
+values in `config/local.toml`:
+
+```toml
+dark_mode_start = "21:00"
+dark_mode_end = "07:00"
+```
+
+Times are interpreted by the browser using its system timezone. Overnight
+ranges are supported.
+
 ## RSS Reader
 
 Obr can maintain a local RSS reading list. Enable it in `config/local.toml`:

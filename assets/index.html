@@ -7,7 +7,15 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#eef5f3">
-    <link rel="stylesheet" href="/assets/style.css?v=20260525-rss-meta-compact">
+    <script>
+      (() => {
+        try {
+          const mode = localStorage.getItem("obr.theme-mode");
+          if (mode === "dark") document.documentElement.classList.add("theme-dark");
+        } catch {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/assets/style.css?v=20260526-mobile-spacing">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -50,6 +58,7 @@
               <span id="connection-label" class="connection-label">Offline</span>
             </div>
             <button id="random-note-button" type="button" aria-label="Open random note" title="Random note" data-icon="shuffle"></button>
+            <button id="theme-toggle-button" type="button" aria-label="Theme" title="Theme" data-icon="moon"></button>
             <button id="outbox-button" class="outbox-button" type="button" data-icon="list-checks" aria-label="Show pending sync items" title="Pending sync items" hidden>0</button>
             <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key" hidden></button>
             <button id="logout-button" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
@@ -143,16 +152,20 @@
           <div class="rss-toolbar">
             <div class="rss-tabs" role="group" aria-label="RSS item state">
               <button id="rss-unread-filter" type="button" data-rss-filter="unread">Unread</button>
+              <button id="rss-done-filter" type="button" data-rss-filter="done">Done</button>
               <button id="rss-all-filter" type="button" data-rss-filter="all">All</button>
             </div>
-            <form id="rss-search-form" class="rss-search">
-              <div class="search-field">
-                <label class="sr-only" for="rss-search-input">Search RSS items</label>
-                <input id="rss-search-input" type="search" placeholder="Search RSS" autocomplete="off">
-                <button id="rss-search-clear" class="input-clear" type="button" aria-label="Clear RSS search" title="Clear RSS search" data-icon="x" hidden></button>
-              </div>
-            </form>
-            <button id="rss-refresh-button" type="button" data-icon="rotate-ccw">Refresh</button>
+            <div class="rss-toolbar-actions">
+              <button id="rss-search-toggle" class="rss-icon-button" type="button" data-icon="search" aria-label="Search RSS" aria-expanded="false" title="Search RSS"></button>
+              <form id="rss-search-form" class="rss-search" hidden>
+                <div class="search-field">
+                  <label class="sr-only" for="rss-search-input">Search RSS items</label>
+                  <input id="rss-search-input" type="search" placeholder="Search RSS" autocomplete="off">
+                  <button id="rss-search-clear" class="input-clear" type="button" aria-label="Clear RSS search" title="Clear RSS search" data-icon="x" hidden></button>
+                </div>
+              </form>
+              <button id="rss-refresh-button" class="rss-icon-button" type="button" data-icon="rotate-ccw" aria-label="Refresh RSS" title="Refresh RSS"></button>
+            </div>
           </div>
           <p id="rss-status" class="status" role="status" aria-live="polite" hidden></p>
           <div class="rss-layout">
@@ -187,6 +200,7 @@
 
     </div>
 
+    <button id="rss-summary-floating-button" class="rss-summary-floating-button" type="button" aria-label="Summary" title="Summary" data-icon="sparkles" hidden></button>
     <button id="toc-button" class="toc-button" type="button" aria-label="Open page outline" title="Outline" data-icon="list" hidden></button>
     <div id="toc-panel" class="toc-panel" hidden>
       <div class="toc-sheet" role="dialog" aria-modal="true" aria-labelledby="toc-title">
@@ -223,6 +237,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260525-rss-meta-compact"></script>
+    <script src="/assets/app.js?v=20260526-mobile-spacing"></script>
   </body>
 </html>
