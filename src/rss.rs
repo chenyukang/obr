@@ -2823,28 +2823,23 @@ fn ensure_anchor_tag_attributes(tag: &str) -> String {
         return tag.to_string();
     }
 
-    let mut attrs = String::new();
-    if !has_html_attr(tag, "target") {
-        attrs.push_str(r#" target="_blank""#);
-    }
-    if !has_html_attr(tag, "rel") {
-        attrs.push_str(r#" rel="noopener noreferrer""#);
-    }
-    if attrs.is_empty() {
-        return tag.to_string();
+    let tag = set_html_attr_value(tag, "target", "_blank");
+    set_html_attr_value(&tag, "rel", "noopener noreferrer")
+}
+
+fn set_html_attr_value(tag: &str, attr_name: &str, attr_value: &str) -> String {
+    if let Some(value_range) = find_html_attr_value(tag, attr_name) {
+        return replace_html_attr_value(tag, value_range, attr_value);
     }
     let Some(insert_at) = tag.rfind('>') else {
         return tag.to_string();
     };
-    let mut output = String::with_capacity(tag.len() + attrs.len());
+    let attr = format!(r#" {attr_name}="{}""#, escape_html_attr(attr_value));
+    let mut output = String::with_capacity(tag.len() + attr.len());
     output.push_str(&tag[..insert_at]);
-    output.push_str(&attrs);
+    output.push_str(&attr);
     output.push_str(&tag[insert_at..]);
     output
-}
-
-fn has_html_attr(tag: &str, attr_name: &str) -> bool {
-    find_html_attr_value(tag, attr_name).is_some()
 }
 
 fn find_html_attr_value(tag: &str, attr_name: &str) -> Option<Range<usize>> {
@@ -3248,7 +3243,7 @@ Body
     fn render_rss_display_html_prefers_sanitized_source_html() {
         let html = render_rss_display_html(
             Some(
-                r#"<article><h2><a href="/story?x=1&amp;y=2">Story</a></h2><p><img src="/img/a.jpg" srcset="/img/a.jpg 1x, b.jpg 2x"></p><script>alert(1)</script></article>"#,
+                r#"<article><h2><a href="/story?x=1&amp;y=2" target="_self">Story</a></h2><p><img src="/img/a.jpg" srcset="/img/a.jpg 1x, b.jpg 2x"></p><script>alert(1)</script></article>"#,
             ),
             "Fallback **markdown**",
             "item-id",
@@ -3257,6 +3252,7 @@ Body
 
         assert!(html.contains(r#"href="https://example.test/story?x=1&amp;y=2""#));
         assert!(html.contains(r#"target="_blank""#));
+        assert!(!html.contains(r#"target="_self""#));
         assert!(html.contains(r#"rel="noopener noreferrer""#));
         assert!(html.contains(r#"src="https://example.test/img/a.jpg""#));
         assert!(html.contains(

@@ -8,14 +8,14 @@ let activeBlockTextarea = null;
 let rssListHtml = "";
 let rssListWrites = 0;
 let pendingSummaryNode = null;
-const rssFrameRootNode = { dataset: { rssFrameRoot: "1" } };
+const rssBodyNode = { dataset: { rssBody: "1" } };
 const pageContent = {
   hidden: false,
-  firstChild: rssFrameRootNode,
+  firstChild: rssBodyNode,
   insertedBefore: null,
   querySelector(selector) {
     if (selector === "[data-rss-summary-pending]") return pendingSummaryNode;
-    if (selector === "[data-rss-frame-root]") return rssFrameRootNode;
+    if (selector === "[data-rss-body]") return rssBodyNode;
     return null;
   },
   insertBefore(node, referenceNode) {
@@ -143,13 +143,11 @@ this.__obrTest = {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  rssDetailBodyHtml,
   rssAiSummaryHtml,
   rssSummaryActionHtml,
   renderRssSummaryPending,
   clearRssSummaryPending,
-  renderRssSandboxFrame,
-  rssFrameDocumentHtml,
-  RSS_IFRAME_SANDBOX,
 };`,
   sandbox,
 );
@@ -175,13 +173,11 @@ const {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  rssDetailBodyHtml,
   rssAiSummaryHtml,
   rssSummaryActionHtml,
   renderRssSummaryPending,
   clearRssSummaryPending,
-  renderRssSandboxFrame,
-  rssFrameDocumentHtml,
-  RSS_IFRAME_SANDBOX,
 } = sandbox.__obrTest;
 
 function assertSource(expected) {
@@ -495,6 +491,14 @@ function assertRssCacheSignatures() {
 }
 
 function assertRssAiSummaryHtml() {
+  const bodyHtml = rssDetailBodyHtml({ html: "<p>Hello</p>" });
+  assert(bodyHtml.includes('<article class="rss-detail-body" data-rss-body>'));
+  assert(bodyHtml.includes("<p>Hello</p>"));
+  assert.strictEqual(
+    rssDetailBodyHtml({ html: "" }),
+    '<article class="rss-detail-body" data-rss-body><p class="empty">No content.</p></article>',
+  );
+
   assert.strictEqual(rssAiSummaryHtml({}), "");
   assert(rssSummaryActionHtml({ id: "rss-1" }).includes('data-rss-summary="rss-1"'));
   assert(rssSummaryActionHtml({ id: "rss-1" }).includes("Summary"));
@@ -509,6 +513,9 @@ function assertRssAiSummaryHtml() {
   assert(html.includes("中文总结"));
   assert(html.includes("deepseek-v4-flash"));
   assert(html.includes("第一行<br>第二行 &lt;script&gt;"));
+
+  const openHtml = rssAiSummaryHtml({ ai_summary_zh: "新生成总结" }, { open: true });
+  assert(openHtml.includes('<details class="rss-ai-summary" open>'));
 }
 
 function assertRssSummaryLoadingState() {
@@ -523,7 +530,7 @@ function assertRssSummaryLoadingState() {
   assert.strictEqual(pendingSummaryNode.getAttribute("role"), "status");
   assert.strictEqual(pendingSummaryNode.getAttribute("aria-live"), "polite");
   assert(pendingSummaryNode.innerHTML.includes("Generating summary"));
-  assert.strictEqual(pageContent.insertedBefore, rssFrameRootNode);
+  assert.strictEqual(pageContent.insertedBefore, rssBodyNode);
 
   const firstPendingNode = pendingSummaryNode;
   renderRssSummaryPending();
@@ -533,37 +540,6 @@ function assertRssSummaryLoadingState() {
   assert.strictEqual(pendingSummaryNode, null);
 }
 
-function assertRssSandboxFrame() {
-  assert.strictEqual(RSS_IFRAME_SANDBOX, "allow-popups");
-  assert(!RSS_IFRAME_SANDBOX.includes("allow-scripts"));
-  assert(!RSS_IFRAME_SANDBOX.includes("allow-same-origin"));
-  assert(!RSS_IFRAME_SANDBOX.includes("allow-forms"));
-
-  const doc = rssFrameDocumentHtml("<p>Hello</p>");
-  assert(doc.includes('<base target="_blank">'));
-  assert(doc.includes('<link rel="stylesheet" href="/assets/style.css">'));
-  assert(doc.includes("<p>Hello</p>"));
-
-  let child = null;
-  renderRssSandboxFrame(
-    {
-      replaceChildren(node) {
-        child = node;
-      },
-    },
-    "<p>Hello</p>",
-    "Post",
-  );
-
-  assert(child);
-  assert.strictEqual(child.tagName, "IFRAME");
-  assert.strictEqual(child.className, "rss-detail-frame");
-  assert.strictEqual(child.title, "Post");
-  assert.strictEqual(child.getAttribute("sandbox"), "allow-popups");
-  assert.strictEqual(child.getAttribute("referrerpolicy"), "no-referrer");
-  assert(child.srcdoc.includes("<p>Hello</p>"));
-}
-
 (async () => {
   await assertRssMarkReadFromList();
   await assertRssPagination();
@@ -571,7 +547,6 @@ function assertRssSandboxFrame() {
   assertRssCacheSignatures();
   assertRssAiSummaryHtml();
   assertRssSummaryLoadingState();
-  assertRssSandboxFrame();
 })()
   .then(() => {
     console.log("editor and RSS regression tests passed");

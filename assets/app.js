@@ -121,7 +121,6 @@ const RECENT_EDITS_KEY = "obr.recent-edits";
 const SEARCH_CACHE_KEY = "obr.search-cache";
 const SEARCH_CACHE_LIMIT = 24;
 const RSS_ITEMS_PAGE_SIZE = 20;
-const RSS_IFRAME_SANDBOX = "allow-popups";
 const OUTBOX_KEY = "obr.offline.outbox";
 const APP_CONFIG_KEY = "obr.app-config";
 const CLIENT_ID_KEY = "obr.client-id";
@@ -2756,39 +2755,39 @@ function renderRssDetailPage(item, options = {}) {
   const publishedAt = formatTime(item.published_at || item.first_seen_at);
   const feedSource = item.feed_title || item.feed_url || "Unknown feed";
   const feedSourceHtml = item.feed_url
-    ? `<span>Source: <a href="${escapeHtmlAttr(item.feed_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(feedSource)}</a></span>`
-    : `<span>Source: ${escapeHtml(feedSource)}</span>`;
+    ? `<span class="rss-detail-source"><span class="rss-detail-source-label">Source:</span><a class="rss-detail-source-link" href="${escapeHtmlAttr(item.feed_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(feedSource)}</a></span>`
+    : `<span class="rss-detail-source"><span class="rss-detail-source-label">Source:</span><span class="rss-detail-source-name">${escapeHtml(feedSource)}</span></span>`;
   const metaHtml = `
     <p class="rss-detail-meta">
       ${feedSourceHtml}
-      ${publishedAt ? `<span>${escapeHtml(publishedAt)}</span>` : ""}
-      ${item.url ? `<a href="${escapeHtmlAttr(item.url)}" target="_blank" rel="noopener noreferrer">Original</a>` : ""}
+      ${publishedAt ? `<span class="rss-detail-time">${escapeHtml(publishedAt)}</span>` : ""}
+      ${item.url ? `<a class="rss-detail-original" href="${escapeHtmlAttr(item.url)}" target="_blank" rel="noopener noreferrer">Original</a>` : ""}
       ${rssSummaryActionHtml(item)}
     </p>
   `;
-  const bodyHtml = item.html?.trim() ? item.html : '<p class="empty">No content.</p>';
   showPage(
     item.title || "Untitled",
-    `${metaHtml}${rssAiSummaryHtml(item)}<div class="rss-detail-frame-shell" data-rss-frame-root></div>`,
+    `${metaHtml}${rssAiSummaryHtml(item, { open: Boolean(options.expandAiSummary) })}${rssDetailBodyHtml(item)}`,
     "rss",
     { ...options, editable: false, restoreReading: false, deferEnhancements: true },
-  );
-  renderRssSandboxFrame(
-    el("page-content").querySelector("[data-rss-frame-root]"),
-    bodyHtml,
-    item.title || "RSS content",
   );
   scheduleRssDetailEnhancements(renderId);
   updateRssPageActions();
 }
 
-function rssAiSummaryHtml(item) {
+function rssDetailBodyHtml(item) {
+  const bodyHtml = item?.html?.trim() ? item.html : '<p class="empty">No content.</p>';
+  return `<article class="rss-detail-body" data-rss-body>${bodyHtml}</article>`;
+}
+
+function rssAiSummaryHtml(item, options = {}) {
   const summary = (item?.ai_summary_zh || "").trim();
   if (!summary) return "";
   const model = (item?.ai_summary_model || "").trim();
   const meta = model ? `<span>${escapeHtml(model)}</span>` : "";
+  const openAttr = options.open ? " open" : "";
   return `
-    <details class="rss-ai-summary">
+    <details class="rss-ai-summary"${openAttr}>
       <summary><strong>中文总结</strong>${meta}</summary>
       <p>${escapeHtml(summary).replace(/\n/g, "<br>")}</p>
     </details>
@@ -2798,7 +2797,7 @@ function rssAiSummaryHtml(item) {
 function rssSummaryActionHtml(item) {
   if ((item?.ai_summary_zh || "").trim()) return "";
   if (!item?.id) return "";
-  return `<button class="rss-summary-button" type="button" data-rss-summary="${escapeHtmlAttr(item.id)}">${iconSvg("sparkles")}<span>Summary</span></button>`;
+  return `<button class="rss-summary-button" type="button" data-rss-summary="${escapeHtmlAttr(item.id)}" aria-label="Summary" title="Summary">${iconSvg("sparkles")}<span>Summary</span></button>`;
 }
 
 async function summarizeCurrentRssItem(button) {
@@ -2809,6 +2808,8 @@ async function summarizeCurrentRssItem(button) {
   button.disabled = true;
   button.classList.add("is-loading");
   button.setAttribute("aria-busy", "true");
+  button.setAttribute("aria-label", "Summarizing");
+  button.title = "Summarizing";
   button.innerHTML = `${iconSvg("loader")}<span>Summarizing</span>`;
   renderRssSummaryPending();
   setRssStatus("Summarizing RSS item...", "loading");
@@ -2822,7 +2823,11 @@ async function summarizeCurrentRssItem(button) {
     const item = await response.json();
     if (requestId !== state.rssSummaryRequestId) return;
     state.rssItemCache.set(id, item);
-    renderRssDetailPage(item, { updateHistory: false, saveScroll: false });
+    renderRssDetailPage(item, {
+      updateHistory: false,
+      saveScroll: false,
+      expandAiSummary: true,
+    });
     setRssStatus("");
     showToast("Summary ready.");
   } catch (error) {
@@ -2831,6 +2836,8 @@ async function summarizeCurrentRssItem(button) {
     button.disabled = false;
     button.classList.remove("is-loading");
     button.removeAttribute("aria-busy");
+    button.setAttribute("aria-label", "Summary");
+    button.title = "Summary";
     button.innerHTML = `${iconSvg("sparkles")}<span>Summary</span>`;
     clearRssSummaryPending();
     setRssStatus(error.message || "Summary failed.", "error");
@@ -2840,48 +2847,18 @@ async function summarizeCurrentRssItem(button) {
 function renderRssSummaryPending() {
   const content = el("page-content");
   if (!content || content.querySelector("[data-rss-summary-pending]")) return;
-  const frameRoot = content.querySelector("[data-rss-frame-root]");
+  const bodyRoot = content.querySelector("[data-rss-body]");
   const pending = document.createElement("div");
   pending.className = "rss-ai-summary rss-ai-summary-pending";
   pending.dataset.rssSummaryPending = "1";
   pending.setAttribute("role", "status");
   pending.setAttribute("aria-live", "polite");
   pending.innerHTML = `${iconSvg("loader")}<span>Generating summary...</span>`;
-  content.insertBefore(pending, frameRoot || content.firstChild);
+  content.insertBefore(pending, bodyRoot || content.firstChild);
 }
 
 function clearRssSummaryPending() {
   el("page-content")?.querySelector("[data-rss-summary-pending]")?.remove();
-}
-
-function renderRssSandboxFrame(root, html, title = "RSS content") {
-  if (!root) return;
-  const iframe = document.createElement("iframe");
-  iframe.className = "rss-detail-frame";
-  iframe.title = title;
-  iframe.setAttribute("sandbox", RSS_IFRAME_SANDBOX);
-  iframe.setAttribute("referrerpolicy", "no-referrer");
-  iframe.setAttribute("loading", "lazy");
-  iframe.srcdoc = rssFrameDocumentHtml(html);
-  root.replaceChildren(iframe);
-}
-
-function rssFrameDocumentHtml(html) {
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="referrer" content="no-referrer">
-  <base target="_blank">
-  <link rel="stylesheet" href="/assets/style.css">
-</head>
-<body class="markdown rss-frame-document">
-  <main class="rss-frame-content">
-    ${html || '<p class="empty">No content.</p>'}
-  </main>
-</body>
-</html>`;
 }
 
 function scheduleRssDetailEnhancements(renderId) {

@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260525-rss-summary-action";
+const CACHE_VERSION = "obr-offline-20260525-rss-meta-compact";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = "obr-images-v1";
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260525-rss-summary-action",
-  "/assets/app.js?v=20260525-rss-summary-action",
+  "/assets/style.css?v=20260525-rss-meta-compact",
+  "/assets/app.js?v=20260525-rss-meta-compact",
 ];
 
 self.addEventListener("install", (event) => {

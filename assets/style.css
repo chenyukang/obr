@@ -1231,15 +1231,17 @@ main {
 
 .rss-detail-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 8px 12px;
+  gap: 8px;
   margin: 0 0 16px;
   border-bottom: 1px solid var(--line);
   padding-bottom: 12px;
   color: var(--muted);
   font-size: 13px;
   font-weight: 750;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .rss-detail-meta a {
@@ -1247,8 +1249,37 @@ main {
   font-weight: 800;
 }
 
+.rss-detail-source {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.rss-detail-source-label {
+  flex: 0 0 auto;
+}
+
+.rss-detail-source-link,
+.rss-detail-source-name {
+  display: inline-block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.rss-detail-time,
+.rss-detail-original {
+  flex: 0 0 auto;
+}
+
 .rss-summary-button {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 5px;
   min-height: 26px;
@@ -1358,41 +1389,27 @@ main {
   margin: 0;
 }
 
-.rss-detail-frame-shell {
-  margin-top: 10px;
-}
-
-.rss-detail-frame {
-  display: block;
-  width: 100%;
-  height: min(74dvh, 900px);
-  min-height: 520px;
-  border: 0;
-  background: #ffffff;
-}
-
-.rss-frame-document {
-  min-height: auto;
-  margin: 0;
-  background: #ffffff;
-  color: #1f2f37;
-  font-size: 16px;
-  line-height: 1.7;
-  word-break: break-word;
-}
-
-.rss-frame-content {
+.rss-detail-body {
   max-width: 100%;
-  padding: 0 2px 28px;
+  margin-top: 10px;
+  overflow-wrap: anywhere;
 }
 
-.rss-frame-content img,
-.rss-frame-content video {
+.rss-detail-body > :first-child {
+  margin-top: 0;
+}
+
+.rss-detail-body > :last-child {
+  margin-bottom: 0;
+}
+
+.rss-detail-body img,
+.rss-detail-body video {
   max-width: 100%;
   height: auto;
 }
 
-.rss-frame-content table {
+.rss-detail-body table {
   max-width: 100%;
 }
 
@@ -2245,6 +2262,30 @@ a {
   .rss-search input {
     min-height: 36px;
     padding: 8px 34px 8px 10px;
+  }
+
+  .rss-detail-meta {
+    gap: 7px;
+    font-size: 12px;
+  }
+
+  .rss-summary-button {
+    width: 28px;
+    min-width: 28px;
+    height: 28px;
+    min-height: 28px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .rss-summary-button span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    white-space: nowrap;
+    clip: rect(0, 0, 0, 0);
   }
 
   #rss-view.has-reader .rss-layout {
