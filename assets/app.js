@@ -1943,6 +1943,8 @@ async function showView(name, options = {}) {
   if (name === "rss") {
     clearPageOutline();
     updateReadingProgress();
+    state.rssItemRequestId += 1;
+    state.rssDetailRenderId += 1;
     state.lastListView = "rss";
     el("rss-view").hidden = false;
     updateRssFilterButtons();
@@ -2766,8 +2768,7 @@ async function markRssItemReadFromList(id, button) {
       body: JSON.stringify({ read: true }),
     });
     if (!response.ok) throw new Error(await response.text());
-    clearRssItemsCache();
-    updateCachedRssItem(id, { read_at: new Date().toISOString() });
+    markRssItemReadLocally(id);
     if (state.rssFilter === "unread") {
       button.closest("[data-rss-row]")?.remove();
       if (!el("rss-list").querySelector("[data-rss-row]")) {
@@ -2790,6 +2791,7 @@ async function openRssItem(id, options = {}) {
   const requestId = state.rssItemRequestId + 1;
   state.rssItemRequestId = requestId;
   state.rssSelectedItemId = id;
+  markRssItemReadLocally(id);
   markSelectedRssItem();
   const cachedItem = state.rssItemCache.get(id);
   const renderedCache = Boolean(cachedItem);
@@ -2807,8 +2809,7 @@ async function openRssItem(id, options = {}) {
     const item = await response.json();
     if (requestId !== state.rssItemRequestId) return;
     const changed = !cachedItem || !sameRssItemDetail(cachedItem, item);
-    const becameRead = !cachedItem?.read_at && Boolean(item.read_at);
-    if (becameRead) clearRssItemsCache();
+    if (item.read_at) markRssItemReadLocally(id, item.read_at);
     state.rssItemCache.set(id, item);
     if (changed || !renderedCache) {
       if (!renderedCache) setRssStatus("Rendering RSS item...", "loading");
@@ -3250,6 +3251,31 @@ function clearRssItemCache(id = "") {
 function clearRssCaches() {
   clearRssItemsCache();
   clearRssItemCache();
+}
+
+function markRssItemReadLocally(id, readAt = new Date().toISOString()) {
+  if (!id) return "";
+  updateCachedRssItem(id, { read_at: readAt });
+  for (const [key, page] of state.rssItemsCache.entries()) {
+    if (!Array.isArray(page?.items) || !page.items.length) continue;
+    const filter = key.split("\n", 1)[0];
+    let changed = false;
+    const items = [];
+    for (const item of page.items) {
+      if (item?.id !== id) {
+        items.push(item);
+        continue;
+      }
+      changed = true;
+      if (filter !== "unread") {
+        items.push({ ...item, read_at: readAt });
+      }
+    }
+    if (changed) {
+      state.rssItemsCache.set(key, { ...page, items });
+    }
+  }
+  return readAt;
 }
 
 function updateCachedRssItem(id, patch) {

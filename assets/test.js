@@ -192,6 +192,7 @@ this.__obrTest = {
   rssItemHtml,
   handleRssListClick,
   markRssItemReadFromList,
+  markRssItemReadLocally,
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
@@ -228,6 +229,7 @@ const {
   rssItemHtml,
   handleRssListClick,
   markRssItemReadFromList,
+  markRssItemReadLocally,
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
@@ -441,6 +443,49 @@ async function assertRssMarkReadFromList() {
   };
   await markRssItemReadFromList("", directButton);
   assert.strictEqual(fetchCalls.length, 1);
+}
+
+function assertRssMarkReadLocalCache() {
+  state.rssItemsCache.clear();
+  state.rssItemCache.clear();
+  const unreadItem = {
+    id: "rss-cache-read",
+    title: "Read me",
+    feed_title: "Feed",
+    first_seen_at: "2026-05-25T00:00:00Z",
+    read_at: null,
+  };
+  const otherItem = {
+    id: "rss-cache-other",
+    title: "Still unread",
+    feed_title: "Feed",
+    first_seen_at: "2026-05-25T00:00:01Z",
+    read_at: null,
+  };
+  state.rssItemsCache.set("unread\n", {
+    items: [unreadItem, otherItem],
+    nextOffset: 20,
+  });
+  state.rssItemsCache.set("all\n", {
+    items: [unreadItem],
+    nextOffset: null,
+  });
+  state.rssItemCache.set("rss-cache-read", {
+    id: "rss-cache-read",
+    title: "Read me",
+    read_at: null,
+    html: "<p>Read me</p>",
+  });
+
+  const readAt = "2026-05-25T00:00:02.000Z";
+  assert.strictEqual(markRssItemReadLocally("rss-cache-read", readAt), readAt);
+  assert.strictEqual(
+    state.rssItemsCache.get("unread\n").items.map((item) => item.id).join(","),
+    "rss-cache-other",
+  );
+  assert.strictEqual(state.rssItemsCache.get("unread\n").nextOffset, 20);
+  assert.strictEqual(state.rssItemsCache.get("all\n").items[0].read_at, readAt);
+  assert.strictEqual(state.rssItemCache.get("rss-cache-read").read_at, readAt);
 }
 
 async function assertRssPagination() {
@@ -693,6 +738,7 @@ function assertRssSearchDisclosure() {
 
 (async () => {
   await assertRssMarkReadFromList();
+  assertRssMarkReadLocalCache();
   await assertRssPagination();
   await assertRssListCacheRefresh();
   assertRssCacheSignatures();
