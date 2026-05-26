@@ -80,6 +80,24 @@ pub(crate) struct Config {
     pub(crate) deepseek_api_base: String,
     #[serde(default = "default_deepseek_model")]
     pub(crate) deepseek_model: String,
+    #[serde(default = "default_rss_ai_translation_provider")]
+    pub(crate) rss_ai_translation_provider: String,
+    #[serde(default, alias = "tencent_secretid")]
+    pub(crate) tencent_secret_id: Option<String>,
+    #[serde(default, alias = "tencent_secretkey")]
+    pub(crate) tencent_secret_key: Option<String>,
+    #[serde(default = "default_tencent_translate_endpoint")]
+    pub(crate) tencent_translate_endpoint: String,
+    #[serde(default = "default_tencent_translate_region")]
+    pub(crate) tencent_translate_region: String,
+    #[serde(default = "default_tencent_translate_source")]
+    pub(crate) tencent_translate_source: String,
+    #[serde(default = "default_tencent_translate_target")]
+    pub(crate) tencent_translate_target: String,
+    #[serde(default)]
+    pub(crate) tencent_translate_project_id: i64,
+    #[serde(default = "default_tencent_translate_max_chars")]
+    pub(crate) tencent_translate_max_chars: usize,
 }
 
 fn default_session_days() -> u64 {
@@ -156,6 +174,30 @@ fn default_deepseek_api_base() -> String {
 
 fn default_deepseek_model() -> String {
     "deepseek-v4-flash".to_string()
+}
+
+fn default_rss_ai_translation_provider() -> String {
+    "deepseek".to_string()
+}
+
+fn default_tencent_translate_endpoint() -> String {
+    "https://tmt.tencentcloudapi.com".to_string()
+}
+
+fn default_tencent_translate_region() -> String {
+    "ap-guangzhou".to_string()
+}
+
+fn default_tencent_translate_source() -> String {
+    "en".to_string()
+}
+
+fn default_tencent_translate_target() -> String {
+    "zh".to_string()
+}
+
+fn default_tencent_translate_max_chars() -> usize {
+    1_800
 }
 
 impl Config {
@@ -248,8 +290,14 @@ impl Config {
                 bail!("rss_ai_summary_chars must be greater than 0");
             }
             if self.rss_ai_full_translation_enabled && !self.rss_ai_summary_enabled {
-                bail!("rss_ai_full_translation_enabled requires rss_ai_summary_enabled = true");
+                let provider = self.rss_ai_translation_provider.trim();
+                if provider.eq_ignore_ascii_case("deepseek") {
+                    bail!(
+                        "rss_ai_full_translation_enabled with deepseek requires rss_ai_summary_enabled = true"
+                    );
+                }
             }
+            self.validate_rss_translation_config()?;
             if self.rss_ai_summary_enabled
                 && self
                     .deepseek_api_key
@@ -288,6 +336,53 @@ impl Config {
         }
         if !self.secure_cookies && !self.is_loopback_listen() {
             warn!("secure_cookies is disabled; enable it when serving Obr over HTTPS");
+        }
+        Ok(())
+    }
+
+    fn validate_rss_translation_config(&self) -> Result<()> {
+        let provider = self.rss_ai_translation_provider.trim().to_ascii_lowercase();
+        match provider.as_str() {
+            "deepseek" | "tencent" => {}
+            _ => bail!("rss_ai_translation_provider must be \"deepseek\" or \"tencent\""),
+        }
+        if self.tencent_secret_id.is_some() ^ self.tencent_secret_key.is_some() {
+            bail!("configure both tencent_secret_id and tencent_secret_key, or neither");
+        }
+        if self.rss_ai_full_translation_enabled && provider == "tencent" {
+            if self
+                .tencent_secret_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                bail!("rss_ai_full_translation_enabled with tencent requires tencent_secret_id");
+            }
+            if self
+                .tencent_secret_key
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                bail!("rss_ai_full_translation_enabled with tencent requires tencent_secret_key");
+            }
+        }
+        if self.tencent_translate_endpoint.trim().is_empty() {
+            bail!("tencent_translate_endpoint cannot be empty");
+        }
+        if self.tencent_translate_region.trim().is_empty() {
+            bail!("tencent_translate_region cannot be empty");
+        }
+        if self.tencent_translate_source.trim().is_empty() {
+            bail!("tencent_translate_source cannot be empty");
+        }
+        if self.tencent_translate_target.trim().is_empty() {
+            bail!("tencent_translate_target cannot be empty");
+        }
+        if self.tencent_translate_max_chars == 0 {
+            bail!("tencent_translate_max_chars must be greater than 0");
         }
         Ok(())
     }
@@ -424,6 +519,15 @@ mod tests {
             deepseek_api_key: None,
             deepseek_api_base: "https://api.deepseek.com".to_string(),
             deepseek_model: "deepseek-v4-flash".to_string(),
+            rss_ai_translation_provider: "deepseek".to_string(),
+            tencent_secret_id: None,
+            tencent_secret_key: None,
+            tencent_translate_endpoint: "https://tmt.tencentcloudapi.com".to_string(),
+            tencent_translate_region: "ap-guangzhou".to_string(),
+            tencent_translate_source: "en".to_string(),
+            tencent_translate_target: "zh".to_string(),
+            tencent_translate_project_id: 0,
+            tencent_translate_max_chars: 1_800,
         }
     }
 
@@ -452,6 +556,31 @@ mod tests {
 
         let err = config.validate_auth_config().unwrap_err().to_string();
         assert!(err.contains("rss_ai_full_translation_enabled"));
+    }
+
+    #[test]
+    fn tencent_full_translation_does_not_require_ai_summary() {
+        let mut config = test_config();
+        config.allow_plaintext_password = true;
+        config.rss_enabled = true;
+        config.rss_ai_summary_enabled = false;
+        config.rss_ai_full_translation_enabled = true;
+        config.rss_ai_translation_provider = "tencent".to_string();
+        config.tencent_secret_id = Some("id".to_string());
+        config.tencent_secret_key = Some("key".to_string());
+
+        assert!(config.validate_auth_config().is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_translation_provider() {
+        let mut config = test_config();
+        config.allow_plaintext_password = true;
+        config.rss_enabled = true;
+        config.rss_ai_translation_provider = "unknown".to_string();
+
+        let err = config.validate_auth_config().unwrap_err().to_string();
+        assert!(err.contains("rss_ai_translation_provider"));
     }
 
     #[test]

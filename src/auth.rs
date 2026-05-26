@@ -247,6 +247,15 @@ mod tests {
             deepseek_api_key: None,
             deepseek_api_base: "https://api.deepseek.com".to_string(),
             deepseek_model: "deepseek-v4-flash".to_string(),
+            rss_ai_translation_provider: "deepseek".to_string(),
+            tencent_secret_id: None,
+            tencent_secret_key: None,
+            tencent_translate_endpoint: "https://tmt.tencentcloudapi.com".to_string(),
+            tencent_translate_region: "ap-guangzhou".to_string(),
+            tencent_translate_source: "en".to_string(),
+            tencent_translate_target: "zh".to_string(),
+            tencent_translate_project_id: 0,
+            tencent_translate_max_chars: 1_800,
         }
     }
 

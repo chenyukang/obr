@@ -17,7 +17,33 @@ const topbarNode = {
     return { top: 0, bottom: 64 };
   },
 };
+const rssTranslateFloatingButton = {
+  hidden: true,
+  disabled: false,
+  title: "",
+  innerHTML: "",
+  dataset: {},
+  attributes: {},
+  classes: new Set(),
+  classList: {
+    toggle(name, active) {
+      if (active) rssTranslateFloatingButton.classes.add(name);
+      else rssTranslateFloatingButton.classes.delete(name);
+    },
+    remove(name) {
+      rssTranslateFloatingButton.classes.delete(name);
+    },
+  },
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  },
+  removeAttribute(name) {
+    delete this.attributes[name];
+  },
+};
 const rssBodyNode = { dataset: { rssBody: "1" } };
+let rssTranslationNode = null;
+let rssTranslationErrorNode = null;
 const pageContent = {
   hidden: false,
   firstChild: rssBodyNode,
@@ -25,10 +51,13 @@ const pageContent = {
   querySelector(selector) {
     if (selector === "[data-rss-summary-pending]") return pendingSummaryNode;
     if (selector === "[data-rss-body]") return rssBodyNode;
+    if (selector === ".rss-ai-translation") return rssTranslationNode;
+    if (selector === "[data-rss-translation-error]") return rssTranslationErrorNode;
     return null;
   },
   insertBefore(node, referenceNode) {
-    pendingSummaryNode = node;
+    if (node.dataset?.rssTranslationError) rssTranslationErrorNode = node;
+    else pendingSummaryNode = node;
     this.insertedBefore = referenceNode;
   },
 };
@@ -97,6 +126,7 @@ const elements = {
   "rss-search-input": rssSearchInput,
   "rss-search-toggle": rssSearchToggle,
   "rss-search-clear": { hidden: true },
+  "rss-translate-floating-button": rssTranslateFloatingButton,
   "update-banner": { hidden: true },
   "rss-status": {
     textContent: "",
@@ -134,6 +164,7 @@ const sandbox = {
         },
         remove() {
           if (pendingSummaryNode === this) pendingSummaryNode = null;
+          if (rssTranslationErrorNode === this) rssTranslationErrorNode = null;
         },
       };
     },
@@ -217,8 +248,13 @@ this.__obrTest = {
   rssDetailExternalLinksHtml,
   rssDetailBodyHtml,
   rssAiSummaryHtml,
+  rssAiEnrichmentErrorHtml,
   renderRssSummaryPending,
   clearRssSummaryPending,
+  renderRssTranslationPending,
+  renderRssTranslationError,
+  clearRssTranslationError,
+  updateRssTranslationFloatingButton,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
@@ -260,8 +296,13 @@ const {
   rssDetailExternalLinksHtml,
   rssDetailBodyHtml,
   rssAiSummaryHtml,
+  rssAiEnrichmentErrorHtml,
   renderRssSummaryPending,
   clearRssSummaryPending,
+  renderRssTranslationPending,
+  renderRssTranslationError,
+  clearRssTranslationError,
+  updateRssTranslationFloatingButton,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
@@ -633,6 +674,7 @@ function assertRssCacheSignatures() {
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, read_at: "2026-05-25T00:00:01Z" }), false);
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, ai_summary_zh: "新的总结" }), false);
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, ai_translation_html: "<p>译文</p>" }), false);
+  assert.strictEqual(sameRssItemDetail(detail, { ...detail, ai_enrichment_error: "rate limited" }), false);
 }
 
 function assertRssResumeState() {
@@ -759,6 +801,15 @@ function assertRssAiSummaryHtml() {
   const openHtml = rssAiSummaryHtml({ ai_summary_zh: "新生成总结" }, { open: true });
   assert(openHtml.includes('<details class="rss-ai-summary" open>'));
 
+  assert.strictEqual(rssAiEnrichmentErrorHtml({}), "");
+  const enrichmentErrorHtml = rssAiEnrichmentErrorHtml({
+    ai_enrichment_error: "HTTP 429 <limit>",
+    ai_enrichment_next_attempt_at: "2026-05-26T10:30:00Z",
+  });
+  assert(enrichmentErrorHtml.includes("自动总结/翻译失败"));
+  assert(enrichmentErrorHtml.includes("HTTP 429 &lt;limit&gt;"));
+  assert(enrichmentErrorHtml.includes("下次自动重试"));
+
   const hnLinksHtml = rssDetailExternalLinksHtml({
     url: "https://example.test/post",
     hacker_news_url: "https://news.ycombinator.com/item?id=48260331",
@@ -810,6 +861,91 @@ function assertRssAiSummaryHtml() {
   assert(firstSourceIndex < firstTranslationIndex);
   assert(firstTranslationIndex < secondSourceIndex);
   assert(secondSourceIndex < secondTranslationIndex);
+}
+
+function assertRssTranslationButtonShowsWhenMissingTranslation() {
+  const previous = {
+    view: state.view,
+    currentFile: state.currentFile,
+    selectedItemId: state.rssSelectedItemId,
+    needsTranslation: state.rssCurrentNeedsTranslation,
+    hasTranslation: state.rssCurrentHasTranslation,
+    pageEditorHidden: pageEditor.hidden,
+    translationNode: rssTranslationNode,
+  };
+  try {
+    rssTranslateFloatingButton.hidden = true;
+    rssTranslateFloatingButton.disabled = true;
+    rssTranslateFloatingButton.title = "";
+    rssTranslateFloatingButton.innerHTML = "";
+    rssTranslateFloatingButton.dataset = {};
+    rssTranslateFloatingButton.attributes = {};
+    rssTranslateFloatingButton.classes.clear();
+    state.view = "page";
+    state.currentFile = "rss:item-1";
+    state.rssSelectedItemId = "item-1";
+    state.rssCurrentNeedsTranslation = true;
+    pageEditor.hidden = true;
+    rssTranslationNode = null;
+
+    updateRssTranslationFloatingButton();
+
+    assert.strictEqual(rssTranslateFloatingButton.hidden, false);
+    assert.strictEqual(rssTranslateFloatingButton.disabled, false);
+    assert.strictEqual(rssTranslateFloatingButton.dataset.rssTranslation, "item-1");
+    assert.strictEqual(rssTranslateFloatingButton.title, "Translate full text");
+    assert.strictEqual(rssTranslateFloatingButton.attributes["aria-label"], "Translate full text");
+    assert(!rssTranslateFloatingButton.classes.has("has-translation"));
+    assert(rssTranslateFloatingButton.innerHTML.includes("Translate full text"));
+
+    rssTranslationNode = { tagName: "DETAILS" };
+    state.rssCurrentNeedsTranslation = false;
+    updateRssTranslationFloatingButton();
+
+    assert.strictEqual(rssTranslateFloatingButton.hidden, false);
+    assert.strictEqual(rssTranslateFloatingButton.title, "Show translation");
+    assert(rssTranslateFloatingButton.classes.has("has-translation"));
+
+    rssTranslationNode = null;
+    updateRssTranslationFloatingButton();
+
+    assert.strictEqual(rssTranslateFloatingButton.hidden, true);
+  } finally {
+    state.view = previous.view;
+    state.currentFile = previous.currentFile;
+    state.rssSelectedItemId = previous.selectedItemId;
+    state.rssCurrentNeedsTranslation = previous.needsTranslation;
+    state.rssCurrentHasTranslation = previous.hasTranslation;
+    pageEditor.hidden = previous.pageEditorHidden;
+    rssTranslationNode = previous.translationNode;
+  }
+}
+
+function assertRssTranslationErrorState() {
+  pendingSummaryNode = null;
+  rssTranslationErrorNode = null;
+  pageContent.insertedBefore = null;
+
+  const error = renderRssTranslationError("Tencent error <bad>");
+
+  assert.strictEqual(error, rssTranslationErrorNode);
+  assert.strictEqual(error.className, "rss-ai-summary rss-ai-translation-error");
+  assert.strictEqual(error.dataset.rssTranslationError, "1");
+  assert.strictEqual(error.getAttribute("role"), "alert");
+  assert.strictEqual(error.getAttribute("aria-live"), "assertive");
+  assert(error.innerHTML.includes("全文翻译失败"));
+  assert(error.innerHTML.includes("Tencent error &lt;bad&gt;"));
+  assert.strictEqual(pageContent.insertedBefore, rssBodyNode);
+
+  clearRssTranslationError();
+  assert.strictEqual(rssTranslationErrorNode, null);
+
+  renderRssTranslationError("previous failure");
+  assert(rssTranslationErrorNode);
+  renderRssTranslationPending();
+  assert.strictEqual(rssTranslationErrorNode, null);
+  assert(pendingSummaryNode);
+  assert.strictEqual(pendingSummaryNode.dataset.rssTranslationPending, "1");
 }
 
 function assertRssSummaryLoadingState() {
@@ -899,6 +1035,8 @@ function assertRssSearchDisclosure() {
   assertRssDetailBackTarget();
   assertThemeSchedule();
   assertRssAiSummaryHtml();
+  assertRssTranslationButtonShowsWhenMissingTranslation();
+  assertRssTranslationErrorState();
   assertRssSummaryLoadingState();
   assertRssSummaryFocusUsesStickyOffset();
   assertRssSearchDisclosure();

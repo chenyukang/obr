@@ -42,6 +42,17 @@ rss_ai_summary_chars = 200
 # deepseek_api_key = "sk-..."
 deepseek_api_base = "https://api.deepseek.com"
 deepseek_model = "deepseek-v4-flash"
+# Full-text translation provider. "deepseek" reuses the chat API above.
+# "tencent" uses Tencent Cloud Machine Translation with SecretId/SecretKey.
+rss_ai_translation_provider = "deepseek"
+# tencent_secret_id = "AKID..."
+# tencent_secret_key = "..."
+tencent_translate_endpoint = "https://tmt.tencentcloudapi.com"
+tencent_translate_region = "ap-guangzhou"
+tencent_translate_source = "en"
+tencent_translate_target = "zh"
+tencent_translate_project_id = 0
+tencent_translate_max_chars = 1800
 
 # Passkeys/WebAuthn. Keep RP ID stable; changing it invalidates registered passkeys.
 passkey_store_path = "data/passkeys.json"

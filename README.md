@@ -129,6 +129,15 @@ rss_ai_summary_chars = 200
 deepseek_api_key = "sk-..."
 deepseek_api_base = "https://api.deepseek.com"
 deepseek_model = "deepseek-v4-flash"
+rss_ai_translation_provider = "deepseek"
+# tencent_secret_id = "AKID..."
+# tencent_secret_key = "..."
+tencent_translate_endpoint = "https://tmt.tencentcloudapi.com"
+tencent_translate_region = "ap-guangzhou"
+tencent_translate_source = "en"
+tencent_translate_target = "zh"
+tencent_translate_project_id = 0
+tencent_translate_max_chars = 1800
 ```
 
 `rss_feeds_path` is relative to `vault_path` and should contain one RSS, Atom,
@@ -152,9 +161,16 @@ the prompt, not a hard server-side truncation limit; the default asks for about
 200 Chinese characters and allows the model to stay natural. Existing items are
 not summarized again during ordinary refreshes. Full-text translation is off by
 default to avoid surprise API cost. Set `rss_ai_full_translation_enabled = true`
-to also request and store full Chinese translations during RSS refresh. The RSS
-detail page's manual Translate action remains available when the DeepSeek API is
-configured.
+to also request and store full Chinese translations during RSS refresh.
+
+`rss_ai_translation_provider` controls full-text translation. `deepseek` reuses
+the configured chat API and stores the model's bilingual Markdown. `tencent`
+uses Tencent Cloud Machine Translation and requires `tencent_secret_id` plus
+`tencent_secret_key` in your private `config/local.toml`; `config.example.toml`
+should keep only placeholders. Tencent translation stores the same bilingual
+Markdown shape as the DeepSeek path: each original block followed by a quoted
+Chinese translation. The RSS detail page's manual Translate action is available
+when the selected translation provider is configured.
 
 RSS detail annotations are saved as Markdown under `annotation_dir`, which
 defaults to `annotations`. Each RSS post gets one annotation file and additional

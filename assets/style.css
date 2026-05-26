@@ -1474,6 +1474,30 @@ main {
   animation: obr-spin 850ms linear infinite;
 }
 
+.rss-ai-translation-error {
+  display: grid;
+  gap: 6px;
+  border-left-color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.rss-ai-translation-error strong {
+  font-size: 14px;
+}
+
+.rss-ai-translation-error span {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.rss-ai-translation-error small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .rss-detail-loading {
   display: grid;
   justify-items: center;
@@ -1584,6 +1608,10 @@ a {
 
 #page-view {
   padding-bottom: calc(64px + env(safe-area-inset-bottom));
+}
+
+.rss-detail-action-bar {
+  display: contents;
 }
 
 .toc-button,
@@ -2678,6 +2706,71 @@ body:has(#rss-annotation-button:not([hidden])):has(#rss-translate-floating-butto
 
   .metadata-value {
     margin-bottom: 8px;
+  }
+
+  .rss-detail-action-bar:has(.rss-summary-floating-button:not([hidden])),
+  .rss-detail-action-bar:has(.rss-translate-floating-button:not([hidden])),
+  .rss-detail-action-bar:has(.rss-side-action:not([hidden])) {
+    position: fixed;
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    bottom: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+    background: color-mix(in srgb, var(--bg) 86%, transparent);
+    box-shadow: 0 -12px 30px rgb(var(--shadow-rgb) / 18%);
+    backdrop-filter: blur(14px);
+    pointer-events: none;
+  }
+
+  .rss-detail-action-bar:has(.rss-summary-floating-button:not([hidden])) .toc-button,
+  .rss-detail-action-bar:has(.rss-translate-floating-button:not([hidden])) .toc-button,
+  .rss-detail-action-bar:has(.rss-side-action:not([hidden])) .toc-button,
+  .rss-detail-action-bar:has(.rss-summary-floating-button:not([hidden])) .rss-summary-floating-button,
+  .rss-detail-action-bar:has(.rss-translate-floating-button:not([hidden])) .rss-summary-floating-button,
+  .rss-detail-action-bar:has(.rss-side-action:not([hidden])) .rss-summary-floating-button,
+  .rss-detail-action-bar:has(.rss-summary-floating-button:not([hidden])) .rss-translate-floating-button,
+  .rss-detail-action-bar:has(.rss-translate-floating-button:not([hidden])) .rss-translate-floating-button,
+  .rss-detail-action-bar:has(.rss-side-action:not([hidden])) .rss-translate-floating-button,
+  .rss-detail-action-bar:has(.rss-summary-floating-button:not([hidden])) .rss-side-action,
+  .rss-detail-action-bar:has(.rss-translate-floating-button:not([hidden])) .rss-side-action,
+  .rss-detail-action-bar:has(.rss-side-action:not([hidden])) .rss-side-action {
+    position: static;
+    right: auto;
+    bottom: auto;
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    pointer-events: auto;
+  }
+
+  .rss-summary-floating-button {
+    order: 1;
+  }
+
+  .rss-translate-floating-button {
+    order: 2;
+  }
+
+  .rss-side-action-annotate {
+    order: 3;
+  }
+
+  .toc-button {
+    order: 4;
+  }
+
+  .rss-side-action-star {
+    order: 5;
+  }
+
+  .rss-side-action-unsubscribe {
+    order: 6;
   }
 
   .toc-button,

@@ -10,5 +10,6 @@ mod origin;
 mod passkeys;
 mod routes;
 mod rss;
+mod tencent_translate;
 
 pub use app::run;

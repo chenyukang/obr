@@ -2918,6 +2918,9 @@ function rssItemDetailSignature(item) {
     ai_translation_html: item?.ai_translation_html || "",
     ai_translation_model: item?.ai_translation_model || "",
     ai_translation_at: item?.ai_translation_at || "",
+    ai_enrichment_error: item?.ai_enrichment_error || "",
+    ai_enrichment_failed_at: item?.ai_enrichment_failed_at || "",
+    ai_enrichment_next_attempt_at: item?.ai_enrichment_next_attempt_at || "",
     needs_translation: Boolean(item?.needs_translation),
     hacker_news_url: item?.hacker_news_url || "",
     content_source: item?.content_source || "",
@@ -2985,7 +2988,7 @@ function renderRssDetailPage(item, options = {}) {
   `;
   showPage(
     item.title || "Untitled",
-    `${metaHtml}${rssAiSummaryHtml(item, { open: Boolean(options.expandAiSummary) })}${rssDetailBodyHtml(item, { openTranslation: Boolean(options.expandAiTranslation) })}`,
+    `${metaHtml}${rssAiSummaryHtml(item, { open: Boolean(options.expandAiSummary) })}${rssAiEnrichmentErrorHtml(item)}${rssDetailBodyHtml(item, { openTranslation: Boolean(options.expandAiTranslation) })}`,
     "rss",
     {
       ...options,
@@ -3039,6 +3042,22 @@ function rssAiSummaryHtml(item, options = {}) {
       <summary><strong>中文总结</strong>${meta}</summary>
       <p>${escapeHtml(summary).replace(/\n/g, "<br>")}</p>
     </details>
+  `;
+}
+
+function rssAiEnrichmentErrorHtml(item) {
+  const message = (item?.ai_enrichment_error || "").trim();
+  if (!message) return "";
+  const retryAt = formatTime(item?.ai_enrichment_next_attempt_at);
+  const retryHtml = retryAt
+    ? `<small>下次自动重试：${escapeHtml(retryAt)}</small>`
+    : "";
+  return `
+    <div class="rss-ai-summary rss-ai-translation-error rss-ai-enrichment-error" role="alert" aria-live="polite">
+      <strong>自动总结/翻译失败</strong>
+      <span>${escapeHtml(message)}</span>
+      ${retryHtml}
+    </div>
   `;
 }
 
@@ -3206,8 +3225,11 @@ async function translateCurrentRssItem(button) {
   } catch (error) {
     if (requestId !== state.rssTranslationRequestId) return;
     console.error(error);
+    const message = readableRssAiError(error, "Translation failed.");
     clearRssTranslationPending();
-    setRssStatus(readableRssAiError(error, "Translation failed."), "error");
+    focusRssSummaryTarget(renderRssTranslationError(message));
+    setRssStatus(message, "error");
+    showToast(message);
   } finally {
     if (requestId === state.rssTranslationRequestId) {
       updateRssTranslationFloatingButton();
@@ -3218,6 +3240,7 @@ async function translateCurrentRssItem(button) {
 function renderRssTranslationPending() {
   const content = el("page-content");
   if (!content) return null;
+  clearRssTranslationError();
   const existing = content.querySelector("[data-rss-translation-pending]");
   if (existing) return existing;
   const bodyRoot = content.querySelector("[data-rss-body]");
@@ -3233,6 +3256,34 @@ function renderRssTranslationPending() {
 
 function clearRssTranslationPending() {
   el("page-content")?.querySelector("[data-rss-translation-pending]")?.remove();
+}
+
+function renderRssTranslationError(message) {
+  const content = el("page-content");
+  if (!content) return null;
+  const existing = content.querySelector("[data-rss-translation-error]");
+  if (existing) {
+    existing.querySelector("[data-rss-translation-error-message]").textContent = message;
+    return existing;
+  }
+  const bodyRoot = content.querySelector("[data-rss-body]");
+  const error = document.createElement("div");
+  error.className = "rss-ai-summary rss-ai-translation-error";
+  error.dataset.rssTranslationError = "1";
+  error.setAttribute("role", "alert");
+  error.setAttribute("aria-live", "assertive");
+  error.innerHTML = `
+    <strong>全文翻译失败</strong>
+    <span data-rss-translation-error-message>${escapeHtml(message)}</span>
+  `;
+  content.insertBefore(error, bodyRoot || content.firstChild);
+  return error;
+}
+
+function clearRssTranslationError() {
+  const content = el("page-content");
+  content?.querySelector("[data-rss-translation-error]")?.remove();
+  content?.querySelector(".rss-ai-enrichment-error")?.remove();
 }
 
 async function handleRssTranslationFloatingClick(event) {
@@ -3524,16 +3575,17 @@ function updateRssTranslationFloatingButton() {
   const button = el("rss-translate-floating-button");
   if (!button) return;
   const hasTranslation = Boolean(el("page-content")?.querySelector(".rss-ai-translation"));
+  const canRequestTranslation = state.rssCurrentNeedsTranslation;
   const isRssDetail =
     state.view === "page" &&
     state.currentFile?.startsWith("rss:") &&
     Boolean(state.rssSelectedItemId) &&
     el("page-editor").hidden &&
-    hasTranslation;
+    (hasTranslation || canRequestTranslation);
   button.hidden = !isRssDetail;
   if (!isRssDetail) return;
   state.rssCurrentHasTranslation = hasTranslation;
-  const label = "Show translation";
+  const label = hasTranslation ? "Show translation" : "Translate full text";
   button.dataset.rssTranslation = state.rssSelectedItemId;
   button.classList.toggle("has-translation", hasTranslation);
   button.disabled = false;

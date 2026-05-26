@@ -154,6 +154,13 @@ rss_ai_full_translation_enabled = false
 rss_ai_summary_chars = 200
 deepseek_api_base = "https://api.deepseek.com"
 deepseek_model = "deepseek-v4-flash"
+rss_ai_translation_provider = "deepseek"
+tencent_translate_endpoint = "https://tmt.tencentcloudapi.com"
+tencent_translate_region = "ap-guangzhou"
+tencent_translate_source = "en"
+tencent_translate_target = "zh"
+tencent_translate_project_id = 0
+tencent_translate_max_chars = 1800
 passkey_store_path = "data/passkeys.json"
 webauthn_rp_name = "Obr"
 "#,

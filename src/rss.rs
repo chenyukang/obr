@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use feed_rs::{
     model::{Content, Entry, Feed, Link, Text},
     parser,
@@ -29,9 +29,10 @@ use uuid::Uuid;
 use crate::{
     config::Config,
     markdown::{escape_html_attr, render_markdown_html_for_file},
+    tencent_translate::{TencentTranslateConfig, translate_markdown_bilingual},
 };
 
-const RSS_SCHEMA_VERSION: i64 = 6;
+const RSS_SCHEMA_VERSION: i64 = 7;
 const CONTENT_DIR: &str = "content";
 const HTML_DIR: &str = "html";
 const SOURCE_HTML_DIR: &str = "source-html";
@@ -40,8 +41,15 @@ const MIN_ARTICLE_MARKDOWN_CHARS: usize = 160;
 const RSS_LIST_SUMMARY_CHARS: usize = 420;
 const RSS_AI_SUMMARY_INPUT_CHARS: usize = 12_000;
 const RSS_AI_TRANSLATION_INPUT_CHARS: usize = 24_000;
+const RSS_AI_SUMMARY_BATCH_INPUT_CHARS: usize = 4_000;
+const RSS_AI_SUMMARY_BATCH_MAX_INPUT_CHARS: usize = 18_000;
+const RSS_AI_BACKGROUND_BATCH_LIMIT: usize = 6;
 const RSS_AI_SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 const RSS_AI_TRANSLATION_TIMEOUT: Duration = Duration::from_secs(120);
+const RSS_AI_BACKGROUND_INTERVAL: Duration = Duration::from_secs(30);
+const RSS_AI_RETRY_BASE_MINUTES: i64 = 15;
+const RSS_AI_RATE_LIMIT_RETRY_MINUTES: i64 = 60;
+const RSS_AI_RETRY_MAX_MINUTES: i64 = 24 * 60;
 const ARTICLE_FALLBACK_SELECTORS: &[&str] = &[
     "article",
     "main article",
@@ -70,8 +78,10 @@ pub(crate) struct RssReader {
     max_items_per_feed: usize,
     fetch_full_content: bool,
     ai_summary: Option<AiSummaryConfig>,
+    ai_translation: Option<AiTranslationConfig>,
     client: Client,
     refresh_lock: Arc<Mutex<()>>,
+    ai_enrichment_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +166,9 @@ pub(crate) struct RssItemDetail {
     pub(crate) ai_translation_md: Option<String>,
     pub(crate) ai_translation_model: Option<String>,
     pub(crate) ai_translation_at: Option<String>,
+    pub(crate) ai_enrichment_error: Option<String>,
+    pub(crate) ai_enrichment_failed_at: Option<String>,
+    pub(crate) ai_enrichment_next_attempt_at: Option<String>,
     pub(crate) needs_translation: bool,
     pub(crate) hacker_news_url: Option<String>,
     pub(crate) content_source: String,
@@ -232,7 +245,27 @@ struct AiSummaryConfig {
     api_base: String,
     model: String,
     target_chars: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AiTranslationConfig {
+    provider: AiTranslationProvider,
     full_translation_enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+enum AiTranslationProvider {
+    DeepSeek,
+    Tencent(TencentTranslateConfig),
+}
+
+impl AiTranslationConfig {
+    fn model_name(&self, deepseek_model: Option<&str>) -> String {
+        match &self.provider {
+            AiTranslationProvider::DeepSeek => deepseek_model.unwrap_or("deepseek").to_string(),
+            AiTranslationProvider::Tencent(config) => config.model_name(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -255,10 +288,39 @@ struct AiEnrichment {
     translation: Option<AiTranslation>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AiEnrichmentNeed {
+    summary: bool,
+    translation: bool,
+}
+
+impl AiEnrichmentNeed {
+    fn any(self) -> bool {
+        self.summary || self.translation
+    }
+}
+
 #[derive(Debug, Deserialize)]
-struct DeepSeekAiEnrichment {
+struct AiEnrichmentContent {
     summary_zh: Option<String>,
     translation_md: Option<String>,
+}
+
+#[derive(Debug)]
+struct PendingAiEnrichmentItem {
+    item: RssItemDetail,
+    need: AiEnrichmentNeed,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiSummaryBatchResponse {
+    items: Vec<AiSummaryBatchContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiSummaryBatchContent {
+    id: String,
+    summary_zh: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +390,7 @@ impl RssReader {
             .build()
             .context("build RSS HTTP client")?;
         let ai_summary = ai_summary_config(config);
+        let ai_translation = ai_translation_config(config);
         Ok(Some(Arc::new(Self {
             vault_path: config.vault_path.clone(),
             feeds_path: config.rss_feeds_path.clone(),
@@ -340,12 +403,15 @@ impl RssReader {
             max_items_per_feed: config.rss_max_items_per_feed,
             fetch_full_content: config.rss_fetch_full_content,
             ai_summary,
+            ai_translation,
             client,
             refresh_lock: Arc::new(Mutex::new(())),
+            ai_enrichment_lock: Arc::new(Mutex::new(())),
         })))
     }
 
     pub(crate) fn spawn_refresh_loop(self: Arc<Self>) {
+        self.clone().spawn_ai_enrichment_loop();
         tokio::spawn(async move {
             if let Err(err) = self.refresh().await {
                 warn!(error = %err, "initial RSS refresh failed");
@@ -357,6 +423,25 @@ impl RssReader {
                 interval.tick().await;
                 if let Err(err) = self.refresh().await {
                     warn!(error = %err, "RSS refresh failed");
+                }
+            }
+        });
+    }
+
+    fn spawn_ai_enrichment_loop(self: Arc<Self>) {
+        if !self.can_auto_enrich_items() {
+            return;
+        }
+        tokio::spawn(async move {
+            if let Err(err) = self.process_next_pending_ai_enrichment().await {
+                warn!(error = %err, "initial RSS AI enrichment failed");
+            }
+            let mut interval = tokio::time::interval(RSS_AI_BACKGROUND_INTERVAL);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(err) = self.process_next_pending_ai_enrichment().await {
+                    warn!(error = %err, "RSS AI enrichment failed");
                 }
             }
         });
@@ -554,8 +639,10 @@ impl RssReader {
                         i.author, i.published_at, i.updated_at, i.first_seen_at, i.fetched_at,
                         i.read_at, i.starred_at, i.ai_summary_zh, i.ai_summary_model,
                         i.ai_summary_at, i.ai_translation_md, i.ai_translation_model,
-                        i.ai_translation_at, i.content_source, i.extraction_quality,
-                        i.content_path, i.summary_md, i.html_path, i.source_html_path
+                        i.ai_translation_at, i.ai_enrichment_error,
+                        i.ai_enrichment_failed_at, i.ai_enrichment_next_attempt_at,
+                        i.content_source, i.extraction_quality, i.content_path,
+                        i.summary_md, i.html_path, i.source_html_path
                  FROM items i
                  JOIN feeds f ON f.id = i.feed_id
                  WHERE i.id = ?1",
@@ -581,12 +668,15 @@ impl RssReader {
                         row.get::<_, Option<String>>(16)?,
                         row.get::<_, Option<String>>(17)?,
                         row.get::<_, Option<String>>(18)?,
-                        row.get::<_, String>(19)?,
-                        row.get::<_, Option<f64>>(20)?,
+                        row.get::<_, Option<String>>(19)?,
+                        row.get::<_, Option<String>>(20)?,
                         row.get::<_, Option<String>>(21)?,
-                        row.get::<_, Option<String>>(22)?,
-                        row.get::<_, Option<String>>(23)?,
+                        row.get::<_, String>(22)?,
+                        row.get::<_, Option<f64>>(23)?,
                         row.get::<_, Option<String>>(24)?,
+                        row.get::<_, Option<String>>(25)?,
+                        row.get::<_, Option<String>>(26)?,
+                        row.get::<_, Option<String>>(27)?,
                     ))
                 },
             )
@@ -612,6 +702,9 @@ impl RssReader {
             ai_translation_md,
             ai_translation_model,
             ai_translation_at,
+            ai_enrichment_error,
+            ai_enrichment_failed_at,
+            ai_enrichment_next_attempt_at,
             content_source,
             extraction_quality,
             content_path,
@@ -655,6 +748,9 @@ impl RssReader {
             ai_translation_md,
             ai_translation_model,
             ai_translation_at,
+            ai_enrichment_error,
+            ai_enrichment_failed_at,
+            ai_enrichment_next_attempt_at,
             needs_translation,
             hacker_news_url,
             content_source,
@@ -730,7 +826,7 @@ impl RssReader {
     }
 
     pub(crate) fn can_translate_items(&self) -> bool {
-        self.ai_summary.is_some()
+        self.ai_translation.is_some()
     }
 
     pub(crate) async fn summarize_item(&self, id: &str) -> Result<Option<RssItemDetail>> {
@@ -749,7 +845,10 @@ impl RssReader {
                 &item.title,
                 &item.url,
                 &item.content_markdown,
-                self.auto_full_translation_enabled(),
+                AiEnrichmentNeed {
+                    summary: true,
+                    translation: false,
+                },
             )
             .await?
         else {
@@ -787,7 +886,15 @@ impl RssReader {
             return Ok(Some(item));
         }
         let Some(enrichment) = self
-            .fetch_item_ai_enrichment(&item.title, &item.url, &item.content_markdown, true)
+            .fetch_item_ai_enrichment(
+                &item.title,
+                &item.url,
+                &item.content_markdown,
+                AiEnrichmentNeed {
+                    summary: false,
+                    translation: true,
+                },
+            )
             .await?
         else {
             bail!("RSS item does not have enough content to translate");
@@ -885,6 +992,10 @@ impl RssReader {
                  ai_translation_md = COALESCE(?5, ai_translation_md),
                  ai_translation_model = CASE WHEN ?5 IS NULL THEN ai_translation_model ELSE ?6 END,
                  ai_translation_at = CASE WHEN ?5 IS NULL THEN ai_translation_at ELSE ?7 END,
+                 ai_enrichment_error = NULL,
+                 ai_enrichment_failed_at = NULL,
+                 ai_enrichment_next_attempt_at = NULL,
+                 ai_enrichment_attempts = 0,
                  search_text = ?8
              WHERE id = ?1",
             params![
@@ -1151,9 +1262,8 @@ impl RssReader {
         for entry in feed.entries.iter().take(self.max_items_per_feed) {
             let identity = item_identity(feed_url, entry);
             let exists = self.item_exists(&identity.id)?;
-            let include_ai = !exists || self.item_needs_ai_enrichment(&identity.id)?;
             let candidate = self
-                .item_candidate(&feed_id, feed_url, entry, identity, include_ai)
+                .item_candidate(&feed_id, feed_url, entry, identity)
                 .await?;
             if exists {
                 self.update_existing_item(candidate)?;
@@ -1171,7 +1281,6 @@ impl RssReader {
         feed_url: &str,
         entry: &Entry,
         identity: ItemIdentity,
-        include_ai_summary: bool,
     ) -> Result<ItemCandidate> {
         let ItemIdentity { id, guid, url } = identity;
         let title = entry_title(entry)
@@ -1216,14 +1325,6 @@ impl RssReader {
             source_html = selected_html;
         }
 
-        let ai_enrichment = if include_ai_summary {
-            self.ai_enrichment_for_item(&id, &title, &url, &content_markdown)
-                .await
-        } else {
-            None
-        }
-        .unwrap_or_default();
-
         Ok(ItemCandidate {
             id,
             feed_id: feed_id.to_string(),
@@ -1237,41 +1338,11 @@ impl RssReader {
             summary_md,
             content_markdown,
             source_html,
-            ai_summary: ai_enrichment.summary,
-            ai_translation: ai_enrichment.translation,
+            ai_summary: None,
+            ai_translation: None,
             content_source,
             extraction_quality,
         })
-    }
-
-    async fn ai_enrichment_for_item(
-        &self,
-        id: &str,
-        title: &str,
-        url: &str,
-        content_markdown: &str,
-    ) -> Option<AiEnrichment> {
-        self.ai_summary.as_ref()?;
-        match self
-            .fetch_item_ai_enrichment(
-                title,
-                url,
-                content_markdown,
-                self.auto_full_translation_enabled(),
-            )
-            .await
-        {
-            Ok(enrichment) => enrichment,
-            Err(err) => {
-                warn!(
-                    item = %id,
-                    url = %url,
-                    error = %err,
-                    "RSS AI enrichment failed"
-                );
-                None
-            }
-        }
     }
 
     async fn fetch_item_ai_enrichment(
@@ -1279,52 +1350,112 @@ impl RssReader {
         title: &str,
         url: &str,
         content_markdown: &str,
-        include_full_translation: bool,
+        request: AiEnrichmentNeed,
     ) -> Result<Option<AiEnrichment>> {
-        let config = self
-            .ai_summary
-            .as_ref()
-            .ok_or_else(|| anyhow!("RSS AI summary is not configured"))?;
-        let include_summary = should_ai_summarize_rss_item(title, content_markdown);
-        let include_translation =
-            include_full_translation && should_translate_rss_item(title, content_markdown);
+        let summary_config = self.ai_summary.as_ref();
+        let translation_config = self.ai_translation.as_ref();
+        let include_summary = request.summary
+            && summary_config.is_some()
+            && should_ai_summarize_rss_item(title, content_markdown);
+        let include_translation = request.translation
+            && translation_config.is_some()
+            && should_translate_rss_item(title, content_markdown);
         if !include_summary && !include_translation {
             return Ok(None);
         }
-        let Some(content) = self
-            .fetch_ai_enrichment(config, title, url, content_markdown, include_translation)
-            .await?
-        else {
+        let content = match translation_config.map(|config| &config.provider) {
+            Some(AiTranslationProvider::Tencent(config)) => {
+                let summary_content = if include_summary {
+                    let config = summary_config
+                        .ok_or_else(|| anyhow!("RSS AI summary is not configured"))?;
+                    self.fetch_deepseek_ai_enrichment(
+                        config,
+                        title,
+                        url,
+                        content_markdown,
+                        true,
+                        false,
+                    )
+                    .await?
+                    .and_then(|content| content.summary_zh)
+                } else {
+                    None
+                };
+                let translation_md = if include_translation {
+                    Some(
+                        translate_markdown_bilingual(&self.client, config, content_markdown)
+                            .await
+                            .context("translate RSS item with Tencent")?,
+                    )
+                } else {
+                    None
+                };
+                Some(AiEnrichmentContent {
+                    summary_zh: summary_content,
+                    translation_md,
+                })
+            }
+            Some(AiTranslationProvider::DeepSeek) | None => {
+                let config =
+                    summary_config.ok_or_else(|| anyhow!("RSS AI summary is not configured"))?;
+                self.fetch_deepseek_ai_enrichment(
+                    config,
+                    title,
+                    url,
+                    content_markdown,
+                    include_summary,
+                    include_translation,
+                )
+                .await?
+            }
+        };
+        let Some(content) = content else {
             return Ok(None);
         };
         let generated_at = now_string();
+        let translation_model = translation_config
+            .map(|config| config.model_name(summary_config.map(|config| config.model.as_str())));
         Ok(Some(AiEnrichment {
             summary: content.summary_zh.map(|content| AiSummary {
                 content,
-                model: config.model.clone(),
+                model: summary_config
+                    .map(|config| config.model.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
                 summarized_at: generated_at.clone(),
             }),
             translation: content.translation_md.map(|content| AiTranslation {
                 content,
-                model: config.model.clone(),
+                model: translation_model.unwrap_or_else(|| "unknown".to_string()),
                 translated_at: generated_at,
             }),
         }))
     }
 
-    async fn fetch_ai_enrichment(
+    async fn fetch_deepseek_ai_enrichment(
         &self,
         config: &AiSummaryConfig,
         title: &str,
         url: &str,
         content_markdown: &str,
+        include_summary: bool,
         include_translation: bool,
-    ) -> Result<Option<DeepSeekAiEnrichment>> {
+    ) -> Result<Option<AiEnrichmentContent>> {
+        if !include_summary && !include_translation {
+            return Ok(None);
+        }
         let input = ai_enrichment_input(title, url, content_markdown, include_translation);
         if input.trim().chars().count() < 80 {
             return Ok(None);
         }
         let endpoint = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
+        let summary_instruction = if include_summary {
+            format!(
+                "summary_zh: 用约 {} 个中文字符总结；50 到 500 字之间都可以，自然完整优先。保留关键信息、人物、结论和有用细节。",
+                config.target_chars
+            )
+        } else {
+            "summary_zh: 必须是空字符串。".to_string()
+        };
         let translation_instruction = if include_translation {
             "translation_md 必须是全文翻译 Markdown：按段落成块展示，每一块先放英文原文段落，紧接下一段用 Markdown 引用块 `> ` 放对应中文翻译；块与块之间空一行。"
         } else {
@@ -1336,19 +1467,19 @@ impl RssReader {
 JSON schema:
 {{\"summary_zh\":\"中文总结\",\"translation_md\":\"全文翻译 Markdown 或空字符串\"}}
 
-summary_zh: 用约 {} 个中文字符总结；50 到 500 字之间都可以，自然完整优先。保留关键信息、人物、结论和有用细节。
+{}
 translation_md: {}
 跳过广告、导航和版权噪音。
 
 {}",
-            config.target_chars, translation_instruction, input
+            summary_instruction, translation_instruction, input
         );
         let request = DeepSeekChatRequest {
             model: &config.model,
             messages: vec![
                 DeepSeekMessage {
                     role: "system",
-                    content: "你是一个 RSS 阅读助手。请把英文文章总结并翻译成自然、准确的中文。只输出合法 JSON object。",
+                    content: "你是一个 RSS 阅读助手。请按要求把英文文章处理成自然、准确的中文总结或全文翻译。只输出合法 JSON object。",
                 },
                 DeepSeekMessage {
                     role: "user",
@@ -1369,6 +1500,7 @@ translation_md: {}
         };
         info!(
             input_chars = input.chars().count(),
+            include_summary,
             include_translation,
             timeout_secs = timeout.as_secs(),
             "RSS AI enrichment request"
@@ -1410,6 +1542,94 @@ translation_md: {}
             return Ok(None);
         };
         parse_ai_enrichment(&content)
+    }
+
+    async fn fetch_deepseek_ai_summary_batch(
+        &self,
+        config: &AiSummaryConfig,
+        items: &[&RssItemDetail],
+    ) -> Result<HashMap<String, String>> {
+        if items.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let input = ai_summary_batch_input(items);
+        if input.trim().chars().count() < 80 {
+            return Ok(HashMap::new());
+        }
+        let endpoint = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
+        let user_prompt = format!(
+            "请一次总结下面这些 RSS 文章，并只输出一个 JSON object，不要 Markdown 代码块、标题、免责声明或额外说明。
+
+JSON schema:
+{{\"items\":[{{\"id\":\"文章 id\",\"summary_zh\":\"中文总结\"}}]}}
+
+每篇 summary_zh 用约 {} 个中文字符总结；50 到 500 字之间都可以，自然完整优先。保留关键信息、人物、结论和有用细节。跳过广告、导航和版权噪音。必须为每个输入 id 返回一个 item，不要改写 id。
+
+{}",
+            config.target_chars, input
+        );
+        let request = DeepSeekChatRequest {
+            model: &config.model,
+            messages: vec![
+                DeepSeekMessage {
+                    role: "system",
+                    content: "你是一个 RSS 阅读助手。请把英文文章总结成自然、准确的中文。只输出合法 JSON object。",
+                },
+                DeepSeekMessage {
+                    role: "user",
+                    content: &user_prompt,
+                },
+            ],
+            temperature: 0.1,
+            stream: false,
+            thinking: DeepSeekThinking { r#type: "disabled" },
+        };
+        let request_body =
+            serde_json::to_vec(&request).context("serialize DeepSeek RSS summary batch request")?;
+        let started = Instant::now();
+        info!(
+            input_chars = input.chars().count(),
+            item_count = items.len(),
+            timeout_secs = RSS_AI_SUMMARY_TIMEOUT.as_secs(),
+            "RSS AI summary batch request"
+        );
+        let response = self
+            .client
+            .post(endpoint)
+            .timeout(RSS_AI_SUMMARY_TIMEOUT)
+            .bearer_auth(&config.api_key)
+            .header(CONTENT_TYPE, "application/json")
+            .body(request_body)
+            .send()
+            .await
+            .context("request DeepSeek RSS summary batch")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("read DeepSeek RSS summary batch response")?;
+        info!(
+            status = %status,
+            elapsed_ms = started.elapsed().as_millis(),
+            "RSS AI summary batch response"
+        );
+        if !status.is_success() {
+            bail!(
+                "DeepSeek summary batch returned HTTP {}: {}",
+                status,
+                truncate_chars(&body, 240)
+            );
+        }
+        let completion: DeepSeekChatResponse =
+            serde_json::from_str(&body).context("parse DeepSeek RSS summary batch response")?;
+        let Some(content) = completion
+            .choices
+            .into_iter()
+            .find_map(|choice| choice.message.content)
+        else {
+            return Ok(HashMap::new());
+        };
+        parse_ai_summary_batch(&content)
     }
 
     async fn fetch_article_content(&self, url: &str) -> Result<ArticleContent> {
@@ -1544,7 +1764,11 @@ translation_md: {}
         Ok(exists != 0)
     }
 
+    #[cfg(test)]
     fn item_needs_ai_enrichment(&self, id: &str) -> Result<bool> {
+        if self.ai_summary.is_none() && !self.auto_full_translation_enabled() {
+            return Ok(false);
+        }
         let conn = self.connection()?;
         let row = conn
             .query_row(
@@ -1571,13 +1795,284 @@ translation_md: {}
             .map(str::trim)
             .unwrap_or_default()
             .is_empty();
-        Ok(missing_summary || (self.auto_full_translation_enabled() && missing_translation))
+        Ok((self.ai_summary.is_some() && missing_summary)
+            || (self.auto_full_translation_enabled() && missing_translation))
+    }
+
+    async fn process_next_pending_ai_enrichment(&self) -> Result<bool> {
+        let _guard = self.ai_enrichment_lock.lock().await;
+        let pending = self.pending_ai_enrichment_items(RSS_AI_BACKGROUND_BATCH_LIMIT)?;
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        self.process_pending_ai_enrichment_batch(pending).await?;
+        Ok(true)
+    }
+
+    async fn process_pending_ai_enrichment_batch(
+        &self,
+        pending: Vec<PendingAiEnrichmentItem>,
+    ) -> Result<()> {
+        let summary_batch_ids = self.deepseek_summary_batch_ids(&pending);
+        let mut summaries = HashMap::new();
+        if summary_batch_ids.len() >= 2 {
+            let config = self
+                .ai_summary
+                .as_ref()
+                .ok_or_else(|| anyhow!("RSS AI summary is not configured"))?;
+            let summary_items = pending
+                .iter()
+                .filter(|pending| summary_batch_ids.contains(&pending.item.id))
+                .map(|pending| &pending.item)
+                .collect::<Vec<_>>();
+            match self
+                .fetch_deepseek_ai_summary_batch(config, &summary_items)
+                .await
+            {
+                Ok(batch_summaries) => summaries = batch_summaries,
+                Err(err) => {
+                    let message = format!("RSS AI summary batch failed: {err:#}");
+                    warn!(error = %message, "RSS AI summary batch failed");
+                    for pending in &summary_items {
+                        self.record_item_ai_enrichment_error(&pending.id, &message)?;
+                    }
+                }
+            }
+        }
+
+        for pending in pending {
+            let summary_from_batch = summaries.remove(&pending.item.id);
+            let summary_was_batched = summary_batch_ids.contains(&pending.item.id);
+            self.process_pending_ai_enrichment_item(
+                pending,
+                summary_from_batch,
+                summary_was_batched,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn deepseek_summary_batch_ids(&self, pending: &[PendingAiEnrichmentItem]) -> HashSet<String> {
+        let can_batch_with_translation = self
+            .ai_translation
+            .as_ref()
+            .is_none_or(|config| matches!(config.provider, AiTranslationProvider::Tencent(_)));
+        let mut ids = HashSet::new();
+        for pending in pending {
+            if !pending.need.summary {
+                continue;
+            }
+            if pending.need.translation && !can_batch_with_translation {
+                continue;
+            }
+            ids.insert(pending.item.id.clone());
+        }
+        ids
+    }
+
+    async fn process_pending_ai_enrichment_item(
+        &self,
+        pending: PendingAiEnrichmentItem,
+        summary_from_batch: Option<String>,
+        summary_was_batched: bool,
+    ) -> Result<()> {
+        let PendingAiEnrichmentItem { item, need } = pending;
+        let generated_at = now_string();
+        let summary_model = self
+            .ai_summary
+            .as_ref()
+            .map(|config| config.model.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let mut enrichment = AiEnrichment {
+            summary: summary_from_batch.map(|content| AiSummary {
+                content,
+                model: summary_model,
+                summarized_at: generated_at,
+            }),
+            translation: None,
+        };
+        let request = AiEnrichmentNeed {
+            summary: need.summary && !summary_was_batched,
+            translation: need.translation,
+        };
+        match self
+            .fetch_item_ai_enrichment(&item.title, &item.url, &item.content_markdown, request)
+            .await
+        {
+            Ok(Some(fetched)) => {
+                if enrichment.summary.is_none() {
+                    enrichment.summary = fetched.summary;
+                }
+                enrichment.translation = fetched.translation;
+                let has_summary = enrichment.summary.is_some();
+                let has_translation = enrichment.translation.is_some();
+                if !has_summary && !has_translation {
+                    self.record_item_ai_enrichment_error(
+                        &item.id,
+                        "RSS AI enrichment returned empty content",
+                    )?;
+                    return Ok(());
+                }
+                self.save_item_ai_enrichment(&item, &enrichment)?;
+                info!(
+                    item = %item.id,
+                    has_summary,
+                    has_translation,
+                    "RSS AI enrichment saved"
+                );
+                if need.summary && !has_summary {
+                    self.record_item_ai_enrichment_error(
+                        &item.id,
+                        "RSS AI summary returned empty content",
+                    )?;
+                } else if request.translation && !has_translation {
+                    self.record_item_ai_enrichment_error(
+                        &item.id,
+                        "RSS AI translation returned empty content",
+                    )?;
+                }
+            }
+            Ok(None) => {
+                let has_summary = enrichment.summary.is_some();
+                if has_summary {
+                    self.save_item_ai_enrichment(&item, &enrichment)?;
+                    info!(
+                        item = %item.id,
+                        has_summary,
+                        has_translation = false,
+                        "RSS AI enrichment saved"
+                    );
+                    if request.translation {
+                        self.record_item_ai_enrichment_error(
+                            &item.id,
+                            "RSS AI translation returned empty content",
+                        )?;
+                    }
+                } else {
+                    self.record_item_ai_enrichment_error(
+                        &item.id,
+                        "RSS AI enrichment returned no content",
+                    )?;
+                }
+            }
+            Err(err) => {
+                let message = format!("{err:#}");
+                warn!(
+                    item = %item.id,
+                    url = %item.url,
+                    error = %message,
+                    "RSS AI enrichment failed"
+                );
+                if enrichment.summary.is_some() {
+                    self.save_item_ai_enrichment(&item, &enrichment)?;
+                }
+                self.record_item_ai_enrichment_error(&item.id, &message)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn next_pending_ai_enrichment_item_id(&self) -> Result<Option<String>> {
+        Ok(self
+            .pending_ai_enrichment_items(1)?
+            .into_iter()
+            .next()
+            .map(|pending| pending.item.id))
+    }
+
+    fn pending_ai_enrichment_items(&self, limit: usize) -> Result<Vec<PendingAiEnrichmentItem>> {
+        if !self.can_auto_enrich_items() {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection()?;
+        let summary_enabled = self.ai_summary.is_some();
+        let translation_enabled = self.auto_full_translation_enabled();
+        let mut stmt = conn.prepare(
+            "SELECT id
+             FROM items
+             WHERE ai_enrichment_next_attempt_at IS NOT NULL
+               AND ai_enrichment_next_attempt_at <= ?1
+               AND read_at IS NULL
+               AND (
+                 (?2 AND (ai_summary_zh IS NULL OR trim(ai_summary_zh) = ''))
+                 OR (?3 AND (ai_translation_md IS NULL OR trim(ai_translation_md) = ''))
+               )
+             ORDER BY sort_at IS NULL, sort_at DESC, first_seen_at DESC
+             LIMIT 200",
+        )?;
+        let rows = stmt.query_map(
+            params![now_string(), summary_enabled, translation_enabled],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut items = Vec::new();
+        for row in rows {
+            let id = row?;
+            let Some(item) = self.get_item(&id)? else {
+                continue;
+            };
+            let need = self.ai_enrichment_need_for_item(&item);
+            if need.any() {
+                items.push(PendingAiEnrichmentItem { item, need });
+                if items.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(items)
+    }
+
+    fn ai_enrichment_need_for_item(&self, item: &RssItemDetail) -> AiEnrichmentNeed {
+        if item.read_at.is_some() {
+            return AiEnrichmentNeed::default();
+        }
+        let missing_summary = item_missing_summary(item);
+        let missing_translation = item_missing_translation(item);
+        let needs_summary = self.ai_summary.is_some()
+            && missing_summary
+            && should_ai_summarize_rss_item(&item.title, &item.content_markdown);
+        let needs_translation =
+            self.auto_full_translation_enabled() && missing_translation && item.needs_translation;
+        AiEnrichmentNeed {
+            summary: needs_summary,
+            translation: needs_translation,
+        }
+    }
+
+    fn record_item_ai_enrichment_error(&self, id: &str, error: &str) -> Result<()> {
+        let conn = self.connection()?;
+        let attempts = conn
+            .query_row(
+                "SELECT COALESCE(ai_enrichment_attempts, 0) FROM items WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            .saturating_add(1);
+        let error = truncate_chars(error, 1000);
+        let next_attempt_at = ai_enrichment_next_attempt_at(attempts, &error);
+        conn.execute(
+            "UPDATE items
+             SET ai_enrichment_error = ?2,
+                 ai_enrichment_failed_at = ?3,
+                 ai_enrichment_next_attempt_at = ?4,
+                 ai_enrichment_attempts = ?5
+             WHERE id = ?1",
+            params![id, error, now_string(), next_attempt_at, attempts],
+        )?;
+        Ok(())
     }
 
     fn auto_full_translation_enabled(&self) -> bool {
-        self.ai_summary
+        self.ai_translation
             .as_ref()
             .is_some_and(|config| config.full_translation_enabled)
+    }
+
+    fn can_auto_enrich_items(&self) -> bool {
+        self.ai_summary.is_some() || self.auto_full_translation_enabled()
     }
 
     fn insert_item(&self, item: ItemCandidate) -> Result<()> {
@@ -1637,6 +2132,9 @@ translation_md: {}
             .unwrap_or((None, None, None));
         let seen_at = now_string();
         let sort_at = rss_item_sort_at(item.published_at.as_deref(), item.updated_at.as_deref());
+        let ai_enrichment_next_attempt_at = self
+            .should_queue_inserted_item_ai_enrichment(&item, &content_markdown)
+            .then_some(seen_at.as_str());
         let conn = self.connection()?;
         conn.execute(
             "INSERT OR IGNORE INTO items (
@@ -1644,9 +2142,10 @@ translation_md: {}
                 updated_at, sort_at, summary_md, content_path, content_source,
                 extraction_quality, first_seen_at, fetched_at, read_at, html_path,
                 source_html_path, search_text, ai_summary_zh, ai_summary_model,
-                ai_summary_at, ai_translation_md, ai_translation_model, ai_translation_at
+                ai_summary_at, ai_translation_md, ai_translation_model, ai_translation_at,
+                ai_enrichment_next_attempt_at
              )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 &item.id,
                 &item.feed_id,
@@ -1672,9 +2171,24 @@ translation_md: {}
                 ai_translation_md,
                 ai_translation_model,
                 ai_translation_at,
+                ai_enrichment_next_attempt_at,
             ],
         )?;
         Ok(())
+    }
+
+    fn should_queue_inserted_item_ai_enrichment(
+        &self,
+        item: &ItemCandidate,
+        content_markdown: &str,
+    ) -> bool {
+        let needs_summary = self.ai_summary.is_some()
+            && item.ai_summary.is_none()
+            && should_ai_summarize_rss_item(&item.title, content_markdown);
+        let needs_translation = self.auto_full_translation_enabled()
+            && item.ai_translation.is_none()
+            && should_translate_rss_item(&item.title, content_markdown);
+        needs_summary || needs_translation
     }
 
     fn update_existing_item(&self, item: ItemCandidate) -> Result<bool> {
@@ -1938,6 +2452,10 @@ fn init_db(path: &Path) -> Result<()> {
             ai_translation_md TEXT,
             ai_translation_model TEXT,
             ai_translation_at TEXT,
+            ai_enrichment_error TEXT,
+            ai_enrichment_failed_at TEXT,
+            ai_enrichment_next_attempt_at TEXT,
+            ai_enrichment_attempts INTEGER NOT NULL DEFAULT 0,
             content_path TEXT,
             html_path TEXT,
             source_html_path TEXT,
@@ -1966,6 +2484,15 @@ fn init_db(path: &Path) -> Result<()> {
     ensure_column(&conn, "items", "ai_translation_md", "TEXT")?;
     ensure_column(&conn, "items", "ai_translation_model", "TEXT")?;
     ensure_column(&conn, "items", "ai_translation_at", "TEXT")?;
+    ensure_column(&conn, "items", "ai_enrichment_error", "TEXT")?;
+    ensure_column(&conn, "items", "ai_enrichment_failed_at", "TEXT")?;
+    ensure_column(&conn, "items", "ai_enrichment_next_attempt_at", "TEXT")?;
+    ensure_column(
+        &conn,
+        "items",
+        "ai_enrichment_attempts",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     conn.execute(
         "UPDATE items
          SET sort_at = COALESCE(NULLIF(published_at, ''), NULLIF(updated_at, ''))",
@@ -2213,6 +2740,52 @@ fn ai_summary_config(config: &Config) -> Option<AiSummaryConfig> {
         api_base: config.deepseek_api_base.trim().to_string(),
         model: config.deepseek_model.trim().to_string(),
         target_chars: config.rss_ai_summary_chars,
+    })
+}
+
+fn ai_translation_config(config: &Config) -> Option<AiTranslationConfig> {
+    let provider = config
+        .rss_ai_translation_provider
+        .trim()
+        .to_ascii_lowercase();
+    let provider = match provider.as_str() {
+        "deepseek" => {
+            if !config.rss_ai_summary_enabled {
+                return None;
+            }
+            config
+                .deepseek_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())?;
+            AiTranslationProvider::DeepSeek
+        }
+        "tencent" => {
+            let secret_id = config
+                .tencent_secret_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let secret_key = config
+                .tencent_secret_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            AiTranslationProvider::Tencent(TencentTranslateConfig {
+                secret_id: secret_id.to_string(),
+                secret_key: secret_key.to_string(),
+                endpoint: config.tencent_translate_endpoint.trim().to_string(),
+                region: config.tencent_translate_region.trim().to_string(),
+                source: config.tencent_translate_source.trim().to_string(),
+                target: config.tencent_translate_target.trim().to_string(),
+                project_id: config.tencent_translate_project_id,
+                max_chars: config.tencent_translate_max_chars,
+            })
+        }
+        _ => return None,
+    };
+    Some(AiTranslationConfig {
+        provider,
         full_translation_enabled: config.rss_ai_full_translation_enabled,
     })
 }
@@ -2232,25 +2805,72 @@ fn should_ai_summarize_rss_item(title: &str, content_markdown: &str) -> bool {
     should_translate_rss_item(title, content_markdown)
 }
 
+fn item_missing_summary(item: &RssItemDetail) -> bool {
+    item.ai_summary_zh
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+}
+
+fn item_missing_translation(item: &RssItemDetail) -> bool {
+    item.ai_translation_md
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+}
+
 fn should_translate_rss_item(title: &str, content_markdown: &str) -> bool {
     let sample = format!("{title}\n\n{}", take_chars(content_markdown, 4_000));
-    let mut han = 0usize;
-    let mut meaningful = 0usize;
+    let mut english_letters = 0usize;
+    let mut han_chars = 0usize;
+    let mut other_letters = 0usize;
     for ch in sample.chars() {
-        if ch.is_whitespace() || ch.is_ascii_punctuation() {
-            continue;
-        }
         if is_han_char(ch) {
-            han += 1;
-            meaningful += 1;
-        } else if ch.is_alphanumeric() {
-            meaningful += 1;
+            han_chars += 1;
+        } else if ch.is_ascii_alphabetic() {
+            english_letters += 1;
+        } else if ch.is_alphabetic() {
+            other_letters += 1;
         }
     }
-    if meaningful < 40 {
+    let english_words = english_word_stats(&sample);
+    if english_letters < 120 || english_words.total < 24 {
         return false;
     }
-    !(han >= 20 && han.saturating_mul(100) >= meaningful.saturating_mul(15))
+    if english_letters.saturating_mul(2) < han_chars.saturating_mul(3) {
+        return false;
+    }
+    english_letters.saturating_mul(100)
+        >= (english_letters + han_chars + other_letters).saturating_mul(60)
+}
+
+#[derive(Debug, Default)]
+struct EnglishWordStats {
+    total: usize,
+}
+
+fn english_word_stats(sample: &str) -> EnglishWordStats {
+    let mut stats = EnglishWordStats::default();
+    let mut word = String::new();
+    for ch in sample.chars() {
+        if ch.is_ascii_alphabetic() || (ch == '\'' && !word.is_empty()) {
+            word.push(ch.to_ascii_lowercase());
+            continue;
+        }
+        count_english_word(&mut stats, &mut word);
+    }
+    count_english_word(&mut stats, &mut word);
+    stats
+}
+
+fn count_english_word(stats: &mut EnglishWordStats, word: &mut String) {
+    let trimmed = word.trim_matches('\'');
+    if trimmed.len() >= 2 {
+        stats.total += 1;
+    }
+    word.clear();
 }
 
 fn is_han_char(ch: char) -> bool {
@@ -2280,6 +2900,31 @@ fn ai_enrichment_input(
         RSS_AI_SUMMARY_INPUT_CHARS
     };
     ai_input(title, url, content_markdown, limit)
+}
+
+fn ai_summary_batch_input(items: &[&RssItemDetail]) -> String {
+    let mut input = String::new();
+    let per_item_limit = RSS_AI_SUMMARY_BATCH_INPUT_CHARS.min(
+        (RSS_AI_SUMMARY_BATCH_MAX_INPUT_CHARS / items.len().max(1))
+            .saturating_sub(240)
+            .max(800),
+    );
+    for item in items {
+        let section = ai_input(
+            &item.title,
+            &item.url,
+            &item.content_markdown,
+            per_item_limit,
+        );
+        if !input.is_empty() {
+            input.push_str("\n\n---\n\n");
+        }
+        input.push_str("ID: ");
+        input.push_str(&item.id);
+        input.push('\n');
+        input.push_str(&section);
+    }
+    input
 }
 
 fn ai_input(title: &str, url: &str, content_markdown: &str, limit: usize) -> String {
@@ -2324,13 +2969,13 @@ fn clean_ai_translation(content: &str) -> Option<String> {
     (!cleaned.is_empty()).then(|| cleaned.to_string())
 }
 
-fn parse_ai_enrichment(content: &str) -> Result<Option<DeepSeekAiEnrichment>> {
+fn parse_ai_enrichment(content: &str) -> Result<Option<AiEnrichmentContent>> {
     let Some(json) = extract_json_object(content) else {
         return Ok(None);
     };
-    let parsed: DeepSeekAiEnrichment =
+    let parsed: AiEnrichmentContent =
         serde_json::from_str(&json).context("parse RSS AI enrichment JSON")?;
-    Ok(Some(DeepSeekAiEnrichment {
+    Ok(Some(AiEnrichmentContent {
         summary_zh: parsed
             .summary_zh
             .and_then(|summary| clean_ai_summary(&summary)),
@@ -2338,6 +2983,24 @@ fn parse_ai_enrichment(content: &str) -> Result<Option<DeepSeekAiEnrichment>> {
             .translation_md
             .and_then(|translation| clean_ai_translation(&translation)),
     }))
+}
+
+fn parse_ai_summary_batch(content: &str) -> Result<HashMap<String, String>> {
+    let Some(json) = extract_json_object(content) else {
+        return Ok(HashMap::new());
+    };
+    let parsed: AiSummaryBatchResponse =
+        serde_json::from_str(&json).context("parse RSS AI summary batch JSON")?;
+    let mut summaries = HashMap::new();
+    for item in parsed.items {
+        if let Some(summary) = item
+            .summary_zh
+            .and_then(|summary| clean_ai_summary(&summary))
+        {
+            summaries.insert(item.id, summary);
+        }
+    }
+    Ok(summaries)
 }
 
 fn extract_json_object(content: &str) -> Option<String> {
@@ -3374,6 +4037,31 @@ fn now_string() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn ai_enrichment_next_attempt_at(attempts: i64, error: &str) -> String {
+    let minutes = ai_enrichment_retry_minutes(attempts, error);
+    (Utc::now() + ChronoDuration::minutes(minutes)).to_rfc3339()
+}
+
+fn ai_enrichment_retry_minutes(attempts: i64, error: &str) -> i64 {
+    let base = if is_rate_limit_error(error) {
+        RSS_AI_RATE_LIMIT_RETRY_MINUTES
+    } else {
+        RSS_AI_RETRY_BASE_MINUTES
+    };
+    let exponent = attempts.saturating_sub(1).min(5) as u32;
+    base.saturating_mul(1_i64 << exponent)
+        .min(RSS_AI_RETRY_MAX_MINUTES)
+}
+
+fn is_rate_limit_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("429")
+        || error.contains("too many requests")
+        || error.contains("rate limit")
+        || error.contains("ratelimit")
+        || error.contains("frequency")
+}
+
 fn date_to_string(date: &DateTime<Utc>) -> String {
     date.to_rfc3339()
 }
@@ -3624,6 +4312,29 @@ Body
     }
 
     #[test]
+    fn translation_detection_requires_english_to_dominate_chinese() {
+        let english = "This article explains how local-first RSS readers can cache article metadata, preserve links, and keep the reading interface responsive. ".repeat(20);
+        let chinese_dominant = format!(
+            "{}\n{}",
+            "这是一篇中文文章，讨论本地优先软件、RSS 阅读器和移动端体验。".repeat(40),
+            "This English appendix is short and should not make the whole article look English. "
+                .repeat(6)
+        );
+        let mixed_but_english_dominant = format!(
+            "{}\n{}",
+            "这段中文只是少量背景。".repeat(5),
+            "This article explains background jobs, request batching, rate limits, retries, and cached RSS item metadata. ".repeat(15)
+        );
+
+        assert!(should_translate_rss_item("English post", &english));
+        assert!(!should_translate_rss_item("中文为主", &chinese_dominant));
+        assert!(should_translate_rss_item(
+            "English-dominant mixed post",
+            &mixed_but_english_dominant
+        ));
+    }
+
+    #[test]
     fn clean_ai_summary_preserves_natural_length() {
         let long_summary = format!("中文总结：{}", "这段总结不应该被服务端硬截断。".repeat(60));
         let cleaned = clean_ai_summary(&long_summary).unwrap();
@@ -3649,6 +4360,27 @@ Body
             parsed.translation_md.as_deref(),
             Some("English paragraph\n\n> 中文段落")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_ai_summary_batch_json_from_fenced_response() -> Result<()> {
+        let parsed = parse_ai_summary_batch(
+            r#"```json
+            {
+              "items": [
+                {"id": "item-1", "summary_zh": "中文总结：第一段总结。"},
+                {"id": "item-2", "summary_zh": ""}
+              ]
+            }
+            ```"#,
+        )?;
+
+        assert_eq!(
+            parsed.get("item-1").map(String::as_str),
+            Some("第一段总结。")
+        );
+        assert!(!parsed.contains_key("item-2"));
         Ok(())
     }
 
@@ -4247,6 +4979,9 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             api_base: "https://api.deepseek.test".to_string(),
             model: "deepseek-v4-flash".to_string(),
             target_chars: 200,
+        });
+        reader.ai_translation = Some(AiTranslationConfig {
+            provider: AiTranslationProvider::DeepSeek,
             full_translation_enabled: false,
         });
         assert!(!reader.item_needs_ai_enrichment(&item_id)?);
@@ -4256,12 +4991,253 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             api_base: "https://api.deepseek.test".to_string(),
             model: "deepseek-v4-flash".to_string(),
             target_chars: 200,
+        });
+        reader.ai_translation = Some(AiTranslationConfig {
+            provider: AiTranslationProvider::DeepSeek,
             full_translation_enabled: true,
         });
         assert!(reader.item_needs_ai_enrichment(&item_id)?);
 
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn ai_enrichment_need_does_not_request_existing_summary() -> Result<()> {
+        let (mut reader, root) = test_reader()?;
+        let item_id =
+            insert_english_ai_item(&reader, "https://example.test/feed.xml", "summary-only")?;
+        let item = reader.get_item(&item_id)?.unwrap();
+        reader.save_item_ai_enrichment(
+            &item,
+            &AiEnrichment {
+                summary: Some(AiSummary {
+                    content: "已有中文总结。".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    summarized_at: "2026-05-26T00:00:00Z".to_string(),
+                }),
+                translation: None,
+            },
+        )?;
+        reader.ai_summary = Some(AiSummaryConfig {
+            api_key: "test-key".to_string(),
+            api_base: "https://api.deepseek.test".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            target_chars: 200,
+        });
+        reader.ai_translation = Some(AiTranslationConfig {
+            provider: AiTranslationProvider::DeepSeek,
+            full_translation_enabled: true,
+        });
+
+        let item = reader.get_item(&item_id)?.unwrap();
+        assert_eq!(
+            reader.ai_enrichment_need_for_item(&item),
+            AiEnrichmentNeed {
+                summary: false,
+                translation: true,
+            }
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ai_enrichment_need_does_not_request_existing_translation() -> Result<()> {
+        let (mut reader, root) = test_reader()?;
+        let item_id =
+            insert_english_ai_item(&reader, "https://example.test/feed.xml", "translation-only")?;
+        let item = reader.get_item(&item_id)?.unwrap();
+        reader.save_item_ai_enrichment(
+            &item,
+            &AiEnrichment {
+                summary: None,
+                translation: Some(AiTranslation {
+                    content: "English article\n\n> 英文文章".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    translated_at: "2026-05-26T00:00:00Z".to_string(),
+                }),
+            },
+        )?;
+        reader.ai_summary = Some(AiSummaryConfig {
+            api_key: "test-key".to_string(),
+            api_base: "https://api.deepseek.test".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            target_chars: 200,
+        });
+        reader.ai_translation = Some(AiTranslationConfig {
+            provider: AiTranslationProvider::DeepSeek,
+            full_translation_enabled: true,
+        });
+
+        let item = reader.get_item(&item_id)?.unwrap();
+        assert_eq!(
+            reader.ai_enrichment_need_for_item(&item),
+            AiEnrichmentNeed {
+                summary: true,
+                translation: false,
+            }
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn old_missing_items_are_not_auto_backfilled_without_queue_marker() -> Result<()> {
+        let (mut reader, root) = test_reader()?;
+        insert_english_ai_item(&reader, "https://example.test/feed.xml", "old-missing")?;
+        reader.ai_summary = Some(AiSummaryConfig {
+            api_key: "test-key".to_string(),
+            api_base: "https://api.deepseek.test".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            target_chars: 200,
+        });
+        reader.ai_translation = Some(AiTranslationConfig {
+            provider: AiTranslationProvider::DeepSeek,
+            full_translation_enabled: true,
+        });
+
+        assert_eq!(reader.next_pending_ai_enrichment_item_id()?, None);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_items_are_not_auto_enriched_in_background() -> Result<()> {
+        let (mut reader, root) = test_reader()?;
+        reader.ai_summary = Some(AiSummaryConfig {
+            api_key: "test-key".to_string(),
+            api_base: "https://api.deepseek.test".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            target_chars: 200,
+        });
+        reader.ai_translation = Some(AiTranslationConfig {
+            provider: AiTranslationProvider::DeepSeek,
+            full_translation_enabled: true,
+        });
+        let item_id = insert_english_ai_item(&reader, "https://example.test/feed.xml", "read-ai")?;
+        assert_eq!(
+            reader.next_pending_ai_enrichment_item_id()?.as_deref(),
+            Some(item_id.as_str())
+        );
+
+        assert!(reader.mark_item_read(&item_id, true)?);
+        let item = reader.get_item(&item_id)?.unwrap();
+        assert_eq!(
+            reader.ai_enrichment_need_for_item(&item),
+            AiEnrichmentNeed::default()
+        );
+        assert_eq!(reader.next_pending_ai_enrichment_item_id()?, None);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn pending_ai_enrichment_respects_retry_backoff_and_clears_on_success() -> Result<()> {
+        let (mut reader, root) = test_reader()?;
+        let feed_url = "https://example.test/feed.xml";
+        let feed_id = stable_id("feed", feed_url);
+        let item_id = stable_id("item", "pending-ai");
+        reader.ai_summary = Some(AiSummaryConfig {
+            api_key: "test-key".to_string(),
+            api_base: "https://api.deepseek.test".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            target_chars: 200,
+        });
+        reader.ai_translation = Some(AiTranslationConfig {
+            provider: AiTranslationProvider::DeepSeek,
+            full_translation_enabled: true,
+        });
+        reader.upsert_feed(FeedUpdate {
+            id: &feed_id,
+            url: feed_url,
+            title: "Example feed",
+            site_url: None,
+            etag: None,
+            last_modified: None,
+            checked_at: &now_string(),
+        })?;
+        reader.insert_item(ItemCandidate {
+            id: item_id.clone(),
+            feed_id,
+            feed_url: feed_url.to_string(),
+            guid: "pending-ai".to_string(),
+            url: "https://example.test/pending-ai".to_string(),
+            title: "English post".to_string(),
+            author: None,
+            published_at: None,
+            updated_at: None,
+            summary_md: Some("Summary".to_string()),
+            content_markdown: "This article explains local-first RSS readers, cached metadata, background processing, and careful API rate limiting. ".repeat(12),
+            source_html: None,
+            ai_summary: None,
+            ai_translation: None,
+            content_source: "summary".to_string(),
+            extraction_quality: None,
+        })?;
+
+        assert_eq!(
+            reader.next_pending_ai_enrichment_item_id()?.as_deref(),
+            Some(item_id.as_str())
+        );
+
+        reader.record_item_ai_enrichment_error(&item_id, "HTTP 429 Too Many Requests")?;
+        let item = reader.get_item(&item_id)?.unwrap();
+        assert!(item.ai_enrichment_error.as_deref().unwrap().contains("429"));
+        assert!(item.ai_enrichment_failed_at.is_some());
+        assert!(item.ai_enrichment_next_attempt_at.is_some());
+        assert_eq!(reader.next_pending_ai_enrichment_item_id()?, None);
+
+        let conn = reader.connection()?;
+        conn.execute(
+            "UPDATE items SET ai_enrichment_next_attempt_at = ?2 WHERE id = ?1",
+            params![item_id, "2000-01-01T00:00:00Z"],
+        )?;
+        assert_eq!(
+            reader.next_pending_ai_enrichment_item_id()?.as_deref(),
+            Some(item_id.as_str())
+        );
+
+        let item = reader.get_item(&item_id)?.unwrap();
+        reader.save_item_ai_enrichment(
+            &item,
+            &AiEnrichment {
+                summary: Some(AiSummary {
+                    content: "自动总结成功。".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    summarized_at: "2026-05-26T00:00:00Z".to_string(),
+                }),
+                translation: Some(AiTranslation {
+                    content: "English\n\n> 中文".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    translated_at: "2026-05-26T00:00:01Z".to_string(),
+                }),
+            },
+        )?;
+        let item = reader.get_item(&item_id)?.unwrap();
+        assert!(item.ai_enrichment_error.is_none());
+        assert!(item.ai_enrichment_failed_at.is_none());
+        assert!(item.ai_enrichment_next_attempt_at.is_none());
+        let attempts: i64 = conn.query_row(
+            "SELECT ai_enrichment_attempts FROM items WHERE id = ?1",
+            params![item_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(attempts, 0);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rate_limit_errors_use_longer_retry_base() {
+        assert_eq!(ai_enrichment_retry_minutes(1, "HTTP 429"), 60);
+        assert_eq!(ai_enrichment_retry_minutes(2, "Too Many Requests"), 120);
+        assert_eq!(ai_enrichment_retry_minutes(1, "parse error"), 15);
     }
 
     #[test]
@@ -4481,6 +5457,9 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             ai_translation_md: Some("English\n\n> 中文".to_string()),
             ai_translation_model: Some("deepseek-v4-flash".to_string()),
             ai_translation_at: Some("2026-05-25T00:00:02Z".to_string()),
+            ai_enrichment_error: None,
+            ai_enrichment_failed_at: None,
+            ai_enrichment_next_attempt_at: None,
             needs_translation: true,
             hacker_news_url: Some("https://news.ycombinator.com/item?id=1".to_string()),
             content_source: "summary".to_string(),
@@ -4553,7 +5532,25 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
         Ok(())
     }
 
+    fn insert_english_ai_item(reader: &RssReader, feed_url: &str, guid: &str) -> Result<String> {
+        insert_test_item_with_content(
+            reader,
+            feed_url,
+            guid,
+            "This article explains local-first RSS readers, cached metadata, background processing, API rate limiting, and how careful batching prevents unnecessary repeated requests. ".repeat(12),
+        )
+    }
+
     fn insert_test_item(reader: &RssReader, feed_url: &str, guid: &str) -> Result<String> {
+        insert_test_item_with_content(reader, feed_url, guid, "Full text".to_string())
+    }
+
+    fn insert_test_item_with_content(
+        reader: &RssReader,
+        feed_url: &str,
+        guid: &str,
+        content_markdown: String,
+    ) -> Result<String> {
         let feed_id = stable_id("feed", feed_url);
         let item_id = stable_id("item", guid);
         let checked_at = now_string();
@@ -4577,7 +5574,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             published_at: None,
             updated_at: None,
             summary_md: Some("Summary".to_string()),
-            content_markdown: "Full text".to_string(),
+            content_markdown,
             source_html: None,
             ai_summary: None,
             ai_translation: None,
@@ -4613,8 +5610,10 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
                 max_items_per_feed: 20,
                 fetch_full_content: false,
                 ai_summary: None,
+                ai_translation: None,
                 client: Client::builder().build()?,
                 refresh_lock: Arc::new(Mutex::new(())),
+                ai_enrichment_lock: Arc::new(Mutex::new(())),
             },
             root,
         ))
