@@ -175,12 +175,34 @@ struct RssItemDetailResponse {
     #[serde(flatten)]
     item: RssItemDetail,
     html: String,
+    ai_translation_html: Option<String>,
 }
 
 #[derive(Serialize)]
 struct RssItemsResponse {
     items: Vec<rss::RssItemSummary>,
     next_offset: Option<usize>,
+}
+
+fn rss_item_detail_response(
+    reader: &rss::RssReader,
+    mut item: RssItemDetail,
+) -> anyhow::Result<RssItemDetailResponse> {
+    let html = reader.rendered_item_html(&mut item)?;
+    let ai_translation_html = item
+        .ai_translation_md
+        .as_deref()
+        .map(str::trim)
+        .filter(|translation| !translation.is_empty())
+        .map(|translation| {
+            let file = item.content_path.as_deref().unwrap_or("rss/translation.md");
+            render_markdown_html_for_file(translation, file)
+        });
+    Ok(RssItemDetailResponse {
+        item,
+        html,
+        ai_translation_html,
+    })
 }
 
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
@@ -500,8 +522,7 @@ pub(crate) async fn rss_item(
             if item.read_at.is_none() && reader.mark_item_read(&id, true)? {
                 item.read_at = Some(Utc::now().to_rfc3339());
             }
-            let html = reader.rendered_item_html(&mut item)?;
-            Ok(Some(RssItemDetailResponse { item, html }))
+            Ok(Some(rss_item_detail_response(&reader, item)?))
         })
         .await
         .context("join RSS item task")??;
@@ -552,13 +573,12 @@ pub(crate) async fn rss_summarize(
         return Ok((StatusCode::BAD_REQUEST, "RSS AI summary is not configured").into_response());
     }
     let reader = reader.clone();
-    let Some(mut item) = reader.summarize_item(&id).await? else {
+    let Some(item) = reader.summarize_item(&id).await? else {
         return Ok((StatusCode::NOT_FOUND, "RSS item not found").into_response());
     };
     let render_reader = reader.clone();
     let response = tokio::task::spawn_blocking(move || -> anyhow::Result<RssItemDetailResponse> {
-        let html = render_reader.rendered_item_html(&mut item)?;
-        Ok(RssItemDetailResponse { item, html })
+        rss_item_detail_response(&render_reader, item)
     })
     .await
     .context("join RSS summarize task")??;
@@ -580,13 +600,12 @@ pub(crate) async fn rss_translate(
             .into_response());
     }
     let reader = reader.clone();
-    let Some(mut item) = reader.translate_item(&id).await? else {
+    let Some(item) = reader.translate_item(&id).await? else {
         return Ok((StatusCode::NOT_FOUND, "RSS item not found").into_response());
     };
     let render_reader = reader.clone();
     let response = tokio::task::spawn_blocking(move || -> anyhow::Result<RssItemDetailResponse> {
-        let html = render_reader.rendered_item_html(&mut item)?;
-        Ok(RssItemDetailResponse { item, html })
+        rss_item_detail_response(&render_reader, item)
     })
     .await
     .context("join RSS translate task")??;

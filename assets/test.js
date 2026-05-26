@@ -9,6 +9,8 @@ let rssListHtml = "";
 let rssListWrites = 0;
 let pendingSummaryNode = null;
 let scrolledTo = null;
+const localStore = new Map();
+const sessionStore = new Map();
 const topbarNode = {
   hidden: false,
   getBoundingClientRect() {
@@ -155,8 +157,11 @@ const sandbox = {
   window: {
     innerHeight: 700,
     scrollY: 500,
-    scrollTo(options) {
-      scrolledTo = options;
+    scrollTo(leftOrOptions, top) {
+      scrolledTo =
+        typeof leftOrOptions === "object"
+          ? leftOrOptions
+          : { left: leftOrOptions, top };
     },
     requestAnimationFrame(callback) {
       callback();
@@ -164,9 +169,14 @@ const sandbox = {
   },
   navigator: {},
   localStorage: {
-    getItem() { return null; },
-    setItem() {},
-    removeItem() {},
+    getItem(key) { return localStore.has(key) ? localStore.get(key) : null; },
+    setItem(key, value) { localStore.set(key, String(value)); },
+    removeItem(key) { localStore.delete(key); },
+  },
+  sessionStorage: {
+    getItem(key) { return sessionStore.has(key) ? sessionStore.get(key) : null; },
+    setItem(key, value) { sessionStore.set(key, String(value)); },
+    removeItem(key) { sessionStore.delete(key); },
   },
   setTimeout() {},
   clearTimeout() {},
@@ -196,6 +206,11 @@ this.__obrTest = {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  readRssResumeState,
+  rememberRssListState,
+  rememberRssDetailState,
+  restoreRssListControls,
+  isRssDetailPage,
   normalizeAppConfig,
   parseClockMinutes,
   scheduledDarkMode,
@@ -234,6 +249,11 @@ const {
   loadRssItems,
   sameRssItemsPage,
   sameRssItemDetail,
+  readRssResumeState,
+  rememberRssListState,
+  rememberRssDetailState,
+  restoreRssListControls,
+  isRssDetailPage,
   normalizeAppConfig,
   parseClockMinutes,
   scheduledDarkMode,
@@ -612,6 +632,72 @@ function assertRssCacheSignatures() {
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, html: "<p>B</p>" }), false);
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, read_at: "2026-05-25T00:00:01Z" }), false);
   assert.strictEqual(sameRssItemDetail(detail, { ...detail, ai_summary_zh: "新的总结" }), false);
+  assert.strictEqual(sameRssItemDetail(detail, { ...detail, ai_translation_html: "<p>译文</p>" }), false);
+}
+
+function assertRssResumeState() {
+  const previousScrollY = sandbox.window.scrollY;
+  const previousFilter = state.rssFilter;
+  const previousQuery = rssSearchInput.value;
+  const previousLocalStore = new Map(localStore);
+  localStore.clear();
+  try {
+    state.rssFilter = "done";
+    rssSearchInput.value = "deepseek";
+    sandbox.window.scrollY = 321;
+
+    rememberRssListState();
+
+    let resume = readRssResumeState();
+    assert.strictEqual(resume.mode, "list");
+    assert.strictEqual(resume.filter, "done");
+    assert.strictEqual(resume.query, "deepseek");
+    assert.strictEqual(resume.listY, 321);
+
+    state.rssFilter = "unread";
+    rssSearchInput.value = "";
+    restoreRssListControls(resume);
+    assert.strictEqual(state.rssFilter, "done");
+    assert.strictEqual(rssSearchInput.value, "deepseek");
+
+    rememberRssDetailState("rss-last-read");
+    resume = readRssResumeState();
+    assert.strictEqual(resume.mode, "detail");
+    assert.strictEqual(resume.itemId, "rss-last-read");
+    assert.strictEqual(resume.listY, 321);
+  } finally {
+    sandbox.window.scrollY = previousScrollY;
+    state.rssFilter = previousFilter;
+    rssSearchInput.value = previousQuery;
+    localStore.clear();
+    for (const [key, value] of previousLocalStore) {
+      localStore.set(key, value);
+    }
+  }
+}
+
+function assertRssDetailBackTarget() {
+  const previousView = state.view;
+  const previousFile = state.currentFile;
+  const previousListView = state.lastListView;
+
+  try {
+    state.view = "page";
+    state.currentFile = "rss:item-1";
+    state.lastListView = "rss";
+    assert.strictEqual(isRssDetailPage(), true);
+
+    state.lastListView = "find";
+    assert.strictEqual(isRssDetailPage(), false);
+
+    state.lastListView = "rss";
+    state.currentFile = "Posts/welcome";
+    assert.strictEqual(isRssDetailPage(), false);
+  } finally {
+    state.view = previousView;
+    state.currentFile = previousFile;
+    state.lastListView = previousListView;
+  }
 }
 
 function assertThemeSchedule() {
@@ -690,17 +776,25 @@ function assertRssAiSummaryHtml() {
   const translationHtml = rssDetailBodyHtml({
     html: "<p>English one</p><p>English two</p>",
     ai_translation_md: "English <one>\n\n> 中文 <一>",
+    ai_translation_html: '<h2>Translation</h2><ul><li><strong>中文</strong></li></ul>',
     ai_translation_model: "deepseek-v4-flash",
   });
-  assert(translationHtml.includes('class="rss-inline-translation"'));
-  assert(translationHtml.includes("<p>中文 &lt;一&gt;</p>"));
-  assert(!translationHtml.includes("全文翻译"));
+  assert(translationHtml.includes('class="rss-ai-summary rss-ai-translation"'));
+  assert(translationHtml.includes("全文翻译"));
+  assert(translationHtml.includes("deepseek-v4-flash"));
+  assert(translationHtml.includes("<h2>Translation</h2>"));
+  assert(translationHtml.includes("<strong>中文</strong>"));
+  assert(!translationHtml.includes("English &lt;one&gt;"));
   assert(
-    translationHtml.indexOf("<p>English one</p>") <
-      translationHtml.indexOf('class="rss-inline-translation"'),
+    translationHtml.indexOf('class="rss-ai-summary rss-ai-translation"') <
+      translationHtml.indexOf('<article class="rss-detail-body" data-rss-body>'),
   );
   assert(
-    translationHtml.indexOf('class="rss-inline-translation"') <
+    translationHtml.indexOf('<article class="rss-detail-body" data-rss-body>') <
+      translationHtml.indexOf("<p>English one</p>"),
+  );
+  assert(
+    translationHtml.indexOf("<p>English one</p>") <
       translationHtml.indexOf("<p>English two</p>"),
   );
 
@@ -709,9 +803,9 @@ function assertRssAiSummaryHtml() {
     ai_translation_md: "English one\n\n> 中文一\n\nEnglish two\n\n> 中文二",
   });
   const firstSourceIndex = nestedTranslationHtml.indexOf("<p>English one</p>");
-  const firstTranslationIndex = nestedTranslationHtml.indexOf("<p>中文一</p>");
+  const firstTranslationIndex = nestedTranslationHtml.indexOf("<blockquote>中文一</blockquote>");
   const secondSourceIndex = nestedTranslationHtml.indexOf("<p>English two</p>");
-  const secondTranslationIndex = nestedTranslationHtml.indexOf("<p>中文二</p>");
+  const secondTranslationIndex = nestedTranslationHtml.indexOf("<blockquote>中文二</blockquote>");
   assert(firstSourceIndex >= 0);
   assert(firstSourceIndex < firstTranslationIndex);
   assert(firstTranslationIndex < secondSourceIndex);
@@ -801,6 +895,8 @@ function assertRssSearchDisclosure() {
   await assertRssPagination();
   await assertRssListCacheRefresh();
   assertRssCacheSignatures();
+  assertRssResumeState();
+  assertRssDetailBackTarget();
   assertThemeSchedule();
   assertRssAiSummaryHtml();
   assertRssSummaryLoadingState();

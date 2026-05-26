@@ -106,6 +106,8 @@ const MAX_ORIGINAL_IMAGE_UPLOAD_BYTES = 1536 * 1024;
 const MAX_IMAGE_DIMENSIONS = [1600, 1280, 1024, 800];
 const IMAGE_JPEG_QUALITIES = [0.82, 0.74, 0.66, 0.58, 0.5];
 const ENTRY_SYNC_TIMEOUT_MS = 45000;
+const RSS_SUMMARY_TIMEOUT_MS = 120000;
+const RSS_TRANSLATION_TIMEOUT_MS = 180000;
 const LONG_PRESS_COPY_MS = 650;
 const LONG_PRESS_MOVE_PX = 12;
 const SCROLL_SAVE_MS = 160;
@@ -130,6 +132,7 @@ const RECENT_EDITS_KEY = "obr.recent-edits";
 const SEARCH_CACHE_KEY = "obr.search-cache";
 const SEARCH_CACHE_LIMIT = 24;
 const RSS_ITEMS_PAGE_SIZE = 20;
+const RSS_RESUME_KEY = "obr.rss.resume";
 const THEME_MODE_KEY = "obr.theme-mode";
 const LIGHT_THEME_COLOR = "#eef5f3";
 const DARK_THEME_COLOR = "#111c18";
@@ -503,6 +506,7 @@ async function handleAppPopState(event) {
     }
     await showView(target.view || "day", {
       focusSearch: false,
+      restoreRssLast: false,
       updateHistory: false,
     });
   } finally {
@@ -1429,12 +1433,14 @@ async function syncOutboxItem(item, options = {}) {
           body: entryFormData(item.payload, imageBlob),
           signal: options.signal,
           timeoutMs: ENTRY_SYNC_TIMEOUT_MS,
+          timeoutMessage: "Upload timed out. Draft kept.",
         })
       : await request("/api/entry", {
           method: "POST",
           body: JSON.stringify(item.payload),
           signal: options.signal,
           timeoutMs: ENTRY_SYNC_TIMEOUT_MS,
+          timeoutMessage: "Upload timed out. Draft kept.",
         });
     const text = await response.text();
     if (text !== "ok") throw new Error(text);
@@ -1521,7 +1527,7 @@ function offlineSourcePreview(source) {
 }
 
 async function request(path, options = {}) {
-  const { timeoutMs = 0, ...fetchOptions } = options;
+  const { timeoutMs = 0, timeoutMessage = "Request timed out.", ...fetchOptions } = options;
   let timeout = 0;
   let timedOut = false;
   let signal = fetchOptions.signal;
@@ -1565,7 +1571,7 @@ async function request(path, options = {}) {
     }
   } catch (error) {
     if (timedOut) {
-      const timeoutError = new Error("Upload timed out. Draft kept.");
+      const timeoutError = new Error(timeoutMessage);
       timeoutError.name = "TimeoutError";
       throw timeoutError;
     }
@@ -1912,8 +1918,17 @@ async function refreshPasskeyRegisterButton() {
 
 async function showView(name, options = {}) {
   if (!(await prepareToLeavePageEditor())) return;
-  const { focusSearch = true, restoreScroll = true, updateHistory = true } = options;
+  const {
+    focusSearch = true,
+    restoreScroll = true,
+    restoreRssLast = true,
+    updateHistory = true,
+  } = options;
   saveCurrentScrollPosition();
+  const rssResume = name === "rss" ? readRssResumeState() : null;
+  if (name === "rss" && restoreRssLast) {
+    restoreRssListControls(rssResume);
+  }
   state.view = name;
   for (const view of document.querySelectorAll(".view")) {
     view.hidden = true;
@@ -1946,6 +1961,12 @@ async function showView(name, options = {}) {
     return;
   }
   if (name === "rss") {
+    if (restoreRssLast && rssResume.mode === "detail" && rssResume.itemId) {
+      state.lastListView = "rss";
+      if (updateHistory) pushAppHistory({ view: "rss" });
+      await openRssItem(rssResume.itemId, { updateHistory });
+      return;
+    }
     clearPageOutline();
     updateReadingProgress();
     state.rssItemRequestId += 1;
@@ -1956,6 +1977,7 @@ async function showView(name, options = {}) {
     updateRssSearchClear();
     await loadRssItems({ preferCache: true });
     if (restoreScroll) restoreViewScroll("rss");
+    rememberRssListState({ preserveScroll: true });
     if (updateHistory) pushAppHistory({ view: "rss" });
     return;
   }
@@ -2813,6 +2835,8 @@ async function markRssItemReadFromList(id, button) {
 
 async function openRssItem(id, options = {}) {
   if (!id) return;
+  if (state.view === "rss" && !el("rss-view").hidden) saveViewScroll("rss");
+  rememberRssDetailState(id);
   const { updateHistory = true, preview = {} } = options;
   const requestId = state.rssItemRequestId + 1;
   state.rssItemRequestId = requestId;
@@ -2880,6 +2904,7 @@ function rssItemDetailSignature(item) {
     ai_summary_model: item?.ai_summary_model || "",
     ai_summary_at: item?.ai_summary_at || "",
     ai_translation_md: item?.ai_translation_md || "",
+    ai_translation_html: item?.ai_translation_html || "",
     ai_translation_model: item?.ai_translation_model || "",
     ai_translation_at: item?.ai_translation_at || "",
     needs_translation: Boolean(item?.needs_translation),
@@ -2908,7 +2933,12 @@ function renderRssDetailShell(id, preview = {}, options = {}) {
     preview.title || "RSS item",
     `${meta}<div class="rss-detail-loading"><span></span><p>Loading item...</p></div>`,
     "rss",
-    { ...options, editable: false, restoreReading: false, deferEnhancements: true },
+    {
+      ...options,
+      editable: false,
+      restoreReading: options.restoreReading !== false,
+      deferEnhancements: true,
+    },
   );
 }
 
@@ -2920,7 +2950,9 @@ function renderRssDetailPage(item, options = {}) {
   state.rssCurrentFeedTitle = item.feed_title || item.feed_url || "";
   state.rssCurrentStarred = Boolean(item.starred_at);
   state.rssCurrentHasSummary = Boolean((item.ai_summary_zh || "").trim());
-  state.rssCurrentHasTranslation = Boolean((item.ai_translation_md || "").trim());
+  state.rssCurrentHasTranslation = Boolean(
+    (item.ai_translation_html || item.ai_translation_md || "").trim(),
+  );
   state.rssCurrentNeedsTranslation = Boolean(item.needs_translation);
   state.currentFile = `rss:${item.id}`;
   state.currentContent = item.content_markdown || "";
@@ -2942,9 +2974,14 @@ function renderRssDetailPage(item, options = {}) {
   `;
   showPage(
     item.title || "Untitled",
-    `${metaHtml}${rssAiSummaryHtml(item, { open: Boolean(options.expandAiSummary) })}${rssDetailBodyHtml(item)}`,
+    `${metaHtml}${rssAiSummaryHtml(item, { open: Boolean(options.expandAiSummary) })}${rssDetailBodyHtml(item, { openTranslation: Boolean(options.expandAiTranslation) })}`,
     "rss",
-    { ...options, editable: false, restoreReading: false, deferEnhancements: true },
+    {
+      ...options,
+      editable: false,
+      restoreReading: options.restoreReading !== false,
+      deferEnhancements: true,
+    },
   );
   scheduleRssDetailEnhancements(renderId);
   updateRssPageActions();
@@ -2975,11 +3012,9 @@ function rssSameUrl(left, right) {
   }
 }
 
-function rssDetailBodyHtml(item) {
+function rssDetailBodyHtml(item, options = {}) {
   const bodyHtml = item?.html?.trim() ? item.html : '<p class="empty">No content.</p>';
-  const translations = rssTranslationBlocks(item?.ai_translation_md || "");
-  const html = translations.length ? rssBodyWithInlineTranslations(bodyHtml, translations) : bodyHtml;
-  return `<article class="rss-detail-body" data-rss-body>${html}</article>`;
+  return `${rssAiTranslationHtml(item, { open: options.openTranslation })}<article class="rss-detail-body" data-rss-body>${bodyHtml}</article>`;
 }
 
 function rssAiSummaryHtml(item, options = {}) {
@@ -2992,6 +3027,22 @@ function rssAiSummaryHtml(item, options = {}) {
     <details class="rss-ai-summary"${openAttr}>
       <summary><strong>中文总结</strong>${meta}</summary>
       <p>${escapeHtml(summary).replace(/\n/g, "<br>")}</p>
+    </details>
+  `;
+}
+
+function rssAiTranslationHtml(item, options = {}) {
+  const rendered = (item?.ai_translation_html || "").trim();
+  const markdown = (item?.ai_translation_md || "").trim();
+  if (!rendered && !markdown) return "";
+  const model = (item?.ai_translation_model || "").trim();
+  const meta = model ? `<span>${escapeHtml(model)}</span>` : "";
+  const openAttr = options.open ? " open" : "";
+  const bodyHtml = rendered || rssTranslationMarkdownHtml(markdown);
+  return `
+    <details class="rss-ai-summary rss-ai-translation"${openAttr}>
+      <summary><strong>全文翻译</strong>${meta}</summary>
+      <div class="rss-translation-body">${bodyHtml}</div>
     </details>
   `;
 }
@@ -3012,187 +3063,12 @@ function rssTranslationMarkdownHtml(markdown) {
     .join("");
 }
 
-function rssTranslationBlocks(markdown) {
-  const text = String(markdown || "").trim();
-  if (!text) return [];
-  const quoted = [];
-  let current = [];
-  const flush = () => {
-    const block = current.join("\n").trim();
-    if (block) quoted.push(block);
-    current = [];
-  };
-  for (const line of text.split(/\n/)) {
-    if (/^\s*>/.test(line)) {
-      current.push(line.replace(/^\s*>\s?/, ""));
-    } else {
-      flush();
-    }
+function readableRssAiError(error, fallback) {
+  const message = errorMessage(error).trim();
+  if (/timeout|timed out|operation timed out/i.test(message)) {
+    return "DeepSeek did not respond in time. Try again later.";
   }
-  flush();
-  if (quoted.length) return quoted;
-  return text
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean);
-}
-
-function rssInlineTranslationHtml(markdown, index) {
-  const html = rssTranslationMarkdownHtml(markdown);
-  if (!html) return "";
-  return `<div class="rss-inline-translation" data-rss-translation-block="${index}">${html}</div>`;
-}
-
-function rssBodyWithInlineTranslations(bodyHtml, translations) {
-  return (
-    rssBodyWithInlineTranslationsDom(bodyHtml, translations) ||
-    rssBodyWithInlineTranslationsFallback(bodyHtml, translations)
-  );
-}
-
-function rssBodyWithInlineTranslationsDom(bodyHtml, translations) {
-  try {
-    const template = document.createElement("template");
-    if (!template?.content) return "";
-    template.innerHTML = bodyHtml;
-    let index = 0;
-    for (const node of rssTranslationTargets(template.content)) {
-      if (index >= translations.length) break;
-      node.insertAdjacentHTML("afterend", rssInlineTranslationHtml(translations[index], index));
-      index += 1;
-    }
-    const rest = translations
-      .slice(index)
-      .map((translation, restIndex) => rssInlineTranslationHtml(translation, index + restIndex))
-      .join("");
-    if (rest) template.content.append(document.createRange().createContextualFragment(rest));
-    return template.innerHTML;
-  } catch {
-    return "";
-  }
-}
-
-const RSS_TRANSLATION_BLOCK_TAGS = new Set([
-  "p",
-  "pre",
-  "h1",
-  "h2",
-  "h3",
-  "h4",
-  "h5",
-  "h6",
-]);
-
-const RSS_TRANSLATION_NESTABLE_BLOCK_TAGS = new Set([
-  "blockquote",
-  "li",
-  "td",
-  "th",
-]);
-
-const RSS_TRANSLATION_CONTAINER_TAGS = new Set([
-  "article",
-  "section",
-  "div",
-  "main",
-  "figure",
-  "figcaption",
-]);
-
-const RSS_TRANSLATION_SKIP_TAGS = new Set([
-  "script",
-  "style",
-  "template",
-  "iframe",
-  "img",
-  "picture",
-  "source",
-  "video",
-  "audio",
-  "svg",
-  "math",
-]);
-
-function rssTranslationTargets(root) {
-  const targets = [];
-
-  const visit = (node) => {
-    if (!node || node.nodeType !== 1) return;
-    const tag = node.tagName?.toLowerCase();
-    if (!tag || RSS_TRANSLATION_SKIP_TAGS.has(tag)) return;
-
-    const childTargetStart = targets.length;
-    for (const child of Array.from(node.children || [])) {
-      visit(child);
-    }
-    const hasChildTargets = targets.length > childTargetStart;
-    if (rssNodeCanTakeTranslation(node, hasChildTargets)) {
-      targets.push(node);
-    }
-  };
-
-  for (const child of Array.from(root.children || [])) {
-    visit(child);
-  }
-
-  return targets;
-}
-
-function rssNodeCanTakeTranslation(node, hasChildTargets = false) {
-  if (!node || node.nodeType !== 1) return false;
-  const tag = node.tagName?.toLowerCase();
-  if (!tag || RSS_TRANSLATION_SKIP_TAGS.has(tag)) return false;
-  if (RSS_TRANSLATION_BLOCK_TAGS.has(tag)) return true;
-  if (RSS_TRANSLATION_NESTABLE_BLOCK_TAGS.has(tag)) {
-    return !hasChildTargets && rssNodeText(node).length > 0;
-  }
-  if (tag === "ul" || tag === "ol") return !hasChildTargets;
-  if (RSS_TRANSLATION_CONTAINER_TAGS.has(tag)) return !hasChildTargets && rssNodeText(node).length > 24;
-  return false;
-}
-
-function rssNodeText(node) {
-  return (node?.textContent || "").replace(/\s+/g, " ").trim();
-}
-
-function rssBodyWithInlineTranslationsFallback(bodyHtml, translations) {
-  const leaf = rssBodyWithInlineTranslationsByPattern(
-    bodyHtml,
-    translations,
-    /<(p|pre|h[1-6]|td|th)\b[\s\S]*?<\/\1>/gi,
-  );
-  if (leaf.used) return leaf.html;
-  const nestable = rssBodyWithInlineTranslationsByPattern(
-    bodyHtml,
-    translations,
-    /<(li|blockquote)\b[\s\S]*?<\/\1>/gi,
-  );
-  if (nestable.used) return nestable.html;
-  return rssBodyWithInlineTranslationsByPattern(
-    bodyHtml,
-    translations,
-    /<(div|section|article|ul|ol|table|figure)\b[\s\S]*?<\/\1>/gi,
-  ).html;
-}
-
-function rssBodyWithInlineTranslationsByPattern(bodyHtml, translations, blockPattern) {
-  let index = 0;
-  let offset = 0;
-  let output = "";
-  let match;
-  while ((match = blockPattern.exec(bodyHtml)) && index < translations.length) {
-    output += bodyHtml.slice(offset, match.index);
-    output += match[0];
-    output += rssInlineTranslationHtml(translations[index], index);
-    index += 1;
-    offset = match.index + match[0].length;
-  }
-  output += bodyHtml.slice(offset);
-  output += translations
-    .slice(index)
-    .map((translation, restIndex) => rssInlineTranslationHtml(translation, index + restIndex))
-    .join("");
-  return { html: output, used: index > 0 };
+  return message || fallback;
 }
 
 async function summarizeCurrentRssItem(button) {
@@ -3212,7 +3088,8 @@ async function summarizeCurrentRssItem(button) {
     const response = await request(`/api/rss/items/${encodeURIComponent(id)}/summary`, {
       method: "POST",
       body: JSON.stringify({}),
-      timeoutMs: 120000,
+      timeoutMs: RSS_SUMMARY_TIMEOUT_MS,
+      timeoutMessage: "Summary timed out. Try again later.",
     });
     if (!response.ok) throw new Error(await response.text());
     const item = await response.json();
@@ -3236,7 +3113,7 @@ async function summarizeCurrentRssItem(button) {
     button.title = "Summary";
     button.innerHTML = `${iconSvg("sparkles")}<span>Summary</span>`;
     clearRssSummaryPending();
-    setRssStatus(error.message || "Summary failed.", "error");
+    setRssStatus(readableRssAiError(error, "Summary failed."), "error");
   }
 }
 
@@ -3300,7 +3177,8 @@ async function translateCurrentRssItem(button) {
     const response = await request(`/api/rss/items/${encodeURIComponent(id)}/translation`, {
       method: "POST",
       body: JSON.stringify({}),
-      timeoutMs: 180000,
+      timeoutMs: RSS_TRANSLATION_TIMEOUT_MS,
+      timeoutMessage: "Translation timed out. Try again later.",
     });
     if (!response.ok) throw new Error(await response.text());
     const item = await response.json();
@@ -3317,14 +3195,12 @@ async function translateCurrentRssItem(button) {
   } catch (error) {
     if (requestId !== state.rssTranslationRequestId) return;
     console.error(error);
-    button.disabled = false;
-    button.classList.remove("is-loading");
-    button.removeAttribute("aria-busy");
-    button.setAttribute("aria-label", "Translate");
-    button.title = "Translate";
-    button.innerHTML = `${iconSvg("book-open")}<span>Translate</span>`;
     clearRssTranslationPending();
-    setRssStatus(error.message || "Translation failed.", "error");
+    setRssStatus(readableRssAiError(error, "Translation failed."), "error");
+  } finally {
+    if (requestId === state.rssTranslationRequestId) {
+      updateRssTranslationFloatingButton();
+    }
   }
 }
 
@@ -3356,8 +3232,9 @@ async function handleRssTranslationFloatingClick(event) {
 }
 
 function focusRssTranslation() {
-  const translation = el("page-content")?.querySelector(".rss-inline-translation");
+  const translation = el("page-content")?.querySelector(".rss-ai-translation");
   if (!translation) return false;
+  if (translation.tagName === "DETAILS") translation.open = true;
   focusRssSummaryTarget(translation);
   return true;
 }
@@ -3454,7 +3331,7 @@ async function unsubscribeCurrentRssFeed() {
     state.rssCurrentFeedTitle = "";
     clearRssCaches();
     showToast(`Unsubscribed. ${summary.removed_items || 0} items removed.`);
-    await showView("rss", { restoreScroll: false });
+    await showView("rss", { restoreRssLast: false, restoreScroll: false });
   } catch (error) {
     console.error(error);
     showToast(error.message || "Unsubscribe failed.");
@@ -3507,17 +3384,17 @@ function updateRssSummaryFloatingButton() {
 function updateRssTranslationFloatingButton() {
   const button = el("rss-translate-floating-button");
   if (!button) return;
+  const hasTranslation = Boolean(el("page-content")?.querySelector(".rss-ai-translation"));
   const isRssDetail =
     state.view === "page" &&
     state.currentFile?.startsWith("rss:") &&
     Boolean(state.rssSelectedItemId) &&
     el("page-editor").hidden &&
-    state.rssCurrentNeedsTranslation;
+    hasTranslation;
   button.hidden = !isRssDetail;
   if (!isRssDetail) return;
-  const hasTranslation = Boolean(el("page-content")?.querySelector(".rss-inline-translation"));
   state.rssCurrentHasTranslation = hasTranslation;
-  const label = hasTranslation ? "Show translation" : "Translate full text";
+  const label = "Show translation";
   button.dataset.rssTranslation = state.rssSelectedItemId;
   button.classList.toggle("has-translation", hasTranslation);
   button.disabled = false;
@@ -3627,6 +3504,63 @@ function clearRssItemCache(id = "") {
   } else {
     state.rssItemCache.clear();
   }
+}
+
+function readRssResumeState() {
+  const saved = readJson(RSS_RESUME_KEY, {});
+  return {
+    mode: saved?.mode === "detail" ? "detail" : "list",
+    itemId: String(saved?.itemId || ""),
+    filter: String(saved?.filter || "unread"),
+    query: String(saved?.query || ""),
+    listY: Number.isFinite(saved?.listY) ? Math.max(0, saved.listY) : 0,
+  };
+}
+
+function writeRssResumeState(next) {
+  try {
+    writeJson(RSS_RESUME_KEY, next);
+  } catch {
+    // Best effort only; RSS resume state should never block reading.
+  }
+}
+
+function rememberRssListState(options = {}) {
+  const saved = readRssResumeState();
+  const listY =
+    options.preserveScroll === true
+      ? saved.listY
+      : Number.isFinite(options.y)
+        ? Math.max(0, Math.round(options.y))
+        : Math.max(0, Math.round(window.scrollY || 0));
+  writeRssResumeState({
+    ...saved,
+    mode: "list",
+    filter: state.rssFilter,
+    query: rssSearchQuery(),
+    listY,
+  });
+}
+
+function restoreRssListControls(resume = readRssResumeState()) {
+  const filter = ["unread", "done", "all"].includes(resume.filter)
+    ? resume.filter
+    : "unread";
+  state.rssFilter = filter;
+  const input = el("rss-search-input");
+  if (input) input.value = resume.query || "";
+}
+
+function rememberRssDetailState(itemId = state.rssSelectedItemId) {
+  if (!itemId) return;
+  const saved = readRssResumeState();
+  writeRssResumeState({
+    ...saved,
+    mode: "detail",
+    itemId,
+    filter: state.rssFilter,
+    query: rssSearchQuery(),
+  });
 }
 
 function clearRssCaches() {
@@ -4912,15 +4846,19 @@ function updateReadingProgress() {
 function saveCurrentScrollPosition() {
   if (state.view === "page") {
     saveReadingPosition();
+    if (state.currentFile?.startsWith("rss:")) {
+      rememberRssDetailState(state.currentFile.slice(4));
+    }
   } else {
     saveViewScroll(state.view);
   }
 }
 
 function saveViewScroll(view) {
-  if (!["day", "find", "todo"].includes(view)) return;
+  if (!["day", "find", "todo", "rss"].includes(view)) return;
   const y = Math.max(0, Math.round(window.scrollY));
   state.viewScroll[view] = y;
+  if (view === "rss") rememberRssListState({ y });
   try {
     sessionStorage.setItem(viewScrollKey(view), String(y));
   } catch {
@@ -4929,6 +4867,11 @@ function saveViewScroll(view) {
 }
 
 function getViewScroll(view) {
+  if (view === "rss") {
+    const y = readRssResumeState().listY;
+    state.viewScroll[view] = y;
+    return y;
+  }
   if (state.viewScroll[view] !== undefined) return state.viewScroll[view];
   let saved = 0;
   try {
@@ -5005,11 +4948,35 @@ function readingPositionKey(file) {
 }
 
 async function goBackToLastList() {
+  if (isRssDetailPage()) {
+    await showRssListFromDetail();
+    return;
+  }
   if (window.history.state?.obr && window.history.state.view === "page") {
     window.history.back();
     return;
   }
-  await showView(state.lastListView, { focusSearch: false });
+  await showView(state.lastListView, {
+    focusSearch: false,
+    restoreRssLast: false,
+  });
+}
+
+function isRssDetailPage() {
+  return (
+    state.view === "page" &&
+    state.lastListView === "rss" &&
+    state.currentFile?.startsWith("rss:")
+  );
+}
+
+async function showRssListFromDetail() {
+  await showView("rss", {
+    focusSearch: false,
+    restoreRssLast: false,
+    updateHistory: false,
+  });
+  replaceAppHistory({ view: "rss" });
 }
 
 function handleGlobalKeydown(event) {
@@ -5073,10 +5040,17 @@ function handleHistoryKeydown(event) {
 function navigateAppHistory(direction) {
   if (!state.historyReady) return;
   if (direction < 0) {
+    if (isRssDetailPage()) {
+      void showRssListFromDetail();
+      return;
+    }
     if (state.appHistoryIndex > 0) {
       window.history.back();
     } else if (state.view === "page") {
-      void showView(state.lastListView, { focusSearch: false });
+      void showView(state.lastListView, {
+        focusSearch: false,
+        restoreRssLast: false,
+      });
     }
     return;
   }

@@ -1423,31 +1423,25 @@ main {
   border-left-color: var(--blue);
 }
 
-.rss-inline-translation {
-  margin: -0.35em 0 0.9em;
-  border-left: 3px solid color-mix(in srgb, var(--blue) 70%, transparent);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--blue) 8%, transparent);
-  color: var(--text);
-  padding: 8px 10px;
-  font-size: 0.95em;
+.rss-translation-body {
+  margin-top: 10px;
 }
 
-.rss-inline-translation p,
-.rss-inline-translation blockquote {
-  margin: 0 0 8px;
+.rss-translation-body p,
+.rss-translation-body blockquote {
+  margin: 0 0 12px;
   font-size: 15px;
   line-height: 1.75;
 }
 
-.rss-inline-translation blockquote {
+.rss-translation-body blockquote {
   border-left: 3px solid color-mix(in srgb, var(--green) 65%, transparent);
   padding-left: 12px;
   color: var(--text);
   background: color-mix(in srgb, var(--green) 8%, transparent);
 }
 
-.rss-inline-translation > :last-child {
+.rss-translation-body > :last-child {
   margin-bottom: 0;
 }
 
