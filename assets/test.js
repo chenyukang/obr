@@ -44,6 +44,57 @@ const rssTranslateFloatingButton = {
 const rssBodyNode = { dataset: { rssBody: "1" } };
 let rssTranslationNode = null;
 let rssTranslationErrorNode = null;
+let openedWindows = [];
+function mockButton(hidden = true) {
+  const button = {
+    hidden,
+    disabled: false,
+    title: "",
+    innerHTML: "",
+    dataset: {},
+    attributes: {},
+    classes: new Set(),
+    classList: {
+      add(name) {
+        button.classes.add(name);
+      },
+      remove(name) {
+        button.classes.delete(name);
+      },
+      toggle(name, active) {
+        if (active) button.classes.add(name);
+        else button.classes.delete(name);
+      },
+      contains(name) {
+        return button.classes.has(name);
+      },
+    },
+    setAttribute(name, value) {
+      button.attributes[name] = String(value);
+    },
+    removeAttribute(name) {
+      delete button.attributes[name];
+    },
+  };
+  return button;
+}
+const rssActionBar = {
+  hidden: false,
+  dataset: {},
+  classes: new Set(),
+  classList: {
+    toggle(name, active) {
+      if (active) rssActionBar.classes.add(name);
+      else rssActionBar.classes.delete(name);
+    },
+  },
+};
+const rssActionToggle = mockButton(true);
+const rssSummaryFloatingButton = mockButton(true);
+const rssStarButton = mockButton(true);
+const rssUnsubscribeButton = mockButton(true);
+const rssAnnotationButton = mockButton(true);
+const tocButton = mockButton(true);
 const pageContent = {
   hidden: false,
   firstChild: rssBodyNode,
@@ -126,7 +177,14 @@ const elements = {
   "rss-search-input": rssSearchInput,
   "rss-search-toggle": rssSearchToggle,
   "rss-search-clear": { hidden: true },
+  "rss-detail-action-bar": rssActionBar,
+  "rss-detail-action-toggle": rssActionToggle,
+  "rss-summary-floating-button": rssSummaryFloatingButton,
   "rss-translate-floating-button": rssTranslateFloatingButton,
+  "rss-star-button": rssStarButton,
+  "rss-unsubscribe-button": rssUnsubscribeButton,
+  "rss-annotation-button": rssAnnotationButton,
+  "toc-button": tocButton,
   "update-banner": { hidden: true },
   "rss-status": {
     textContent: "",
@@ -197,6 +255,11 @@ const sandbox = {
     requestAnimationFrame(callback) {
       callback();
     },
+    open(url, target, features) {
+      const opened = { url, target, features, opener: "set" };
+      openedWindows.push(opened);
+      return opened;
+    },
   },
   navigator: {},
   localStorage: {
@@ -254,7 +317,10 @@ this.__obrTest = {
   renderRssTranslationPending,
   renderRssTranslationError,
   clearRssTranslationError,
+  updateRssPageActions,
   updateRssTranslationFloatingButton,
+  toggleRssDetailActions,
+  handleRssSecondaryAction,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
@@ -302,7 +368,10 @@ const {
   renderRssTranslationPending,
   renderRssTranslationError,
   clearRssTranslationError,
+  updateRssPageActions,
   updateRssTranslationFloatingButton,
+  toggleRssDetailActions,
+  handleRssSecondaryAction,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
@@ -921,6 +990,84 @@ function assertRssTranslationButtonShowsWhenMissingTranslation() {
   }
 }
 
+function assertRssActionBarUsesHackerNewsButton() {
+  const previous = {
+    view: state.view,
+    currentFile: state.currentFile,
+    selectedItemId: state.rssSelectedItemId,
+    needsTranslation: state.rssCurrentNeedsTranslation,
+    hackerNewsUrl: state.rssCurrentHackerNewsUrl,
+    expanded: state.rssDetailActionsExpanded,
+    pageEditorHidden: pageEditor.hidden,
+    translationNode: rssTranslationNode,
+  };
+  try {
+    rssActionBar.classes.clear();
+    rssActionBar.dataset = {};
+    rssActionToggle.hidden = true;
+    rssActionToggle.attributes = {};
+    rssActionToggle.innerHTML = "";
+    rssUnsubscribeButton.hidden = true;
+    rssUnsubscribeButton.innerHTML = "";
+    rssUnsubscribeButton.dataset = {};
+    rssUnsubscribeButton.attributes = {};
+    rssUnsubscribeButton.classes.clear();
+    state.view = "page";
+    state.currentFile = "rss:item-1";
+    state.rssSelectedItemId = "item-1";
+    state.rssCurrentNeedsTranslation = false;
+    state.rssCurrentHackerNewsUrl = "https://news.ycombinator.com/item?id=48260331";
+    state.rssDetailActionsExpanded = false;
+    pageEditor.hidden = true;
+    rssTranslationNode = null;
+
+    updateRssPageActions();
+
+    assert.strictEqual(rssUnsubscribeButton.hidden, false);
+    assert(rssUnsubscribeButton.classes.has("rss-side-action-hn"));
+    assert(!rssUnsubscribeButton.classes.has("danger-button"));
+    assert.strictEqual(rssUnsubscribeButton.dataset.hackerNewsUrl, state.rssCurrentHackerNewsUrl);
+    assert.strictEqual(rssUnsubscribeButton.title, "Hacker News");
+    assert.strictEqual(
+      rssUnsubscribeButton.attributes["aria-label"],
+      "Open Hacker News discussion",
+    );
+    assert(rssUnsubscribeButton.innerHTML.includes("HN"));
+    assert(rssActionBar.classes.has("has-actions"));
+    assert(!rssActionBar.classes.has("is-expanded"));
+    assert.strictEqual(rssActionToggle.hidden, false);
+    assert.strictEqual(rssActionToggle.attributes["aria-expanded"], "false");
+
+    toggleRssDetailActions();
+    assert(rssActionBar.classes.has("is-expanded"));
+    assert.strictEqual(rssActionToggle.attributes["aria-expanded"], "true");
+    assert(rssActionToggle.innerHTML.includes("Close actions"));
+
+    openedWindows = [];
+    let prevented = false;
+    handleRssSecondaryAction({
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    assert.strictEqual(prevented, true);
+    assert.strictEqual(openedWindows.length, 1);
+    assert.strictEqual(openedWindows[0].url, "https://news.ycombinator.com/item?id=48260331");
+    assert.strictEqual(openedWindows[0].target, "_blank");
+    assert.strictEqual(openedWindows[0].features, "noopener,noreferrer");
+    assert(!rssActionBar.classes.has("is-expanded"));
+  } finally {
+    state.view = previous.view;
+    state.currentFile = previous.currentFile;
+    state.rssSelectedItemId = previous.selectedItemId;
+    state.rssCurrentNeedsTranslation = previous.needsTranslation;
+    state.rssCurrentHackerNewsUrl = previous.hackerNewsUrl;
+    state.rssDetailActionsExpanded = previous.expanded;
+    pageEditor.hidden = previous.pageEditorHidden;
+    rssTranslationNode = previous.translationNode;
+  }
+}
+
 function assertRssTranslationErrorState() {
   pendingSummaryNode = null;
   rssTranslationErrorNode = null;
@@ -1036,6 +1183,7 @@ function assertRssSearchDisclosure() {
   assertThemeSchedule();
   assertRssAiSummaryHtml();
   assertRssTranslationButtonShowsWhenMissingTranslation();
+  assertRssActionBarUsesHackerNewsButton();
   assertRssTranslationErrorState();
   assertRssSummaryLoadingState();
   assertRssSummaryFocusUsesStickyOffset();

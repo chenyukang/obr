@@ -39,6 +39,8 @@ const state = {
   rssCurrentHasSummary: false,
   rssCurrentHasTranslation: false,
   rssCurrentNeedsTranslation: false,
+  rssCurrentHackerNewsUrl: "",
+  rssDetailActionsExpanded: false,
   rssAnnotationQuote: "",
   rssAnnotationSaving: false,
   rssRefreshing: false,
@@ -154,6 +156,7 @@ const ICONS = {
   camera:
     '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"></path><circle cx="12" cy="13" r="3"></circle>',
   check: '<path d="M20 6 9 17l-5-5"></path>',
+  ellipsis: '<circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle>',
   image:
     '<rect width="18" height="18" x="3" y="3" rx="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>',
   list: '<path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>',
@@ -364,7 +367,8 @@ function bindEvents() {
   el("back-button").addEventListener("click", goBackToLastList);
   el("edit-button").addEventListener("click", toggleEdit);
   el("rss-star-button").addEventListener("click", toggleCurrentRssStar);
-  el("rss-unsubscribe-button").addEventListener("click", unsubscribeCurrentRssFeed);
+  el("rss-unsubscribe-button").addEventListener("click", handleRssSecondaryAction);
+  el("rss-detail-action-toggle").addEventListener("click", toggleRssDetailActions);
   el("rss-summary-floating-button").addEventListener("click", handleRssSummaryFloatingClick);
   el("rss-translate-floating-button").addEventListener("click", handleRssTranslationFloatingClick);
   el("rss-annotation-button").addEventListener("pointerdown", () => {
@@ -1944,6 +1948,7 @@ async function showView(name, options = {}) {
   for (const view of document.querySelectorAll(".view")) {
     view.hidden = true;
   }
+  el("page-view").classList.remove("is-rss-detail");
   hideRssDetailActions();
   if (name === "todo") {
     clearPageOutline();
@@ -2937,6 +2942,8 @@ function renderRssDetailShell(id, preview = {}, options = {}) {
   state.rssCurrentHasSummary = false;
   state.rssCurrentHasTranslation = false;
   state.rssCurrentNeedsTranslation = false;
+  state.rssCurrentHackerNewsUrl = "";
+  setRssDetailActionsExpanded(false);
   state.currentFile = `rss:${id}`;
   state.currentContent = "";
   state.currentBlocks = [];
@@ -2968,6 +2975,8 @@ function renderRssDetailPage(item, options = {}) {
     (item.ai_translation_html || item.ai_translation_md || "").trim(),
   );
   state.rssCurrentNeedsTranslation = Boolean(item.needs_translation);
+  state.rssCurrentHackerNewsUrl = rssHackerNewsUrl(item);
+  setRssDetailActionsExpanded(false);
   state.currentFile = `rss:${item.id}`;
   state.currentContent = item.content_markdown || "";
   state.currentBlocks = [];
@@ -3366,6 +3375,27 @@ async function toggleCurrentRssStar() {
   }
 }
 
+function handleRssSecondaryAction(event) {
+  if (state.rssCurrentHackerNewsUrl) {
+    event?.preventDefault();
+    openCurrentRssHackerNews();
+    return;
+  }
+  void unsubscribeCurrentRssFeed();
+}
+
+function openCurrentRssHackerNews() {
+  const url = state.rssCurrentHackerNewsUrl;
+  if (!url) return;
+  setRssDetailActionsExpanded(false);
+  const opened = window.open?.(url, "_blank", "noopener,noreferrer");
+  if (opened) {
+    try {
+      opened.opener = null;
+    } catch {}
+  }
+}
+
 async function unsubscribeCurrentRssFeed() {
   const feedId = state.rssCurrentFeedId;
   if (!feedId) return;
@@ -3529,6 +3559,7 @@ function updateRssPageActions() {
   const starButton = el("rss-star-button");
   const unsubscribeButton = el("rss-unsubscribe-button");
   const annotationButton = el("rss-annotation-button");
+  const hackerNewsUrl = state.rssCurrentHackerNewsUrl;
   starButton.hidden = false;
   unsubscribeButton.hidden = false;
   annotationButton.hidden = false;
@@ -3537,14 +3568,69 @@ function updateRssPageActions() {
   setButtonIcon(starButton, "star", starLabel);
   starButton.setAttribute("aria-label", starLabel);
   starButton.title = starLabel;
-  setButtonIcon(unsubscribeButton, "trash-2", "Unsub");
-  unsubscribeButton.setAttribute("aria-label", "Unsubscribe feed");
-  unsubscribeButton.title = "Unsub";
+  unsubscribeButton.classList.toggle("rss-side-action-hn", Boolean(hackerNewsUrl));
+  unsubscribeButton.classList.toggle("danger-button", !hackerNewsUrl);
+  if (hackerNewsUrl) {
+    unsubscribeButton.dataset.hackerNewsUrl = hackerNewsUrl;
+    unsubscribeButton.innerHTML = '<span class="rss-hn-button-label">HN</span>';
+    unsubscribeButton.setAttribute("aria-label", "Open Hacker News discussion");
+    unsubscribeButton.title = "Hacker News";
+  } else {
+    delete unsubscribeButton.dataset.hackerNewsUrl;
+    setButtonIcon(unsubscribeButton, "trash-2", "Unsub");
+    unsubscribeButton.setAttribute("aria-label", "Unsubscribe feed");
+    unsubscribeButton.title = "Unsub";
+  }
   setButtonIcon(annotationButton, "message-square-plus", "Annotate");
   annotationButton.setAttribute("aria-label", "Annotate RSS item");
   annotationButton.title = "Annotate";
   updateRssSummaryFloatingButton();
   updateRssTranslationFloatingButton();
+  updateRssDetailActionBar();
+}
+
+function toggleRssDetailActions() {
+  setRssDetailActionsExpanded(!state.rssDetailActionsExpanded);
+}
+
+function setRssDetailActionsExpanded(expanded) {
+  state.rssDetailActionsExpanded = Boolean(expanded);
+  const bar = el("rss-detail-action-bar");
+  const toggle = el("rss-detail-action-toggle");
+  if (!bar || !toggle) return;
+  bar.classList.toggle("is-expanded", state.rssDetailActionsExpanded);
+  bar.dataset.expanded = state.rssDetailActionsExpanded ? "true" : "false";
+  toggle.setAttribute("aria-expanded", state.rssDetailActionsExpanded ? "true" : "false");
+  setButtonIcon(
+    toggle,
+    state.rssDetailActionsExpanded ? "x" : "ellipsis",
+    state.rssDetailActionsExpanded ? "Close actions" : "RSS actions",
+  );
+}
+
+function updateRssDetailActionBar() {
+  const bar = el("rss-detail-action-bar");
+  const toggle = el("rss-detail-action-toggle");
+  if (!bar || !toggle) return;
+  const actionIds = [
+    "rss-summary-floating-button",
+    "rss-translate-floating-button",
+    "rss-annotation-button",
+    "toc-button",
+    "rss-star-button",
+    "rss-unsubscribe-button",
+  ];
+  const hasVisibleActions = actionIds.some((id) => {
+    const action = el(id);
+    return action && !action.hidden;
+  });
+  bar.classList.toggle("has-actions", hasVisibleActions);
+  toggle.hidden = !hasVisibleActions;
+  if (!hasVisibleActions) {
+    setRssDetailActionsExpanded(false);
+  } else {
+    setRssDetailActionsExpanded(state.rssDetailActionsExpanded);
+  }
 }
 
 function updateRssSummaryFloatingButton() {
@@ -3568,6 +3654,7 @@ function updateRssSummaryFloatingButton() {
   button.setAttribute("aria-label", label);
   button.title = label;
   setButtonIcon(button, "sparkles", label);
+  updateRssDetailActionBar();
 }
 
 
@@ -3594,6 +3681,7 @@ function updateRssTranslationFloatingButton() {
   button.setAttribute("aria-label", label);
   button.title = label;
   setButtonIcon(button, "book-open", label);
+  updateRssDetailActionBar();
 }
 
 function hideRssDetailActions() {
@@ -3602,6 +3690,8 @@ function hideRssDetailActions() {
   el("rss-annotation-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
   el("rss-translate-floating-button").hidden = true;
+  state.rssCurrentHackerNewsUrl = "";
+  updateRssDetailActionBar();
   closeRssAnnotationDialog();
 }
 
@@ -4007,6 +4097,8 @@ function showPage(title, html, sourceView, options = {}) {
     state.lastListView = "find";
   }
   state.view = "page";
+  const pageView = el("page-view");
+  pageView.classList.toggle("is-rss-detail", isRssDetailPage());
   for (const view of document.querySelectorAll(".view")) {
     view.hidden = true;
   }
@@ -4034,9 +4126,10 @@ function showPage(title, html, sourceView, options = {}) {
   el("rss-annotation-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
   el("rss-translate-floating-button").hidden = true;
+  updateRssDetailActionBar();
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
-  el("page-view").hidden = false;
+  pageView.hidden = false;
   updateReadingProgress();
   if (title === "NoPage") {
     window.scrollTo(0, 0);
@@ -4088,6 +4181,7 @@ function clearPageOutline() {
   el("rss-annotation-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
   el("rss-translate-floating-button").hidden = true;
+  updateRssDetailActionBar();
   closeRssAnnotationDialog();
   closeTocPanel();
 }
@@ -4118,6 +4212,7 @@ function updatePageOutline() {
   el("toc-button").hidden = !show || state.view !== "page" || !el("page-editor").hidden;
   if (!show) closeTocPanel();
   updateActiveOutline();
+  updateRssDetailActionBar();
 }
 
 function openTocPanel() {
@@ -4340,9 +4435,12 @@ async function openPageEditor(mode, options = {}) {
   content.hidden = true;
   el("page-new-block-button").hidden = true;
   el("toc-button").hidden = true;
+  el("rss-star-button").hidden = true;
+  el("rss-unsubscribe-button").hidden = true;
   el("rss-annotation-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
   el("rss-translate-floating-button").hidden = true;
+  updateRssDetailActionBar();
   closeRssAnnotationDialog();
   closeTocPanel();
   updateReadingProgress();
