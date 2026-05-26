@@ -31,7 +31,7 @@ use crate::{
     markdown::{escape_html_attr, render_markdown_html_for_file},
 };
 
-const RSS_SCHEMA_VERSION: i64 = 5;
+const RSS_SCHEMA_VERSION: i64 = 6;
 const CONTENT_DIR: &str = "content";
 const HTML_DIR: &str = "html";
 const SOURCE_HTML_DIR: &str = "source-html";
@@ -39,6 +39,7 @@ const USER_AGENT_VALUE: &str = concat!("Obr/", env!("CARGO_PKG_VERSION"), " RSS 
 const MIN_ARTICLE_MARKDOWN_CHARS: usize = 160;
 const RSS_LIST_SUMMARY_CHARS: usize = 420;
 const RSS_AI_SUMMARY_INPUT_CHARS: usize = 12_000;
+const RSS_AI_TRANSLATION_INPUT_CHARS: usize = 24_000;
 const ARTICLE_FALLBACK_SELECTORS: &[&str] = &[
     "article",
     "main article",
@@ -150,6 +151,11 @@ pub(crate) struct RssItemDetail {
     pub(crate) ai_summary_zh: Option<String>,
     pub(crate) ai_summary_model: Option<String>,
     pub(crate) ai_summary_at: Option<String>,
+    pub(crate) ai_translation_md: Option<String>,
+    pub(crate) ai_translation_model: Option<String>,
+    pub(crate) ai_translation_at: Option<String>,
+    pub(crate) needs_translation: bool,
+    pub(crate) hacker_news_url: Option<String>,
     pub(crate) content_source: String,
     pub(crate) extraction_quality: Option<f64>,
     #[serde(skip_serializing)]
@@ -230,6 +236,13 @@ struct AiSummary {
     content: String,
     model: String,
     summarized_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct AiTranslation {
+    content: String,
+    model: String,
+    translated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -524,7 +537,8 @@ impl RssReader {
                 "SELECT i.id, i.feed_id, COALESCE(f.title, f.url), f.url, i.title, i.url,
                         i.author, i.published_at, i.updated_at, i.first_seen_at, i.fetched_at,
                         i.read_at, i.starred_at, i.ai_summary_zh, i.ai_summary_model,
-                        i.ai_summary_at, i.content_source, i.extraction_quality,
+                        i.ai_summary_at, i.ai_translation_md, i.ai_translation_model,
+                        i.ai_translation_at, i.content_source, i.extraction_quality,
                         i.content_path, i.summary_md, i.html_path, i.source_html_path
                  FROM items i
                  JOIN feeds f ON f.id = i.feed_id
@@ -548,12 +562,15 @@ impl RssReader {
                         row.get::<_, Option<String>>(13)?,
                         row.get::<_, Option<String>>(14)?,
                         row.get::<_, Option<String>>(15)?,
-                        row.get::<_, String>(16)?,
-                        row.get::<_, Option<f64>>(17)?,
+                        row.get::<_, Option<String>>(16)?,
+                        row.get::<_, Option<String>>(17)?,
                         row.get::<_, Option<String>>(18)?,
-                        row.get::<_, Option<String>>(19)?,
-                        row.get::<_, Option<String>>(20)?,
+                        row.get::<_, String>(19)?,
+                        row.get::<_, Option<f64>>(20)?,
                         row.get::<_, Option<String>>(21)?,
+                        row.get::<_, Option<String>>(22)?,
+                        row.get::<_, Option<String>>(23)?,
+                        row.get::<_, Option<String>>(24)?,
                     ))
                 },
             )
@@ -576,6 +593,9 @@ impl RssReader {
             ai_summary_zh,
             ai_summary_model,
             ai_summary_at,
+            ai_translation_md,
+            ai_translation_model,
+            ai_translation_at,
             content_source,
             extraction_quality,
             content_path,
@@ -587,13 +607,17 @@ impl RssReader {
             return Ok(None);
         };
 
+        let summary_markdown = summary_md.unwrap_or_default();
         let content_markdown = content_path
             .as_deref()
             .and_then(|path| self.content_file_path(path))
             .and_then(|path| fs::read_to_string(path).ok())
             .filter(|content| !content.trim().is_empty())
-            .or(summary_md)
-            .unwrap_or_default();
+            .unwrap_or_else(|| summary_markdown.clone());
+
+        let needs_translation = should_translate_rss_item(&title, &content_markdown);
+        let hacker_news_url = hacker_news_comments_url(&feed_title, &feed_url, &summary_markdown)
+            .or_else(|| hacker_news_comments_url(&feed_title, &feed_url, &content_markdown));
 
         Ok(Some(RssItemDetail {
             id,
@@ -612,6 +636,11 @@ impl RssReader {
             ai_summary_zh,
             ai_summary_model,
             ai_summary_at,
+            ai_translation_md,
+            ai_translation_model,
+            ai_translation_at,
+            needs_translation,
+            hacker_news_url,
             content_source,
             extraction_quality,
             content_path,
@@ -684,6 +713,10 @@ impl RssReader {
         self.ai_summary.is_some()
     }
 
+    pub(crate) fn can_translate_items(&self) -> bool {
+        self.ai_summary.is_some()
+    }
+
     pub(crate) async fn summarize_item(&self, id: &str) -> Result<Option<RssItemDetail>> {
         let Some(mut item) = self.get_item(id)? else {
             return Ok(None);
@@ -714,6 +747,42 @@ impl RssReader {
         item.ai_summary_zh = Some(summary.content);
         item.ai_summary_model = Some(summary.model);
         item.ai_summary_at = Some(summary.summarized_at);
+        Ok(Some(item))
+    }
+
+    pub(crate) async fn translate_item(&self, id: &str) -> Result<Option<RssItemDetail>> {
+        let Some(mut item) = self.get_item(id)? else {
+            return Ok(None);
+        };
+        if !item.needs_translation {
+            bail!("RSS item is already Chinese or not English enough to translate");
+        }
+        if item
+            .ai_translation_md
+            .as_deref()
+            .is_some_and(|translation| !translation.trim().is_empty())
+        {
+            return Ok(Some(item));
+        }
+        let config = self
+            .ai_summary
+            .clone()
+            .ok_or_else(|| anyhow!("RSS AI translation is not configured"))?;
+        let Some(content) = self
+            .fetch_ai_translation(&config, &item.title, &item.url, &item.content_markdown)
+            .await?
+        else {
+            bail!("RSS item does not have enough content to translate");
+        };
+        let translation = AiTranslation {
+            content,
+            model: config.model,
+            translated_at: now_string(),
+        };
+        self.save_item_ai_translation(&item, &translation)?;
+        item.ai_translation_md = Some(translation.content);
+        item.ai_translation_model = Some(translation.model);
+        item.ai_translation_at = Some(translation.translated_at);
         Ok(Some(item))
     }
 
@@ -753,6 +822,7 @@ impl RssReader {
             item.author.as_deref().unwrap_or_default(),
             item.content_markdown.as_str(),
             summary.content.as_str(),
+            item.ai_translation_md.as_deref().unwrap_or_default(),
         ]
         .join("\n")
         .to_lowercase();
@@ -767,6 +837,38 @@ impl RssReader {
                 &summary.content,
                 &summary.model,
                 &summary.summarized_at,
+                search_text,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    fn save_item_ai_translation(
+        &self,
+        item: &RssItemDetail,
+        translation: &AiTranslation,
+    ) -> Result<bool> {
+        let search_text = [
+            item.title.as_str(),
+            item.url.as_str(),
+            item.author.as_deref().unwrap_or_default(),
+            item.content_markdown.as_str(),
+            item.ai_summary_zh.as_deref().unwrap_or_default(),
+            translation.content.as_str(),
+        ]
+        .join("\n")
+        .to_lowercase();
+        let conn = self.connection()?;
+        let changed = conn.execute(
+            "UPDATE items
+             SET ai_translation_md = ?2, ai_translation_model = ?3, ai_translation_at = ?4,
+                 search_text = ?5
+             WHERE id = ?1",
+            params![
+                &item.id,
+                &translation.content,
+                &translation.model,
+                &translation.translated_at,
                 search_text,
             ],
         )?;
@@ -1208,6 +1310,73 @@ impl RssReader {
             .into_iter()
             .find_map(|choice| choice.message.content)
             .and_then(|content| clean_ai_summary(&content));
+        Ok(content)
+    }
+
+    async fn fetch_ai_translation(
+        &self,
+        config: &AiSummaryConfig,
+        title: &str,
+        url: &str,
+        content_markdown: &str,
+    ) -> Result<Option<String>> {
+        let input = ai_translation_input(title, url, content_markdown);
+        if input.trim().chars().count() < 80 {
+            return Ok(None);
+        }
+        let endpoint = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
+        let user_prompt = format!(
+            "请把下面这篇英文 RSS 文章全文翻译成中文。输出 Markdown，并按段落成块展示：每一块先放英文原文段落，紧接下一段用 Markdown 引用块 `> ` 放对应中文翻译；块与块之间空一行。保留原文的基本段落顺序，跳过广告、导航和版权噪音。不要输出标题、免责声明或额外说明。
+
+{}",
+            input
+        );
+        let request = DeepSeekChatRequest {
+            model: &config.model,
+            messages: vec![
+                DeepSeekMessage {
+                    role: "system",
+                    content: "你是专业的英文到中文翻译助手。只输出要求的 Markdown 译文：英文原文段落在上，中文翻译用引用块在下。",
+                },
+                DeepSeekMessage {
+                    role: "user",
+                    content: &user_prompt,
+                },
+            ],
+            temperature: 0.1,
+            stream: false,
+            thinking: DeepSeekThinking { r#type: "disabled" },
+        };
+        let request_body =
+            serde_json::to_vec(&request).context("serialize DeepSeek RSS translation request")?;
+        let response = self
+            .client
+            .post(endpoint)
+            .bearer_auth(&config.api_key)
+            .header(CONTENT_TYPE, "application/json")
+            .body(request_body)
+            .send()
+            .await
+            .context("request DeepSeek RSS translation")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("read DeepSeek RSS translation response")?;
+        if !status.is_success() {
+            bail!(
+                "DeepSeek translation returned HTTP {}: {}",
+                status,
+                truncate_chars(&body, 240)
+            );
+        }
+        let completion: DeepSeekChatResponse =
+            serde_json::from_str(&body).context("parse DeepSeek RSS translation response")?;
+        let content = completion
+            .choices
+            .into_iter()
+            .find_map(|choice| choice.message.content)
+            .and_then(|content| clean_ai_translation(&content));
         Ok(content)
     }
 
@@ -1666,6 +1835,9 @@ fn init_db(path: &Path) -> Result<()> {
             ai_summary_zh TEXT,
             ai_summary_model TEXT,
             ai_summary_at TEXT,
+            ai_translation_md TEXT,
+            ai_translation_model TEXT,
+            ai_translation_at TEXT,
             content_path TEXT,
             html_path TEXT,
             source_html_path TEXT,
@@ -1691,6 +1863,9 @@ fn init_db(path: &Path) -> Result<()> {
     ensure_column(&conn, "items", "ai_summary_zh", "TEXT")?;
     ensure_column(&conn, "items", "ai_summary_model", "TEXT")?;
     ensure_column(&conn, "items", "ai_summary_at", "TEXT")?;
+    ensure_column(&conn, "items", "ai_translation_md", "TEXT")?;
+    ensure_column(&conn, "items", "ai_translation_model", "TEXT")?;
+    ensure_column(&conn, "items", "ai_translation_at", "TEXT")?;
     conn.execute(
         "UPDATE items
          SET sort_at = COALESCE(NULLIF(published_at, ''), NULLIF(updated_at, ''))",
@@ -1953,6 +2128,10 @@ fn item_identity(feed_url: &str, entry: &Entry) -> ItemIdentity {
 }
 
 fn should_ai_summarize_rss_item(title: &str, content_markdown: &str) -> bool {
+    should_translate_rss_item(title, content_markdown)
+}
+
+fn should_translate_rss_item(title: &str, content_markdown: &str) -> bool {
     let sample = format!("{title}\n\n{}", take_chars(content_markdown, 4_000));
     let mut han = 0usize;
     let mut meaningful = 0usize;
@@ -1989,13 +2168,21 @@ fn is_han_char(ch: char) -> bool {
 }
 
 fn ai_summary_input(title: &str, url: &str, content_markdown: &str) -> String {
+    ai_input(title, url, content_markdown, RSS_AI_SUMMARY_INPUT_CHARS)
+}
+
+fn ai_translation_input(title: &str, url: &str, content_markdown: &str) -> String {
+    ai_input(title, url, content_markdown, RSS_AI_TRANSLATION_INPUT_CHARS)
+}
+
+fn ai_input(title: &str, url: &str, content_markdown: &str, limit: usize) -> String {
     let mut input = String::new();
     input.push_str("Title: ");
     input.push_str(title.trim());
     input.push_str("\nURL: ");
     input.push_str(url.trim());
     input.push_str("\n\nContent:\n");
-    input.push_str(&take_chars(content_markdown, RSS_AI_SUMMARY_INPUT_CHARS));
+    input.push_str(&take_chars(content_markdown, limit));
     input
 }
 
@@ -2015,6 +2202,17 @@ fn clean_ai_summary(content: &str) -> Option<String> {
         .or_else(|| cleaned.strip_prefix("总结："))
         .or_else(|| cleaned.strip_prefix("摘要："))
         .unwrap_or(cleaned)
+        .trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
+fn clean_ai_translation(content: &str) -> Option<String> {
+    let cleaned = content
+        .trim()
+        .trim_matches(|ch| matches!(ch, '`'))
+        .trim()
+        .strip_prefix("markdown")
+        .unwrap_or_else(|| content.trim())
         .trim();
     (!cleaned.is_empty()).then(|| cleaned.to_string())
 }
@@ -3053,6 +3251,48 @@ fn is_http_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
 }
 
+fn hacker_news_comments_url(feed_title: &str, feed_url: &str, markdown: &str) -> Option<String> {
+    if !is_hacker_news_feed(feed_title, feed_url) {
+        return None;
+    }
+    markdown
+        .lines()
+        .filter(|line| {
+            let line = line.to_lowercase();
+            line.contains("comments url") || line.contains("hn comments")
+        })
+        .find_map(extract_hacker_news_item_url)
+        .or_else(|| extract_hacker_news_item_url(markdown))
+}
+
+fn is_hacker_news_feed(feed_title: &str, feed_url: &str) -> bool {
+    if feed_title.to_lowercase().contains("hacker news") {
+        return true;
+    }
+    Url::parse(feed_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| host.eq_ignore_ascii_case("hnrss.org"))
+}
+
+fn extract_hacker_news_item_url(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|token| {
+        let candidate = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '<' | '>' | '(' | ')' | '[' | ']' | '"' | '\'' | ',' | '.'
+            )
+        });
+        let url = Url::parse(candidate).ok()?;
+        let is_hacker_news_item = url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("news.ycombinator.com"))
+            && url.path() == "/item"
+            && url.query().is_some_and(|query| query.contains("id="));
+        is_hacker_news_item.then(|| candidate.to_string())
+    })
+}
+
 fn vault_rel_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -3087,6 +3327,20 @@ mod tests {
         assert_eq!(stable_id("item", "a"), stable_id("item", "a"));
         assert_ne!(stable_id("item", "a"), stable_id("feed", "a"));
         assert_ne!(stable_id("item", "a"), stable_id("item", "b"));
+    }
+
+    #[test]
+    fn extracts_hacker_news_comments_url_only_for_hn_feeds() {
+        let markdown = "Article URL: <https://example.test/post>\n\nComments URL: <https://news.ycombinator.com/item?id=48260331>\n\nPoints: 49";
+
+        assert_eq!(
+            hacker_news_comments_url("Hacker News: Newest", "https://hnrss.org/newest", markdown),
+            Some("https://news.ycombinator.com/item?id=48260331".to_string())
+        );
+        assert_eq!(
+            hacker_news_comments_url("Example", "https://example.test/feed.xml", markdown),
+            None
+        );
     }
 
     #[test]
@@ -4008,6 +4262,11 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
             ai_summary_zh: Some("中文总结".to_string()),
             ai_summary_model: Some("deepseek-v4-flash".to_string()),
             ai_summary_at: Some("2026-05-25T00:00:01Z".to_string()),
+            ai_translation_md: Some("English\n\n> 中文".to_string()),
+            ai_translation_model: Some("deepseek-v4-flash".to_string()),
+            ai_translation_at: Some("2026-05-25T00:00:02Z".to_string()),
+            needs_translation: true,
+            hacker_news_url: Some("https://news.ycombinator.com/item?id=1".to_string()),
             content_source: "summary".to_string(),
             extraction_quality: None,
             content_path: Some("content/item.md".to_string()),
@@ -4025,6 +4284,10 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
         assert_eq!(
             value.get("title").and_then(|title| title.as_str()),
             Some("Title")
+        );
+        assert_eq!(
+            value.get("hacker_news_url").and_then(|url| url.as_str()),
+            Some("https://news.ycombinator.com/item?id=1")
         );
         assert_eq!(
             value

@@ -199,6 +199,7 @@ this.__obrTest = {
   normalizeAppConfig,
   parseClockMinutes,
   scheduledDarkMode,
+  rssDetailExternalLinksHtml,
   rssDetailBodyHtml,
   rssAiSummaryHtml,
   renderRssSummaryPending,
@@ -236,6 +237,7 @@ const {
   normalizeAppConfig,
   parseClockMinutes,
   scheduledDarkMode,
+  rssDetailExternalLinksHtml,
   rssDetailBodyHtml,
   rssAiSummaryHtml,
   renderRssSummaryPending,
@@ -391,6 +393,19 @@ async function assertRssMarkReadFromList() {
     read_at: null,
   });
   assert(unreadHtml.includes('data-rss-mark-read="rss-1"'));
+  assert(unreadHtml.includes("Summary"));
+
+  const hnHtml = rssItemHtml({
+    id: "rss-hn",
+    title: "HN item",
+    feed_title: "Hacker News: Newest",
+    published_at: "2026-05-24T00:00:00Z",
+    summary_md: "Article URL: <https://example.test/post>\nComments URL: <https://news.ycombinator.com/item?id=1>\nPoints: 42\n# Comments: 7",
+    read_at: null,
+  });
+  assert(!hnHtml.includes("Article URL"));
+  assert(!hnHtml.includes("https://example.test/post"));
+  assert(!hnHtml.includes("Points: 42"));
 
   const readHtml = rssItemHtml({
     id: "rss-2",
@@ -657,6 +672,50 @@ function assertRssAiSummaryHtml() {
 
   const openHtml = rssAiSummaryHtml({ ai_summary_zh: "新生成总结" }, { open: true });
   assert(openHtml.includes('<details class="rss-ai-summary" open>'));
+
+  const hnLinksHtml = rssDetailExternalLinksHtml({
+    url: "https://example.test/post",
+    hacker_news_url: "https://news.ycombinator.com/item?id=48260331",
+  });
+  assert(hnLinksHtml.includes('href="https://example.test/post"'));
+  assert(hnLinksHtml.includes('href="https://news.ycombinator.com/item?id=48260331"'));
+  assert(hnLinksHtml.indexOf(">Original<") < hnLinksHtml.indexOf(">HN<"));
+
+  const duplicateHnLinksHtml = rssDetailExternalLinksHtml({
+    url: "https://news.ycombinator.com/item?id=48260331",
+    hacker_news_url: "https://news.ycombinator.com/item?id=48260331",
+  });
+  assert(!duplicateHnLinksHtml.includes(">HN<"));
+
+  const translationHtml = rssDetailBodyHtml({
+    html: "<p>English one</p><p>English two</p>",
+    ai_translation_md: "English <one>\n\n> 中文 <一>",
+    ai_translation_model: "deepseek-v4-flash",
+  });
+  assert(translationHtml.includes('class="rss-inline-translation"'));
+  assert(translationHtml.includes("<p>中文 &lt;一&gt;</p>"));
+  assert(!translationHtml.includes("全文翻译"));
+  assert(
+    translationHtml.indexOf("<p>English one</p>") <
+      translationHtml.indexOf('class="rss-inline-translation"'),
+  );
+  assert(
+    translationHtml.indexOf('class="rss-inline-translation"') <
+      translationHtml.indexOf("<p>English two</p>"),
+  );
+
+  const nestedTranslationHtml = rssDetailBodyHtml({
+    html: "<div><p>English one</p><p>English two</p></div>",
+    ai_translation_md: "English one\n\n> 中文一\n\nEnglish two\n\n> 中文二",
+  });
+  const firstSourceIndex = nestedTranslationHtml.indexOf("<p>English one</p>");
+  const firstTranslationIndex = nestedTranslationHtml.indexOf("<p>中文一</p>");
+  const secondSourceIndex = nestedTranslationHtml.indexOf("<p>English two</p>");
+  const secondTranslationIndex = nestedTranslationHtml.indexOf("<p>中文二</p>");
+  assert(firstSourceIndex >= 0);
+  assert(firstSourceIndex < firstTranslationIndex);
+  assert(firstTranslationIndex < secondSourceIndex);
+  assert(secondSourceIndex < secondTranslationIndex);
 }
 
 function assertRssSummaryLoadingState() {

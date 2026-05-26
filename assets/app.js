@@ -28,6 +28,7 @@ const state = {
   rssItemsRequestId: 0,
   rssItemRequestId: 0,
   rssSummaryRequestId: 0,
+  rssTranslationRequestId: 0,
   rssDetailRenderId: 0,
   rssItemsCache: new Map(),
   rssItemCache: new Map(),
@@ -36,6 +37,8 @@ const state = {
   rssCurrentFeedTitle: "",
   rssCurrentStarred: false,
   rssCurrentHasSummary: false,
+  rssCurrentHasTranslation: false,
+  rssCurrentNeedsTranslation: false,
   rssRefreshing: false,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
@@ -354,6 +357,7 @@ function bindEvents() {
   el("rss-star-button").addEventListener("click", toggleCurrentRssStar);
   el("rss-unsubscribe-button").addEventListener("click", unsubscribeCurrentRssFeed);
   el("rss-summary-floating-button").addEventListener("click", handleRssSummaryFloatingClick);
+  el("rss-translate-floating-button").addEventListener("click", handleRssTranslationFloatingClick);
   el("page-new-block-button").addEventListener("click", openNewBlockAtEnd);
 
   el("page-content").addEventListener("pointerup", rememberReadBlockFromPointer);
@@ -1914,6 +1918,7 @@ async function showView(name, options = {}) {
   for (const view of document.querySelectorAll(".view")) {
     view.hidden = true;
   }
+  hideRssDetailActions();
   if (name === "todo") {
     clearPageOutline();
     updateReadingProgress();
@@ -2713,7 +2718,7 @@ function rssItemHtml(item) {
   ]
     .filter(Boolean)
     .join(" · ");
-  const summary = firstLine(item.summary_md || "");
+  const summary = rssItemSummaryText(item.summary_md || "");
   const readButton = item.read_at
     ? ""
     : `<button class="rss-item-read-button" type="button" data-rss-mark-read="${escapeHtmlAttr(item.id)}" aria-label="Mark read" title="Mark read">${iconSvg("check")}</button>`;
@@ -2727,6 +2732,27 @@ function rssItemHtml(item) {
       ${readButton}
     </div>
   `;
+}
+
+function rssItemSummaryText(value) {
+  const lines = String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    const normalized = line.replace(/^[-*]\s+/, "").trim();
+    if (!normalized || rssSummaryNoiseLine(normalized)) continue;
+    return normalized.slice(0, 120);
+  }
+  return "";
+}
+
+function rssSummaryNoiseLine(line) {
+  if (/^<?https?:\/\/\S+>?$/i.test(line)) return true;
+  return (
+    /^(article\s+url|article\s+link|comments?\s+url|hn\s+comments|source\s+url|url)\s*:/i.test(line) ||
+    /^(points|score|#\s*comments|comments)\s*:\s*\d+/i.test(line)
+  );
 }
 
 function rssItemPreviewFromRow(row) {
@@ -2853,6 +2879,11 @@ function rssItemDetailSignature(item) {
     ai_summary_zh: item?.ai_summary_zh || "",
     ai_summary_model: item?.ai_summary_model || "",
     ai_summary_at: item?.ai_summary_at || "",
+    ai_translation_md: item?.ai_translation_md || "",
+    ai_translation_model: item?.ai_translation_model || "",
+    ai_translation_at: item?.ai_translation_at || "",
+    needs_translation: Boolean(item?.needs_translation),
+    hacker_news_url: item?.hacker_news_url || "",
     content_source: item?.content_source || "",
     extraction_quality: item?.extraction_quality ?? null,
     html: item?.html || "",
@@ -2865,6 +2896,8 @@ function renderRssDetailShell(id, preview = {}, options = {}) {
   state.rssCurrentFeedTitle = "";
   state.rssCurrentStarred = false;
   state.rssCurrentHasSummary = false;
+  state.rssCurrentHasTranslation = false;
+  state.rssCurrentNeedsTranslation = false;
   state.currentFile = `rss:${id}`;
   state.currentContent = "";
   state.currentBlocks = [];
@@ -2887,6 +2920,8 @@ function renderRssDetailPage(item, options = {}) {
   state.rssCurrentFeedTitle = item.feed_title || item.feed_url || "";
   state.rssCurrentStarred = Boolean(item.starred_at);
   state.rssCurrentHasSummary = Boolean((item.ai_summary_zh || "").trim());
+  state.rssCurrentHasTranslation = Boolean((item.ai_translation_md || "").trim());
+  state.rssCurrentNeedsTranslation = Boolean(item.needs_translation);
   state.currentFile = `rss:${item.id}`;
   state.currentContent = item.content_markdown || "";
   state.currentBlocks = [];
@@ -2897,11 +2932,12 @@ function renderRssDetailPage(item, options = {}) {
   const feedSourceHtml = item.feed_url
     ? `<span class="rss-detail-source"><span class="rss-detail-source-label">Source:</span><a class="rss-detail-source-link" href="${escapeHtmlAttr(item.feed_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(feedSource)}</a></span>`
     : `<span class="rss-detail-source"><span class="rss-detail-source-label">Source:</span><span class="rss-detail-source-name">${escapeHtml(feedSource)}</span></span>`;
+  const externalLinksHtml = rssDetailExternalLinksHtml(item);
   const metaHtml = `
     <p class="rss-detail-meta">
       ${feedSourceHtml}
       ${publishedAt ? `<span class="rss-detail-time">${escapeHtml(publishedAt)}</span>` : ""}
-      ${item.url ? `<a class="rss-detail-original" href="${escapeHtmlAttr(item.url)}" target="_blank" rel="noopener noreferrer">Original</a>` : ""}
+      ${externalLinksHtml}
     </p>
   `;
   showPage(
@@ -2914,9 +2950,36 @@ function renderRssDetailPage(item, options = {}) {
   updateRssPageActions();
 }
 
+function rssDetailExternalLinksHtml(item) {
+  const originalHtml = item?.url
+    ? `<a class="rss-detail-original" href="${escapeHtmlAttr(item.url)}" target="_blank" rel="noopener noreferrer">Original</a>`
+    : "";
+  const hackerNewsUrl = rssHackerNewsUrl(item);
+  const hackerNewsHtml =
+    hackerNewsUrl && !rssSameUrl(hackerNewsUrl, item?.url || "")
+      ? `<a class="rss-detail-original rss-detail-hacker-news" href="${escapeHtmlAttr(hackerNewsUrl)}" target="_blank" rel="noopener noreferrer" title="Hacker News discussion">HN</a>`
+      : "";
+  return `${originalHtml}${hackerNewsHtml}`;
+}
+
+function rssHackerNewsUrl(item) {
+  return String(item?.hacker_news_url || item?.hn_comments_url || "").trim();
+}
+
+function rssSameUrl(left, right) {
+  if (!left || !right) return false;
+  try {
+    return new URL(left).href === new URL(right).href;
+  } catch {
+    return left === right;
+  }
+}
+
 function rssDetailBodyHtml(item) {
   const bodyHtml = item?.html?.trim() ? item.html : '<p class="empty">No content.</p>';
-  return `<article class="rss-detail-body" data-rss-body>${bodyHtml}</article>`;
+  const translations = rssTranslationBlocks(item?.ai_translation_md || "");
+  const html = translations.length ? rssBodyWithInlineTranslations(bodyHtml, translations) : bodyHtml;
+  return `<article class="rss-detail-body" data-rss-body>${html}</article>`;
 }
 
 function rssAiSummaryHtml(item, options = {}) {
@@ -2931,6 +2994,205 @@ function rssAiSummaryHtml(item, options = {}) {
       <p>${escapeHtml(summary).replace(/\n/g, "<br>")}</p>
     </details>
   `;
+}
+
+function rssTranslationMarkdownHtml(markdown) {
+  return markdown
+    .trim()
+    .split(/\n{2,}/)
+    .map((block) => {
+      const lines = block.split(/\n/);
+      const isQuote = lines.every((line) => /^\s*>/.test(line) || !line.trim());
+      const text = lines.map((line) => line.replace(/^\s*>\s?/, "")).join("\n").trim();
+      if (!text) return "";
+      const html = escapeHtml(text).replace(/\n/g, "<br>");
+      return isQuote ? `<blockquote>${html}</blockquote>` : `<p>${html}</p>`;
+    })
+    .filter(Boolean)
+    .join("");
+}
+
+function rssTranslationBlocks(markdown) {
+  const text = String(markdown || "").trim();
+  if (!text) return [];
+  const quoted = [];
+  let current = [];
+  const flush = () => {
+    const block = current.join("\n").trim();
+    if (block) quoted.push(block);
+    current = [];
+  };
+  for (const line of text.split(/\n/)) {
+    if (/^\s*>/.test(line)) {
+      current.push(line.replace(/^\s*>\s?/, ""));
+    } else {
+      flush();
+    }
+  }
+  flush();
+  if (quoted.length) return quoted;
+  return text
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+}
+
+function rssInlineTranslationHtml(markdown, index) {
+  const html = rssTranslationMarkdownHtml(markdown);
+  if (!html) return "";
+  return `<div class="rss-inline-translation" data-rss-translation-block="${index}">${html}</div>`;
+}
+
+function rssBodyWithInlineTranslations(bodyHtml, translations) {
+  return (
+    rssBodyWithInlineTranslationsDom(bodyHtml, translations) ||
+    rssBodyWithInlineTranslationsFallback(bodyHtml, translations)
+  );
+}
+
+function rssBodyWithInlineTranslationsDom(bodyHtml, translations) {
+  try {
+    const template = document.createElement("template");
+    if (!template?.content) return "";
+    template.innerHTML = bodyHtml;
+    let index = 0;
+    for (const node of rssTranslationTargets(template.content)) {
+      if (index >= translations.length) break;
+      node.insertAdjacentHTML("afterend", rssInlineTranslationHtml(translations[index], index));
+      index += 1;
+    }
+    const rest = translations
+      .slice(index)
+      .map((translation, restIndex) => rssInlineTranslationHtml(translation, index + restIndex))
+      .join("");
+    if (rest) template.content.append(document.createRange().createContextualFragment(rest));
+    return template.innerHTML;
+  } catch {
+    return "";
+  }
+}
+
+const RSS_TRANSLATION_BLOCK_TAGS = new Set([
+  "p",
+  "pre",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+]);
+
+const RSS_TRANSLATION_NESTABLE_BLOCK_TAGS = new Set([
+  "blockquote",
+  "li",
+  "td",
+  "th",
+]);
+
+const RSS_TRANSLATION_CONTAINER_TAGS = new Set([
+  "article",
+  "section",
+  "div",
+  "main",
+  "figure",
+  "figcaption",
+]);
+
+const RSS_TRANSLATION_SKIP_TAGS = new Set([
+  "script",
+  "style",
+  "template",
+  "iframe",
+  "img",
+  "picture",
+  "source",
+  "video",
+  "audio",
+  "svg",
+  "math",
+]);
+
+function rssTranslationTargets(root) {
+  const targets = [];
+
+  const visit = (node) => {
+    if (!node || node.nodeType !== 1) return;
+    const tag = node.tagName?.toLowerCase();
+    if (!tag || RSS_TRANSLATION_SKIP_TAGS.has(tag)) return;
+
+    const childTargetStart = targets.length;
+    for (const child of Array.from(node.children || [])) {
+      visit(child);
+    }
+    const hasChildTargets = targets.length > childTargetStart;
+    if (rssNodeCanTakeTranslation(node, hasChildTargets)) {
+      targets.push(node);
+    }
+  };
+
+  for (const child of Array.from(root.children || [])) {
+    visit(child);
+  }
+
+  return targets;
+}
+
+function rssNodeCanTakeTranslation(node, hasChildTargets = false) {
+  if (!node || node.nodeType !== 1) return false;
+  const tag = node.tagName?.toLowerCase();
+  if (!tag || RSS_TRANSLATION_SKIP_TAGS.has(tag)) return false;
+  if (RSS_TRANSLATION_BLOCK_TAGS.has(tag)) return true;
+  if (RSS_TRANSLATION_NESTABLE_BLOCK_TAGS.has(tag)) {
+    return !hasChildTargets && rssNodeText(node).length > 0;
+  }
+  if (tag === "ul" || tag === "ol") return !hasChildTargets;
+  if (RSS_TRANSLATION_CONTAINER_TAGS.has(tag)) return !hasChildTargets && rssNodeText(node).length > 24;
+  return false;
+}
+
+function rssNodeText(node) {
+  return (node?.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+function rssBodyWithInlineTranslationsFallback(bodyHtml, translations) {
+  const leaf = rssBodyWithInlineTranslationsByPattern(
+    bodyHtml,
+    translations,
+    /<(p|pre|h[1-6]|td|th)\b[\s\S]*?<\/\1>/gi,
+  );
+  if (leaf.used) return leaf.html;
+  const nestable = rssBodyWithInlineTranslationsByPattern(
+    bodyHtml,
+    translations,
+    /<(li|blockquote)\b[\s\S]*?<\/\1>/gi,
+  );
+  if (nestable.used) return nestable.html;
+  return rssBodyWithInlineTranslationsByPattern(
+    bodyHtml,
+    translations,
+    /<(div|section|article|ul|ol|table|figure)\b[\s\S]*?<\/\1>/gi,
+  ).html;
+}
+
+function rssBodyWithInlineTranslationsByPattern(bodyHtml, translations, blockPattern) {
+  let index = 0;
+  let offset = 0;
+  let output = "";
+  let match;
+  while ((match = blockPattern.exec(bodyHtml)) && index < translations.length) {
+    output += bodyHtml.slice(offset, match.index);
+    output += match[0];
+    output += rssInlineTranslationHtml(translations[index], index);
+    index += 1;
+    offset = match.index + match[0].length;
+  }
+  output += bodyHtml.slice(offset);
+  output += translations
+    .slice(index)
+    .map((translation, restIndex) => rssInlineTranslationHtml(translation, index + restIndex))
+    .join("");
+  return { html: output, used: index > 0 };
 }
 
 async function summarizeCurrentRssItem(button) {
@@ -3006,7 +3268,7 @@ async function handleRssSummaryFloatingClick(event) {
 }
 
 function focusRssSummary() {
-  const summary = el("page-content")?.querySelector(".rss-ai-summary");
+  const summary = el("page-content")?.querySelector(".rss-ai-summary:not(.rss-ai-translation)");
   if (!summary) return false;
   if (summary.tagName === "DETAILS") summary.open = true;
   focusRssSummaryTarget(summary);
@@ -3018,6 +3280,86 @@ function focusRssSummaryTarget(target) {
   target.setAttribute("tabindex", "-1");
   scrollToElementWithStickyOffset(target);
   window.requestAnimationFrame(() => target.focus({ preventScroll: true }));
+}
+
+
+async function translateCurrentRssItem(button) {
+  const id = button?.dataset?.rssTranslation || state.rssSelectedItemId;
+  if (!id || !state.rssCurrentNeedsTranslation) return;
+  const requestId = state.rssTranslationRequestId + 1;
+  state.rssTranslationRequestId = requestId;
+  button.disabled = true;
+  button.classList.add("is-loading");
+  button.setAttribute("aria-busy", "true");
+  button.setAttribute("aria-label", "Translating");
+  button.title = "Translating";
+  button.innerHTML = `${iconSvg("loader")}<span>Translating</span>`;
+  focusRssSummaryTarget(renderRssTranslationPending());
+  setRssStatus("Translating RSS item...", "loading");
+  try {
+    const response = await request(`/api/rss/items/${encodeURIComponent(id)}/translation`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      timeoutMs: 180000,
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const item = await response.json();
+    if (requestId !== state.rssTranslationRequestId) return;
+    state.rssItemCache.set(id, item);
+    renderRssDetailPage(item, {
+      updateHistory: false,
+      saveScroll: false,
+      expandAiTranslation: true,
+    });
+    focusRssTranslation();
+    setRssStatus("");
+    showToast("Translation ready.");
+  } catch (error) {
+    if (requestId !== state.rssTranslationRequestId) return;
+    console.error(error);
+    button.disabled = false;
+    button.classList.remove("is-loading");
+    button.removeAttribute("aria-busy");
+    button.setAttribute("aria-label", "Translate");
+    button.title = "Translate";
+    button.innerHTML = `${iconSvg("book-open")}<span>Translate</span>`;
+    clearRssTranslationPending();
+    setRssStatus(error.message || "Translation failed.", "error");
+  }
+}
+
+function renderRssTranslationPending() {
+  const content = el("page-content");
+  if (!content) return null;
+  const existing = content.querySelector("[data-rss-translation-pending]");
+  if (existing) return existing;
+  const bodyRoot = content.querySelector("[data-rss-body]");
+  const pending = document.createElement("div");
+  pending.className = "rss-ai-summary rss-ai-summary-pending rss-ai-translation-pending";
+  pending.dataset.rssTranslationPending = "1";
+  pending.setAttribute("role", "status");
+  pending.setAttribute("aria-live", "polite");
+  pending.innerHTML = `${iconSvg("loader")}<span>Translating full text...</span>`;
+  content.insertBefore(pending, bodyRoot || content.firstChild);
+  return pending;
+}
+
+function clearRssTranslationPending() {
+  el("page-content")?.querySelector("[data-rss-translation-pending]")?.remove();
+}
+
+async function handleRssTranslationFloatingClick(event) {
+  event.preventDefault();
+  const button = event.currentTarget;
+  if (focusRssTranslation()) return;
+  await translateCurrentRssItem(button);
+}
+
+function focusRssTranslation() {
+  const translation = el("page-content")?.querySelector(".rss-inline-translation");
+  if (!translation) return false;
+  focusRssSummaryTarget(translation);
+  return true;
 }
 
 function scheduleRssDetailEnhancements(renderId) {
@@ -3127,8 +3469,15 @@ function updateRssPageActions() {
   starButton.hidden = false;
   unsubscribeButton.hidden = false;
   starButton.classList.toggle("is-starred", state.rssCurrentStarred);
-  setButtonIcon(starButton, "star", state.rssCurrentStarred ? "Starred" : "Star");
+  const starLabel = state.rssCurrentStarred ? "Starred" : "Star";
+  setButtonIcon(starButton, "star", starLabel);
+  starButton.setAttribute("aria-label", starLabel);
+  starButton.title = starLabel;
+  setButtonIcon(unsubscribeButton, "trash-2", "Unsub");
+  unsubscribeButton.setAttribute("aria-label", "Unsubscribe feed");
+  unsubscribeButton.title = "Unsub";
   updateRssSummaryFloatingButton();
+  updateRssTranslationFloatingButton();
 }
 
 function updateRssSummaryFloatingButton() {
@@ -3141,7 +3490,7 @@ function updateRssSummaryFloatingButton() {
     el("page-editor").hidden;
   button.hidden = !isRssDetail;
   if (!isRssDetail) return;
-  const hasSummary = Boolean(el("page-content")?.querySelector(".rss-ai-summary"));
+  const hasSummary = Boolean(el("page-content")?.querySelector(".rss-ai-summary:not(.rss-ai-translation)"));
   state.rssCurrentHasSummary = hasSummary;
   const label = hasSummary ? "Show summary" : "Generate summary";
   button.dataset.rssSummary = state.rssSelectedItemId;
@@ -3152,6 +3501,38 @@ function updateRssSummaryFloatingButton() {
   button.setAttribute("aria-label", label);
   button.title = label;
   setButtonIcon(button, "sparkles", label);
+}
+
+
+function updateRssTranslationFloatingButton() {
+  const button = el("rss-translate-floating-button");
+  if (!button) return;
+  const isRssDetail =
+    state.view === "page" &&
+    state.currentFile?.startsWith("rss:") &&
+    Boolean(state.rssSelectedItemId) &&
+    el("page-editor").hidden &&
+    state.rssCurrentNeedsTranslation;
+  button.hidden = !isRssDetail;
+  if (!isRssDetail) return;
+  const hasTranslation = Boolean(el("page-content")?.querySelector(".rss-inline-translation"));
+  state.rssCurrentHasTranslation = hasTranslation;
+  const label = hasTranslation ? "Show translation" : "Translate full text";
+  button.dataset.rssTranslation = state.rssSelectedItemId;
+  button.classList.toggle("has-translation", hasTranslation);
+  button.disabled = false;
+  button.classList.remove("is-loading");
+  button.removeAttribute("aria-busy");
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  setButtonIcon(button, "book-open", label);
+}
+
+function hideRssDetailActions() {
+  el("rss-star-button").hidden = true;
+  el("rss-unsubscribe-button").hidden = true;
+  el("rss-summary-floating-button").hidden = true;
+  el("rss-translate-floating-button").hidden = true;
 }
 
 function updateRssFilterButtons() {
@@ -3524,6 +3905,7 @@ function showPage(title, html, sourceView, options = {}) {
   el("rss-star-button").hidden = true;
   el("rss-unsubscribe-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
+  el("rss-translate-floating-button").hidden = true;
   setPageEditorStatus("");
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   el("page-view").hidden = false;
@@ -3576,6 +3958,7 @@ function clearPageOutline() {
   state.currentOutlineId = "";
   el("toc-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
+  el("rss-translate-floating-button").hidden = true;
   closeTocPanel();
 }
 
@@ -3828,6 +4211,7 @@ async function openPageEditor(mode, options = {}) {
   el("page-new-block-button").hidden = true;
   el("toc-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
+  el("rss-translate-floating-button").hidden = true;
   closeTocPanel();
   updateReadingProgress();
   showPageDraftBanner(draft !== null);

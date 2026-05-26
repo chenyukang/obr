@@ -347,6 +347,10 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/rss/items/{id}/star", post(routes::rss_star))
         .route("/api/rss/items/{id}/summary", post(routes::rss_summarize))
         .route(
+            "/api/rss/items/{id}/translation",
+            post(routes::rss_translate),
+        )
+        .route(
             "/api/rss/feeds/{id}/unsubscribe",
             post(routes::rss_unsubscribe),
         )
