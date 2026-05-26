@@ -39,6 +39,8 @@ const state = {
   rssCurrentHasSummary: false,
   rssCurrentHasTranslation: false,
   rssCurrentNeedsTranslation: false,
+  rssAnnotationQuote: "",
+  rssAnnotationSaving: false,
   rssRefreshing: false,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
@@ -164,6 +166,10 @@ const ICONS = {
   "log-out":
     '<path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>',
   minus: '<path d="M5 12h14"></path>',
+  "message-square":
+    '<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>',
+  "message-square-plus":
+    '<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path><path d="M12 7v6"></path><path d="M9 10h6"></path>',
   moon: '<path d="M12 3a6 6 0 0 0 9 7.4A9 9 0 1 1 12 3z"></path>',
   key: '<path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-2.8-2.8L21 2"></path><path d="m15 5 4 4"></path><path d="m13 7 4 4"></path>',
   pencil:
@@ -361,6 +367,11 @@ function bindEvents() {
   el("rss-unsubscribe-button").addEventListener("click", unsubscribeCurrentRssFeed);
   el("rss-summary-floating-button").addEventListener("click", handleRssSummaryFloatingClick);
   el("rss-translate-floating-button").addEventListener("click", handleRssTranslationFloatingClick);
+  el("rss-annotation-button").addEventListener("pointerdown", () => {
+    state.rssAnnotationQuote = selectedPageText();
+  });
+  el("rss-annotation-button").addEventListener("click", openRssAnnotationDialog);
+  bindRssAnnotationPanelEvents();
   el("page-new-block-button").addEventListener("click", openNewBlockAtEnd);
 
   el("page-content").addEventListener("pointerup", rememberReadBlockFromPointer);
@@ -3340,11 +3351,136 @@ async function unsubscribeCurrentRssFeed() {
   }
 }
 
+function bindRssAnnotationPanelEvents() {
+  el("rss-annotation-form").addEventListener("submit", saveRssAnnotation);
+  el("rss-annotation-cancel").addEventListener("click", closeRssAnnotationDialog);
+  el("rss-annotation-note").addEventListener("input", updateRssAnnotationSaveState);
+  el("rss-annotation-note").addEventListener("compositionstart", handleTextareaCompositionStart);
+  el("rss-annotation-note").addEventListener("compositionend", (event) => {
+    formatTextareaCjkSpacing(event.currentTarget, { force: true });
+    updateRssAnnotationSaveState();
+  });
+  el("rss-annotation-panel").addEventListener("click", (event) => {
+    if (event.target === el("rss-annotation-panel")) closeRssAnnotationDialog();
+  });
+}
+
+function openRssAnnotationDialog(event) {
+  event?.preventDefault();
+  if (!isRssDetailPage() || state.rssAnnotationSaving) return;
+  const quote = state.rssAnnotationQuote || selectedPageText();
+  state.rssAnnotationQuote = quote;
+  const quoteBox = el("rss-annotation-quote");
+  quoteBox.textContent = quote;
+  quoteBox.hidden = !quote;
+  el("rss-annotation-note").value = "";
+  setRssAnnotationStatus("");
+  el("rss-annotation-panel").hidden = false;
+  updateRssAnnotationSaveState();
+  window.setTimeout(() => el("rss-annotation-note").focus(), 0);
+}
+
+function closeRssAnnotationDialog() {
+  if (state.rssAnnotationSaving) return;
+  state.rssAnnotationQuote = "";
+  el("rss-annotation-panel").hidden = true;
+  el("rss-annotation-note").value = "";
+  setRssAnnotationStatus("");
+}
+
+async function saveRssAnnotation(event) {
+  event.preventDefault();
+  if (state.rssAnnotationSaving) return;
+  const id = state.rssSelectedItemId;
+  const note = normalizeAnnotationText(el("rss-annotation-note").value, 8000);
+  if (!id || !note) {
+    updateRssAnnotationSaveState();
+    return;
+  }
+  state.rssAnnotationSaving = true;
+  setRssAnnotationStatus("Saving annotation...", "loading");
+  updateRssAnnotationSaveState();
+  try {
+    const response = await request(`/api/rss/items/${encodeURIComponent(id)}/annotation`, {
+      method: "POST",
+      body: JSON.stringify({
+        note,
+        quote: state.rssAnnotationQuote || selectedPageText(),
+      }),
+      timeoutMs: 15000,
+      timeoutMessage: "Annotation save timed out.",
+    });
+    if (!response.ok) throw new Error(await response.text());
+    await response.json();
+    state.rssAnnotationSaving = false;
+    closeRssAnnotationDialog();
+    showToast("Annotation saved.");
+  } catch (error) {
+    console.error(error);
+    setRssAnnotationStatus(error.message || "Annotation failed.", "error");
+  } finally {
+    state.rssAnnotationSaving = false;
+    updateRssAnnotationSaveState();
+  }
+}
+
+function updateRssAnnotationSaveState() {
+  const save = el("rss-annotation-save");
+  const note = el("rss-annotation-note").value.trim();
+  const label = state.rssAnnotationSaving ? "Saving" : "Save";
+  save.disabled = state.rssAnnotationSaving || !note;
+  save.classList.toggle("is-loading", state.rssAnnotationSaving);
+  save.setAttribute("aria-busy", state.rssAnnotationSaving ? "true" : "false");
+  setButtonIcon(save, state.rssAnnotationSaving ? "loader" : "save", label);
+}
+
+function setRssAnnotationStatus(message, kind = "") {
+  const status = el("rss-annotation-status");
+  status.textContent = message;
+  status.hidden = !message;
+  status.classList.toggle("is-loading", kind === "loading");
+  status.classList.toggle("is-error", kind === "error");
+}
+
+function selectedPageText() {
+  const selection = window.getSelection?.();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return "";
+  const content = el("page-content");
+  if (!content) return "";
+  const anchor = selection.anchorNode;
+  const focus = selection.focusNode;
+  if (!nodeInside(content, anchor) || !nodeInside(content, focus)) return "";
+  return normalizeAnnotationText(selection.toString(), 4000);
+}
+
+function nodeInside(root, node) {
+  if (!root || !node) return false;
+  const candidate = node.nodeType === 1 ? node : node.parentElement;
+  return Boolean(candidate && root.contains(candidate));
+}
+
+function normalizeAnnotationText(value, limit) {
+  let output = "";
+  let lastSpace = false;
+  for (const char of String(value || "").trim().slice(0, limit)) {
+    if (/\s/.test(char)) {
+      if (!lastSpace && output) output += " ";
+      lastSpace = true;
+    } else {
+      output += char;
+      lastSpace = false;
+    }
+  }
+  return output.trim();
+}
+
 function updateRssPageActions() {
   const starButton = el("rss-star-button");
   const unsubscribeButton = el("rss-unsubscribe-button");
+  const annotationButton = el("rss-annotation-button");
   starButton.hidden = false;
   unsubscribeButton.hidden = false;
+  annotationButton.hidden = false;
   starButton.classList.toggle("is-starred", state.rssCurrentStarred);
   const starLabel = state.rssCurrentStarred ? "Starred" : "Star";
   setButtonIcon(starButton, "star", starLabel);
@@ -3353,6 +3489,9 @@ function updateRssPageActions() {
   setButtonIcon(unsubscribeButton, "trash-2", "Unsub");
   unsubscribeButton.setAttribute("aria-label", "Unsubscribe feed");
   unsubscribeButton.title = "Unsub";
+  setButtonIcon(annotationButton, "message-square-plus", "Annotate");
+  annotationButton.setAttribute("aria-label", "Annotate RSS item");
+  annotationButton.title = "Annotate";
   updateRssSummaryFloatingButton();
   updateRssTranslationFloatingButton();
 }
@@ -3408,8 +3547,10 @@ function updateRssTranslationFloatingButton() {
 function hideRssDetailActions() {
   el("rss-star-button").hidden = true;
   el("rss-unsubscribe-button").hidden = true;
+  el("rss-annotation-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
   el("rss-translate-floating-button").hidden = true;
+  closeRssAnnotationDialog();
 }
 
 function updateRssFilterButtons() {
@@ -3838,6 +3979,7 @@ function showPage(title, html, sourceView, options = {}) {
   el("page-new-block-button").hidden = !editable || title === "NoPage";
   el("rss-star-button").hidden = true;
   el("rss-unsubscribe-button").hidden = true;
+  el("rss-annotation-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
   el("rss-translate-floating-button").hidden = true;
   setPageEditorStatus("");
@@ -3891,8 +4033,10 @@ function clearPageOutline() {
   state.pageOutline = [];
   state.currentOutlineId = "";
   el("toc-button").hidden = true;
+  el("rss-annotation-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
   el("rss-translate-floating-button").hidden = true;
+  closeRssAnnotationDialog();
   closeTocPanel();
 }
 
@@ -4144,8 +4288,10 @@ async function openPageEditor(mode, options = {}) {
   content.hidden = true;
   el("page-new-block-button").hidden = true;
   el("toc-button").hidden = true;
+  el("rss-annotation-button").hidden = true;
   el("rss-summary-floating-button").hidden = true;
   el("rss-translate-floating-button").hidden = true;
+  closeRssAnnotationDialog();
   closeTocPanel();
   updateReadingProgress();
   showPageDraftBanner(draft !== null);
@@ -4985,6 +5131,11 @@ function handleGlobalKeydown(event) {
   if (!el("confirm-panel").hidden && event.key === "Escape") {
     event.preventDefault();
     resolveConfirmPanel(false);
+    return;
+  }
+  if (!el("rss-annotation-panel").hidden && event.key === "Escape") {
+    event.preventDefault();
+    closeRssAnnotationDialog();
     return;
   }
   if (!el("image-lightbox").hidden) {

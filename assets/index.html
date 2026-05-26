@@ -15,7 +15,7 @@
         } catch {}
       })();
     </script>
-    <link rel="stylesheet" href="/assets/style.css?v=20260526-rss-back-list">
+    <link rel="stylesheet" href="/assets/style.css?v=20260526-connection-dot">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -200,8 +200,9 @@
 
     <button id="rss-summary-floating-button" class="rss-summary-floating-button" type="button" aria-label="Summary" title="Summary" data-icon="sparkles" hidden></button>
     <button id="rss-translate-floating-button" class="rss-translate-floating-button" type="button" aria-label="Translate" title="Translate" data-icon="book-open" hidden></button>
+    <button id="rss-annotation-button" class="rss-side-action rss-side-action-annotate" type="button" aria-label="Annotate RSS item" title="Annotate" data-icon="message-square-plus" hidden></button>
     <button id="toc-button" class="toc-button" type="button" aria-label="Open page outline" title="Outline" data-icon="list" hidden></button>
-    <button id="rss-unsubscribe-button" class="rss-side-action rss-side-action-unsubscribe danger-button" type="button" aria-label="Unsubscribe feed" title="Unsub" data-icon="trash-2" hidden></button>
+    <button id="rss-unsubscribe-button" class="rss-side-action rss-side-action-unsubscribe" type="button" aria-label="Unsubscribe feed" title="Unsub" data-icon="trash-2" hidden></button>
     <button id="rss-star-button" class="rss-side-action rss-side-action-star" type="button" aria-label="Star" title="Star" data-icon="star" hidden></button>
     <div id="toc-panel" class="toc-panel" hidden>
       <div class="toc-sheet" role="dialog" aria-modal="true" aria-labelledby="toc-title">
@@ -237,7 +238,21 @@
       </div>
     </div>
 
+    <div id="rss-annotation-panel" class="rss-annotation-panel" hidden>
+      <form id="rss-annotation-form" class="rss-annotation-sheet" role="dialog" aria-modal="true" aria-labelledby="rss-annotation-title">
+        <h2 id="rss-annotation-title">Annotate</h2>
+        <div id="rss-annotation-quote" class="rss-annotation-quote" hidden></div>
+        <label class="sr-only" for="rss-annotation-note">Annotation</label>
+        <textarea id="rss-annotation-note" rows="6" placeholder="Write annotation..." aria-describedby="rss-annotation-status"></textarea>
+        <p id="rss-annotation-status" class="status" role="status" aria-live="polite" hidden></p>
+        <div class="rss-annotation-actions">
+          <button id="rss-annotation-cancel" type="button">Cancel</button>
+          <button id="rss-annotation-save" type="submit" data-icon="save">Save</button>
+        </div>
+      </form>
+    </div>
+
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260526-rss-back-list"></script>
+    <script src="/assets/app.js?v=20260526-connection-dot"></script>
   </body>
 </html>

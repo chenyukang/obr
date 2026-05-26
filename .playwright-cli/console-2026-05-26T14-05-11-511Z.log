@@ -1,0 +1,2 @@
+[      34ms] [ERROR] Executing inline script violates the following Content Security Policy directive 'script-src 'self''. Either the 'unsafe-inline' keyword, a hash ('sha256-a3kQlUveZ9nw/Xcu0jOnsWQlkxPwAeQAGRkhJpzbkDI='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked. @ http://127.0.0.1:8010/:9
+[      77ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:8010/api/verify:0

@@ -278,6 +278,7 @@ fn prepare_vault(config: &Config, data_dir: &std::path::Path) -> Result<()> {
     fs::create_dir_all(config.vault_path.join(&config.daily_dir))?;
     fs::create_dir_all(config.vault_path.join(&config.entry_dir))?;
     fs::create_dir_all(config.vault_path.join(&config.image_dir))?;
+    fs::create_dir_all(config.vault_path.join(&config.annotation_dir))?;
     if let Some(parent) = config.todo_path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -345,6 +346,7 @@ fn router(state: Arc<AppState>, session_layer: SessionManagerLayer<MemoryStore>)
         .route("/api/rss/items/{id}", get(routes::rss_item))
         .route("/api/rss/items/{id}/read", post(routes::rss_mark_read))
         .route("/api/rss/items/{id}/star", post(routes::rss_star))
+        .route("/api/rss/items/{id}/annotation", post(routes::rss_annotate))
         .route("/api/rss/items/{id}/summary", post(routes::rss_summarize))
         .route(
             "/api/rss/items/{id}/translation",

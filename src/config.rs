@@ -25,6 +25,8 @@ pub(crate) struct Config {
     pub(crate) image_dir: PathBuf,
     #[serde(default = "default_todo_path")]
     pub(crate) todo_path: PathBuf,
+    #[serde(default = "default_annotation_dir")]
+    pub(crate) annotation_dir: PathBuf,
     #[serde(default = "default_log_path")]
     pub(crate) log_path: PathBuf,
     #[serde(default = "default_log_level")]
@@ -68,6 +70,8 @@ pub(crate) struct Config {
     pub(crate) rss_fetch_full_content: bool,
     #[serde(default = "default_rss_ai_summary_enabled")]
     pub(crate) rss_ai_summary_enabled: bool,
+    #[serde(default)]
+    pub(crate) rss_ai_full_translation_enabled: bool,
     #[serde(default = "default_rss_ai_summary_chars")]
     pub(crate) rss_ai_summary_chars: usize,
     #[serde(default)]
@@ -100,6 +104,10 @@ fn default_image_dir() -> PathBuf {
 
 fn default_todo_path() -> PathBuf {
     PathBuf::from("Posts/todo.md")
+}
+
+fn default_annotation_dir() -> PathBuf {
+    PathBuf::from("annotations")
 }
 
 fn default_log_level() -> String {
@@ -178,6 +186,8 @@ impl Config {
         config.entry_dir = normalize_vault_relative_path(config.entry_dir, "entry_dir", false)?;
         config.image_dir = normalize_vault_relative_path(config.image_dir, "image_dir", false)?;
         config.todo_path = normalize_vault_relative_path(config.todo_path, "todo_path", true)?;
+        config.annotation_dir =
+            normalize_vault_relative_path(config.annotation_dir, "annotation_dir", false)?;
         config.rss_feeds_path =
             normalize_vault_relative_path(config.rss_feeds_path, "rss_feeds_path", true)?;
         config.vault_path = config.vault_path.canonicalize().map_err(|err| {
@@ -236,6 +246,9 @@ impl Config {
             }
             if self.rss_ai_summary_enabled && self.rss_ai_summary_chars == 0 {
                 bail!("rss_ai_summary_chars must be greater than 0");
+            }
+            if self.rss_ai_full_translation_enabled && !self.rss_ai_summary_enabled {
+                bail!("rss_ai_full_translation_enabled requires rss_ai_summary_enabled = true");
             }
             if self.rss_ai_summary_enabled
                 && self
@@ -383,6 +396,7 @@ mod tests {
             entry_dir: PathBuf::from("Posts"),
             image_dir: PathBuf::from("Pics"),
             todo_path: PathBuf::from("Posts/todo.md"),
+            annotation_dir: PathBuf::from("annotations"),
             log_path: PathBuf::from("logs/obr.log"),
             log_level: "info".to_string(),
             dark_mode_start: None,
@@ -405,6 +419,7 @@ mod tests {
             rss_max_items_per_feed: 20,
             rss_fetch_full_content: true,
             rss_ai_summary_enabled: true,
+            rss_ai_full_translation_enabled: false,
             rss_ai_summary_chars: 200,
             deepseek_api_key: None,
             deepseek_api_base: "https://api.deepseek.com".to_string(),
@@ -425,6 +440,18 @@ mod tests {
         config.allow_plaintext_password = true;
 
         assert!(config.validate_auth_config().is_ok());
+    }
+
+    #[test]
+    fn rss_full_translation_requires_ai_summary() {
+        let mut config = test_config();
+        config.allow_plaintext_password = true;
+        config.rss_enabled = true;
+        config.rss_ai_summary_enabled = false;
+        config.rss_ai_full_translation_enabled = true;
+
+        let err = config.validate_auth_config().unwrap_err().to_string();
+        assert!(err.contains("rss_ai_full_translation_enabled"));
     }
 
     #[test]

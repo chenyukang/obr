@@ -23,6 +23,8 @@ use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 use tracing::warn;
+use url::Url;
+use uuid::Uuid;
 use walkdir::WalkDir;
 use webauthn_rs::prelude::{
     PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
@@ -123,6 +125,18 @@ pub(crate) struct RssStarRequest {
     starred: bool,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct RssAnnotationRequest {
+    note: String,
+    quote: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RssAnnotationResponse {
+    file: String,
+    highlight_count: usize,
+}
+
 #[derive(Serialize)]
 struct PasskeyStatus {
     registered: bool,
@@ -208,6 +222,8 @@ fn rss_item_detail_response(
 const PASSKEY_REGISTRATION_SESSION_KEY: &str = "passkey_registration";
 const PASSKEY_AUTHENTICATION_SESSION_KEY: &str = "passkey_authentication";
 const MAX_ENTRY_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_RSS_ANNOTATION_NOTE_CHARS: usize = 8000;
+const MAX_RSS_ANNOTATION_QUOTE_CHARS: usize = 4000;
 
 pub(crate) async fn index() -> Html<&'static str> {
     Html(include_str!("../assets/index.html"))
@@ -562,6 +578,31 @@ pub(crate) async fn rss_star(
     }
 }
 
+pub(crate) async fn rss_annotate(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RssAnnotationRequest>,
+) -> AppResult<Response> {
+    let Some(reader) = &state.rss_reader else {
+        return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
+    };
+    let note = normalize_annotation_text(&body.note, MAX_RSS_ANNOTATION_NOTE_CHARS);
+    if note.is_empty() {
+        return Ok((StatusCode::BAD_REQUEST, "annotation is empty").into_response());
+    }
+    let quote = body
+        .quote
+        .as_deref()
+        .map(|quote| normalize_annotation_text(quote, MAX_RSS_ANNOTATION_QUOTE_CHARS))
+        .filter(|quote| !quote.is_empty());
+    let Some(item) = reader.get_item(&id)? else {
+        return Ok((StatusCode::NOT_FOUND, "RSS item not found").into_response());
+    };
+    let saved = save_rss_annotation(&state, &item, &note, quote.as_deref())?;
+    state.maybe_git_sync();
+    Ok(Json(saved).into_response())
+}
+
 pub(crate) async fn rss_summarize(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -630,6 +671,316 @@ pub(crate) async fn rss_refresh(State(state): State<Arc<AppState>>) -> AppResult
         return Ok((StatusCode::NOT_FOUND, "RSS reader is disabled").into_response());
     };
     Ok(Json(reader.refresh().await?).into_response())
+}
+
+fn save_rss_annotation(
+    state: &AppState,
+    item: &RssItemDetail,
+    note: &str,
+    quote: Option<&str>,
+) -> AppResult<RssAnnotationResponse> {
+    let root = state.config.vault_path.join(&state.config.annotation_dir);
+    ensure_inside(&state.config.vault_path, &root)?;
+    fs::create_dir_all(&root)?;
+
+    let page_url = rss_annotation_url(item);
+    let page_hash = rss_annotation_page_hash(&page_url);
+    let now = Local::now();
+    let created_at = Utc::now().to_rfc3339();
+    let path = find_rss_annotation_file(&root, &page_hash)?
+        .unwrap_or_else(|| unique_rss_annotation_path(&root, &now, &item.title, &page_hash));
+    ensure_inside(&root, &path)?;
+
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let item_markdown = rss_annotation_item_markdown(item, note, quote, &now, &page_url);
+    let content = if existing.trim().is_empty() {
+        new_rss_annotation_markdown(
+            item,
+            &page_url,
+            &page_hash,
+            &created_at,
+            &now,
+            &item_markdown,
+        )
+    } else {
+        append_rss_annotation_markdown(&existing, &created_at, &item_markdown)
+    };
+    fs::write(&path, &content).with_context(|| format!("write {}", path.display()))?;
+    state.markdown_index.update_path(&path, content.clone())?;
+    Ok(RssAnnotationResponse {
+        file: rel_to_vault(&state.config.vault_path, &path)?,
+        highlight_count: rss_annotation_highlight_count(&content),
+    })
+}
+
+fn rss_annotation_url(item: &RssItemDetail) -> String {
+    let url = item.url.trim();
+    if url.is_empty() {
+        item.feed_url.trim().to_string()
+    } else {
+        url.to_string()
+    }
+}
+
+fn rss_annotation_page_hash(url: &str) -> String {
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, url.as_bytes())
+        .simple()
+        .to_string()
+}
+
+fn find_rss_annotation_file(root: &Path, page_hash: &str) -> AppResult<Option<PathBuf>> {
+    let needles = [
+        format!("page_hash: '{}'", yaml_single_quoted(page_hash)),
+        format!("page_hash: \"{page_hash}\""),
+        format!("page_hash: {page_hash}"),
+    ];
+    for entry in WalkDir::new(root).min_depth(1).max_depth(2) {
+        let entry = entry?;
+        if !entry.file_type().is_file()
+            || entry.path().extension().and_then(|ext| ext.to_str()) != Some("md")
+        {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if needles.iter().any(|needle| content.contains(needle)) {
+            return Ok(Some(entry.path().to_path_buf()));
+        }
+    }
+    Ok(None)
+}
+
+fn unique_rss_annotation_path(
+    root: &Path,
+    now: &chrono::DateTime<Local>,
+    title: &str,
+    page_hash: &str,
+) -> PathBuf {
+    let date = now.format("%Y-%m-%d");
+    let stem = sanitize_annotation_filename(title);
+    let base = format!("{date}-{stem}");
+    let first = root.join(format!("{base}.md"));
+    if !first.exists() {
+        return first;
+    }
+    let short_hash = page_hash.chars().take(8).collect::<String>();
+    root.join(format!("{base}-{short_hash}.md"))
+}
+
+fn sanitize_annotation_filename(title: &str) -> String {
+    let mut output = String::new();
+    let mut last_dash = false;
+    for ch in title.trim().chars() {
+        let replacement = if ch.is_control()
+            || ch.is_whitespace()
+            || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        {
+            '-'
+        } else {
+            ch
+        };
+        if replacement == '-' {
+            if !last_dash && !output.is_empty() {
+                output.push('-');
+                last_dash = true;
+            }
+        } else {
+            output.push(replacement);
+            last_dash = false;
+        }
+        if output.chars().count() >= 48 {
+            break;
+        }
+    }
+    let output = output.trim_matches('-').to_string();
+    if output.is_empty() {
+        "RSS-annotation".to_string()
+    } else {
+        output
+    }
+}
+
+fn new_rss_annotation_markdown(
+    item: &RssItemDetail,
+    page_url: &str,
+    page_hash: &str,
+    created_at: &str,
+    now: &chrono::DateTime<Local>,
+    item_markdown: &str,
+) -> String {
+    let date = now.format("%Y-%m-%d").to_string();
+    let author = rss_annotation_author(item);
+    let site = rss_annotation_site(page_url, item);
+    format!(
+        "---\n\
+doc_type: hypothesis-highlights\n\
+url: '{}'\n\
+author: '{}'\n\
+site: '{}'\n\
+reference: '{}'\n\
+category: '#article'\n\
+source: 'obr-rss'\n\
+file_date: '{}'\n\
+page_hash: '{}'\n\
+highlight_count: 1\n\
+tags: ['RSS']\n\
+created_at: '{}'\n\
+updated_at: '{}'\n\
+---\n\n\
+## Metadata\n\
+- Author: [{}]()\n\
+- Reference: {}\n\
+- Category: #article\n\n\
+## Highlights\n\
+{}",
+        yaml_single_quoted(page_url),
+        yaml_single_quoted(&author),
+        yaml_single_quoted(&site),
+        yaml_single_quoted(page_url),
+        yaml_single_quoted(&date),
+        yaml_single_quoted(page_hash),
+        yaml_single_quoted(created_at),
+        yaml_single_quoted(created_at),
+        author,
+        page_url,
+        item_markdown,
+    )
+}
+
+fn append_rss_annotation_markdown(existing: &str, updated_at: &str, item_markdown: &str) -> String {
+    let mut content = update_frontmatter_field(
+        existing,
+        "highlight_count",
+        &rss_annotation_highlight_count(existing)
+            .saturating_add(1)
+            .to_string(),
+    );
+    content = update_frontmatter_field(
+        &content,
+        "updated_at",
+        &format!("'{}'", yaml_single_quoted(updated_at)),
+    );
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(item_markdown);
+    content
+}
+
+fn rss_annotation_item_markdown(
+    item: &RssItemDetail,
+    note: &str,
+    quote: Option<&str>,
+    now: &chrono::DateTime<Local>,
+    page_url: &str,
+) -> String {
+    let quote = quote
+        .map(|quote| normalize_annotation_text(quote, MAX_RSS_ANNOTATION_QUOTE_CHARS))
+        .filter(|quote| !quote.is_empty())
+        .unwrap_or_else(|| normalize_annotation_text(&item.title, MAX_RSS_ANNOTATION_QUOTE_CHARS));
+    let note = normalize_annotation_text(note, MAX_RSS_ANNOTATION_NOTE_CHARS);
+    let updated = now.format("%Y-%m-%d %H:%M:%S");
+    format!(
+        "- {} - [Updated on {}]({}) - Group: #Notes\n  - Note: {}\n  - Tags: #RSS\n",
+        quote, updated, page_url, note
+    )
+}
+
+fn update_frontmatter_field(content: &str, key: &str, value: &str) -> String {
+    let mut in_frontmatter = false;
+    let mut replaced = false;
+    let mut output = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if index == 0 && line.trim() == "---" {
+            in_frontmatter = true;
+            output.push(line.to_string());
+            continue;
+        }
+        if in_frontmatter && line.trim() == "---" {
+            if !replaced {
+                output.push(format!("{key}: {value}"));
+                replaced = true;
+            }
+            in_frontmatter = false;
+            output.push(line.to_string());
+            continue;
+        }
+        if in_frontmatter && line.trim_start().starts_with(&format!("{key}:")) {
+            output.push(format!("{key}: {value}"));
+            replaced = true;
+        } else {
+            output.push(line.to_string());
+        }
+    }
+    let mut updated = output.join("\n");
+    if content.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated
+}
+
+fn rss_annotation_highlight_count(content: &str) -> usize {
+    content
+        .split("## Highlights")
+        .nth(1)
+        .map(|highlights| {
+            highlights
+                .lines()
+                .filter(|line| line.starts_with("- "))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn rss_annotation_author(item: &RssItemDetail) -> String {
+    item.author
+        .as_deref()
+        .map(str::trim)
+        .filter(|author| !author.is_empty())
+        .or_else(|| {
+            let feed_title = item.feed_title.trim();
+            (!feed_title.is_empty()).then_some(feed_title)
+        })
+        .or_else(|| {
+            let feed_url = item.feed_url.trim();
+            (!feed_url.is_empty()).then_some(feed_url)
+        })
+        .unwrap_or("RSS")
+        .to_string()
+}
+
+fn rss_annotation_site(page_url: &str, item: &RssItemDetail) -> String {
+    Url::parse(page_url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToString::to_string))
+        .or_else(|| {
+            Url::parse(&item.feed_url)
+                .ok()
+                .and_then(|url| url.host_str().map(ToString::to_string))
+        })
+        .unwrap_or_else(|| "rss".to_string())
+}
+
+fn yaml_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn normalize_annotation_text(value: &str, limit: usize) -> String {
+    let mut output = String::new();
+    let mut last_space = false;
+    for ch in value.trim().chars().take(limit) {
+        if ch.is_whitespace() {
+            if !last_space && !output.is_empty() {
+                output.push(' ');
+                last_space = true;
+            }
+        } else {
+            output.push(ch);
+            last_space = false;
+        }
+    }
+    output.trim().to_string()
 }
 
 pub(crate) async fn get_page(
@@ -1400,8 +1751,12 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        ensure_image_preview, entry_body_already_exists, rel_to_vault, resolve_attachment_path,
+        append_rss_annotation_markdown, ensure_image_preview, entry_body_already_exists,
+        new_rss_annotation_markdown, normalize_annotation_text, rel_to_vault,
+        resolve_attachment_path, rss_annotation_highlight_count, rss_annotation_item_markdown,
+        sanitize_annotation_filename,
     };
+    use crate::rss::RssItemDetail;
 
     #[test]
     fn entry_body_duplicate_check_uses_visible_content() {
@@ -1412,6 +1767,59 @@ mod tests {
         ));
         assert!(!entry_body_already_exists(existing, ""));
         assert!(!entry_body_already_exists(existing, "different"));
+    }
+
+    #[test]
+    fn rss_annotation_markdown_matches_existing_highlight_shape() {
+        let item = test_rss_item();
+        let now = chrono::Local::now();
+        let annotation = rss_annotation_item_markdown(
+            &item,
+            "值得后续展开。",
+            Some("Selected text\nfrom the article"),
+            &now,
+            "https://example.test/post",
+        );
+        let content = new_rss_annotation_markdown(
+            &item,
+            "https://example.test/post",
+            "abc123",
+            "2026-05-26T00:00:00Z",
+            &now,
+            &annotation,
+        );
+
+        assert!(content.contains("doc_type: hypothesis-highlights"));
+        assert!(content.contains("source: 'obr-rss'"));
+        assert!(content.contains("highlight_count: 1"));
+        assert!(content.contains("## Highlights"));
+        assert!(content.contains("- Selected text from the article - [Updated on "));
+        assert!(content.contains("  - Note: 值得后续展开。"));
+        assert_eq!(rss_annotation_highlight_count(&content), 1);
+    }
+
+    #[test]
+    fn rss_annotation_append_updates_count_and_timestamp() {
+        let existing = "---\nhighlight_count: 1\nupdated_at: 'old'\n---\n\n## Highlights\n- A\n";
+        let updated = append_rss_annotation_markdown(
+            existing,
+            "2026-05-26T00:00:00Z",
+            "- B\n  - Note: note\n",
+        );
+
+        assert!(updated.contains("highlight_count: 2"));
+        assert!(updated.contains("updated_at: '2026-05-26T00:00:00Z'"));
+        assert_eq!(rss_annotation_highlight_count(&updated), 2);
+    }
+
+    #[test]
+    fn rss_annotation_text_and_filename_are_normalized() {
+        assert_eq!(normalize_annotation_text(" a\n\tb  c ", 20), "a b c");
+        assert_eq!(
+            sanitize_annotation_filename(" Bad / File: Name? "),
+            "Bad-File-Name"
+        );
+        assert_eq!(sanitize_annotation_filename("///"), "RSS-annotation");
     }
 
     #[test]
@@ -1489,5 +1897,37 @@ mod tests {
             "Assets/diagram.svg"
         );
         let _ = fs::remove_dir_all(vault);
+    }
+
+    fn test_rss_item() -> RssItemDetail {
+        RssItemDetail {
+            id: "rss-item".to_string(),
+            feed_id: "feed".to_string(),
+            feed_title: "Example Feed".to_string(),
+            feed_url: "https://example.test/feed.xml".to_string(),
+            title: "Example RSS Post".to_string(),
+            url: "https://example.test/post".to_string(),
+            author: Some("Example Author".to_string()),
+            published_at: None,
+            updated_at: None,
+            first_seen_at: "2026-05-26T00:00:00Z".to_string(),
+            fetched_at: None,
+            read_at: None,
+            starred_at: None,
+            ai_summary_zh: None,
+            ai_summary_model: None,
+            ai_summary_at: None,
+            ai_translation_md: None,
+            ai_translation_model: None,
+            ai_translation_at: None,
+            needs_translation: true,
+            hacker_news_url: None,
+            content_source: "summary".to_string(),
+            extraction_quality: None,
+            content_path: None,
+            content_markdown: "Body".to_string(),
+            html_path: None,
+            source_html_path: None,
+        }
     }
 }

@@ -232,6 +232,7 @@ struct AiSummaryConfig {
     api_base: String,
     model: String,
     target_chars: usize,
+    full_translation_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -744,7 +745,12 @@ impl RssReader {
             return Ok(Some(item));
         }
         let Some(enrichment) = self
-            .fetch_item_ai_enrichment(&item.title, &item.url, &item.content_markdown)
+            .fetch_item_ai_enrichment(
+                &item.title,
+                &item.url,
+                &item.content_markdown,
+                self.auto_full_translation_enabled(),
+            )
             .await?
         else {
             bail!("RSS item does not have enough content to summarize");
@@ -781,7 +787,7 @@ impl RssReader {
             return Ok(Some(item));
         }
         let Some(enrichment) = self
-            .fetch_item_ai_enrichment(&item.title, &item.url, &item.content_markdown)
+            .fetch_item_ai_enrichment(&item.title, &item.url, &item.content_markdown, true)
             .await?
         else {
             bail!("RSS item does not have enough content to translate");
@@ -1247,7 +1253,12 @@ impl RssReader {
     ) -> Option<AiEnrichment> {
         self.ai_summary.as_ref()?;
         match self
-            .fetch_item_ai_enrichment(title, url, content_markdown)
+            .fetch_item_ai_enrichment(
+                title,
+                url,
+                content_markdown,
+                self.auto_full_translation_enabled(),
+            )
             .await
         {
             Ok(enrichment) => enrichment,
@@ -1268,13 +1279,15 @@ impl RssReader {
         title: &str,
         url: &str,
         content_markdown: &str,
+        include_full_translation: bool,
     ) -> Result<Option<AiEnrichment>> {
         let config = self
             .ai_summary
             .as_ref()
             .ok_or_else(|| anyhow!("RSS AI summary is not configured"))?;
         let include_summary = should_ai_summarize_rss_item(title, content_markdown);
-        let include_translation = should_translate_rss_item(title, content_markdown);
+        let include_translation =
+            include_full_translation && should_translate_rss_item(title, content_markdown);
         if !include_summary && !include_translation {
             return Ok(None);
         }
@@ -1548,16 +1561,23 @@ translation_md: {}
         let Some((summary, translation)) = row else {
             return Ok(true);
         };
-        Ok(summary
+        let missing_summary = summary
             .as_deref()
             .map(str::trim)
             .unwrap_or_default()
-            .is_empty()
-            || translation
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or_default()
-                .is_empty())
+            .is_empty();
+        let missing_translation = translation
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty();
+        Ok(missing_summary || (self.auto_full_translation_enabled() && missing_translation))
+    }
+
+    fn auto_full_translation_enabled(&self) -> bool {
+        self.ai_summary
+            .as_ref()
+            .is_some_and(|config| config.full_translation_enabled)
     }
 
     fn insert_item(&self, item: ItemCandidate) -> Result<()> {
@@ -2193,6 +2213,7 @@ fn ai_summary_config(config: &Config) -> Option<AiSummaryConfig> {
         api_base: config.deepseek_api_base.trim().to_string(),
         model: config.deepseek_model.trim().to_string(),
         target_chars: config.rss_ai_summary_chars,
+        full_translation_enabled: config.rss_ai_full_translation_enabled,
     })
 }
 
@@ -4196,6 +4217,49 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
         );
         assert_eq!(item.ai_translation_md.as_deref(), Some("English\n\n> 英文"));
         assert_eq!(matches.len(), 1);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_translation_does_not_trigger_auto_enrichment_by_default() -> Result<()> {
+        let (mut reader, root) = test_reader()?;
+        let item_id = insert_test_item(
+            &reader,
+            "https://example.test/feed.xml",
+            "translation-disabled",
+        )?;
+        let item = reader.get_item(&item_id)?.unwrap();
+        reader.save_item_ai_enrichment(
+            &item,
+            &AiEnrichment {
+                summary: Some(AiSummary {
+                    content: "已有中文总结。".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    summarized_at: "2026-05-25T00:00:00Z".to_string(),
+                }),
+                translation: None,
+            },
+        )?;
+
+        reader.ai_summary = Some(AiSummaryConfig {
+            api_key: "test-key".to_string(),
+            api_base: "https://api.deepseek.test".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            target_chars: 200,
+            full_translation_enabled: false,
+        });
+        assert!(!reader.item_needs_ai_enrichment(&item_id)?);
+
+        reader.ai_summary = Some(AiSummaryConfig {
+            api_key: "test-key".to_string(),
+            api_base: "https://api.deepseek.test".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            target_chars: 200,
+            full_translation_enabled: true,
+        });
+        assert!(reader.item_needs_ai_enrichment(&item_id)?);
+
         fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -85,6 +85,9 @@ image_dir = "Pics"
 
 # The Todo view and page = "todo" entries use this file.
 todo_path = "Posts/todo.md"
+
+# RSS detail annotations are saved here.
+annotation_dir = "annotations"
 ```
 
 These vault layout paths are relative to `vault_path`. Parent path components such as `..` are rejected.
@@ -120,6 +123,7 @@ rss_refresh_minutes = 30
 rss_max_items_per_feed = 20
 rss_fetch_full_content = true
 rss_ai_summary_enabled = true
+rss_ai_full_translation_enabled = false
 rss_ai_summary_chars = 200
 # Optional: enables Chinese summaries for newly fetched non-Chinese posts.
 deepseek_api_key = "sk-..."
@@ -146,7 +150,15 @@ fetched non-Chinese posts are sent to the configured OpenAI-compatible chat API
 for an automatic Chinese summary. `rss_ai_summary_chars` is a soft target for
 the prompt, not a hard server-side truncation limit; the default asks for about
 200 Chinese characters and allows the model to stay natural. Existing items are
-not summarized again during ordinary refreshes.
+not summarized again during ordinary refreshes. Full-text translation is off by
+default to avoid surprise API cost. Set `rss_ai_full_translation_enabled = true`
+to also request and store full Chinese translations during RSS refresh. The RSS
+detail page's manual Translate action remains available when the DeepSeek API is
+configured.
+
+RSS detail annotations are saved as Markdown under `annotation_dir`, which
+defaults to `annotations`. Each RSS post gets one annotation file and additional
+notes for the same post are appended to that file.
 
 ## Security Model
 

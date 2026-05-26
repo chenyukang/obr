@@ -1,0 +1,15 @@
+- generic [ref=e3]:
+  - heading "Obr" [level=1] [ref=e4]
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - text: Username
+      - textbox "Username" [ref=e7]
+    - generic [ref=e8]:
+      - text: Password
+      - textbox "Password" [ref=e9]
+    - button "Log in" [ref=e10] [cursor=pointer]:
+      - img [ref=e11]
+      - text: Log in
+  - button "Log in with passkey" [ref=e14] [cursor=pointer]:
+    - img [ref=e15]
+    - text: Log in with passkey
