@@ -4470,6 +4470,9 @@ async function savePageEditor(options = {}) {
   const content = el("page-content");
   const button = el("edit-button");
   syncEditorBlocksForSave(options);
+  if (state.editorMode === "blocks" && stripEditorBlockTrailingWhitespaceForSave()) {
+    renderBlockEditor({ activeIndex: -1, focus: false });
+  }
   const currentEditorSource = joinEditorBlocks(state.editorBlocks);
   const spacedEditorSource = addCjkSpacingToMarkdownText(currentEditorSource);
   if (spacedEditorSource !== currentEditorSource) {
@@ -4568,6 +4571,27 @@ function syncEditorBlocksForSave(options = {}) {
   replaceEditorBlocksFromSource(el("page-editor").value);
 }
 
+function stripEditorBlockTrailingWhitespaceForSave() {
+  let changed = false;
+  state.editorBlocks = normalizeEditorBlocks(state.editorBlocks).map((block) => {
+    const source = editorBlockText(block);
+    const strippedSource = stripEditorBlockTrailingWhitespace(source);
+    if (strippedSource === source) return block;
+    changed = true;
+    return {
+      ...block,
+      source: strippedSource,
+      html: pendingEditorBlockHtml(strippedSource),
+    };
+  });
+  if (changed) syncPageEditorValue();
+  return changed;
+}
+
+function stripEditorBlockTrailingWhitespace(value) {
+  return normalizeEditorText(value).replace(/[ \t\n]+$/g, "");
+}
+
 async function loadCurrentPageSource(options = {}) {
   const { forceNetwork = false } = options;
   const pending = pendingPageContent(state.currentFile);
@@ -4647,7 +4671,7 @@ async function handlePageBlockEditorClick(event) {
     clearPageBlockEditorActionPointer();
     event.preventDefault();
     event.stopPropagation();
-    await deleteEmptyEditorBlock(index);
+    await deleteActiveEditorBlock(index);
     return;
   }
   if (state.editorBlockPendingDeleteIndex !== null) {
@@ -4660,8 +4684,8 @@ async function handlePageBlockEditorClick(event) {
     event.preventDefault();
     event.stopPropagation();
     const index = Number(action.dataset.blockIndex || 0);
-    if (action.dataset.editorBlockAction === "delete-empty") {
-      await deleteEmptyEditorBlock(index);
+    if (action.dataset.editorBlockAction === "delete") {
+      await deleteActiveEditorBlock(index);
       return;
     }
     activateEditorBlock(index);
@@ -4681,13 +4705,13 @@ function handlePageBlockEditorActionPointerDown(event) {
     ? Date.now() + EDITOR_BLOCK_ACTION_SUPPRESS_MS
     : 0;
   state.editorBlockPendingDeleteIndex =
-    action?.dataset?.editorBlockAction === "delete-empty"
+    action?.dataset?.editorBlockAction === "delete"
       ? Number(action.dataset.blockIndex || 0)
       : null;
   if (state.editorBlockPendingDeleteIndex !== null) {
     event.preventDefault();
     event.stopPropagation();
-    deleteEmptyEditorBlock(state.editorBlockPendingDeleteIndex).catch((error) => {
+    deleteActiveEditorBlock(state.editorBlockPendingDeleteIndex).catch((error) => {
       console.error(error);
     });
   }
@@ -4827,7 +4851,7 @@ function handleBlockTextareaKeydown(event) {
   }
 }
 
-async function deleteEmptyEditorBlock(index) {
+async function deleteActiveEditorBlock(index) {
   const textarea = el("page-block-editor")?.querySelector(".editor-block.is-active textarea");
   const activeIndex = Number(textarea?.dataset.blockIndex ?? state.activeEditorBlock);
   const requestedIndex = Number(index);
@@ -4839,9 +4863,6 @@ async function deleteEmptyEditorBlock(index) {
   ) {
     return;
   }
-  const value = textarea ? textarea.value : editorBlockText(state.editorBlocks[activeIndex]);
-  if (normalizeEditorText(value).trim()) return;
-  replaceEditorBlock(activeIndex, value);
   deleteEditorBlocks(activeIndex, 1);
   persistPageDraft();
   setPageEditorStatus("Deleting block...");
@@ -4870,9 +4891,7 @@ function setEditorSource(source, blocks = []) {
 function editorBlockHtml(block, index, active) {
   const source = editorBlockText(block);
   if (active) {
-    const deleteButton = !source.trim() && state.editorBlocks.length > 1
-      ? `<button class="editor-block-action editor-block-delete" type="button" data-editor-block-action="delete-empty" data-block-index="${index}" aria-label="Delete empty block ${index + 1}" title="Delete empty block">${iconSvg("trash-2")}</button>`
-      : "";
+    const deleteButton = `<button class="editor-block-action editor-block-delete" type="button" data-editor-block-action="delete" data-block-index="${index}" aria-label="Delete block ${index + 1}" title="Delete block">${iconSvg("trash-2")}</button>`;
     return `<div class="editor-block is-active" data-block-index="${index}"><textarea class="editor-block-source" data-block-index="${index}" rows="1">${escapeTextarea(source)}</textarea>${deleteButton}</div>`;
   }
   return `<div class="editor-block" data-block-index="${index}" tabindex="0">${editorBlockPreviewHtml(block, index)}</div>`;

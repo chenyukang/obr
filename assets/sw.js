@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260603-block-delete-pointer";
+const CACHE_VERSION = "obr-offline-20260603-block-save-strip";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = "obr-images-v1";
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260603-block-delete-pointer",
-  "/assets/app.js?v=20260603-block-delete-pointer",
+  "/assets/style.css?v=20260603-block-save-strip",
+  "/assets/app.js?v=20260603-block-save-strip",
 ];
 
 self.addEventListener("install", (event) => {

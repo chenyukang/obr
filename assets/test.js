@@ -355,8 +355,9 @@ this.__obrTest = {
   clearPageBlockEditorActionPointer,
   handlePageBlockEditorClick,
   handlePageBlockEditorFocusOut,
-  deleteEmptyEditorBlock,
+  deleteActiveEditorBlock,
   commitActiveEditorBlockForSave,
+  stripEditorBlockTrailingWhitespaceForSave,
   syncEditorBlocksForSave,
   rssItemHtml,
   handleRssListClick,
@@ -412,8 +413,9 @@ const {
   clearPageBlockEditorActionPointer,
   handlePageBlockEditorClick,
   handlePageBlockEditorFocusOut,
-  deleteEmptyEditorBlock,
+  deleteActiveEditorBlock,
   commitActiveEditorBlockForSave,
+  stripEditorBlockTrailingWhitespaceForSave,
   syncEditorBlocksForSave,
   rssItemHtml,
   handleRssListClick,
@@ -524,8 +526,9 @@ assert.strictEqual(state.editorBlocks[1].html, "<p>fresh two edited</p>");
 assert.strictEqual(state.editorBlocks[2].html, "<p>stale three</p>");
 
 assert(editorBlockHtml(state.editorBlocks[0], 0, false).includes('data-editor-block-action="edit"'));
+assert(editorBlockHtml(state.editorBlocks[1], 1, true).includes('data-editor-block-action="delete"'));
 replaceEditorBlock(1, "");
-assert(editorBlockHtml(state.editorBlocks[1], 1, true).includes('data-editor-block-action="delete-empty"'));
+assert(editorBlockHtml(state.editorBlocks[1], 1, true).includes('data-editor-block-action="delete"'));
 const pageBlocks = pageBlocksHtml(state.editorBlocks);
 assert(pageBlocks.includes('data-page-block-action="edit"'));
 assert(pageBlocks.includes("page-render-block is-empty"));
@@ -553,7 +556,7 @@ assert.strictEqual(state.activeEditorBlock, 1);
 assertSource("one\n\n\n\nthree");
 clearPageBlockEditorActionPointer();
 
-deleteEmptyEditorBlock(2);
+deleteActiveEditorBlock(2);
 assert.strictEqual(state.activeEditorBlock, 1);
 assertSource("one\n\n\n\nthree");
 activeBlockTextarea = null;
@@ -586,7 +589,7 @@ function editorActionTarget(action, index) {
   };
 }
 handlePageBlockEditorActionPointerDown({
-  target: editorActionTarget("delete-empty", 1),
+  target: editorActionTarget("delete", 1),
   preventDefault() {},
   stopPropagation() {},
 });
@@ -601,6 +604,31 @@ assertSource("one\n\n八点\n\n测试一下");
 assert.deepStrictEqual(
   state.editorBlocks.map((block) => block.source),
   ["one", "八点", "测试一下"],
+);
+activeBlockTextarea = null;
+
+setEditorSource("one\n\n八点\n\n测试一下", [
+  { source: "one", separator: "\n\n", html: "<p>one</p>" },
+  { source: "八点", separator: "\n\n", html: "<p>八点</p>" },
+  { source: "测试一下", separator: "", html: "<p>测试一下</p>" },
+]);
+state.editorMode = "blocks";
+state.activeEditorBlock = 1;
+state.currentFile = "Posts/mobile.md";
+state.currentContent = "one\n\n八点\n\n测试一下";
+activeBlockTextarea = {
+  dataset: { blockIndex: "1" },
+  value: "八点",
+};
+handlePageBlockEditorActionPointerDown({
+  target: editorActionTarget("delete", 1),
+  preventDefault() {},
+  stopPropagation() {},
+});
+assertSource("one\n\n测试一下");
+assert.deepStrictEqual(
+  state.editorBlocks.map((block) => block.source),
+  ["one", "测试一下"],
 );
 activeBlockTextarea = null;
 
@@ -658,6 +686,27 @@ assert.deepStrictEqual(
   ["one", "two", "three"],
 );
 assertSource("one\n\ntwo\n\nthree");
+
+setEditorSource("  one\n\n\n\ntwo  \n\nthree\t\n", [
+  { source: "  one\n\n", separator: "\n\n", html: "<p>one</p>" },
+  { source: "two  \n", separator: "\n\n", html: "<p>two</p>" },
+  { source: "three\t\n", separator: "", html: "<p>three</p>" },
+]);
+state.editorMode = "blocks";
+assert.strictEqual(stripEditorBlockTrailingWhitespaceForSave(), true);
+assertSource("  one\n\ntwo\n\nthree");
+assert.deepStrictEqual(
+  editorBlocksPayload().map((block) => block.source),
+  ["  one", "two", "three"],
+);
+
+setEditorSource("one\n\ntwo", [
+  { source: "one", separator: "\n\n", html: "<p>one</p>" },
+  { source: "two", separator: "", html: "<p>two</p>" },
+]);
+state.editorMode = "blocks";
+assert.strictEqual(stripEditorBlockTrailingWhitespaceForSave(), false);
+assertSource("one\n\ntwo");
 
 async function assertRssMarkReadFromList() {
   const unreadHtml = rssItemHtml({
