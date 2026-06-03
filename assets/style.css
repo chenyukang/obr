@@ -189,6 +189,19 @@ textarea {
   padding: 12px clamp(16px, 4vw, 36px);
   background: var(--topbar-bg);
   border-bottom: 1px solid var(--line);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+
+.topbar.is-rss-detail-immersive {
+  will-change: transform;
+}
+
+.topbar.is-rss-detail-immersive.is-hidden-on-scroll:not(:focus-within) {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(calc(-100% - 2px));
 }
 
 .brand {

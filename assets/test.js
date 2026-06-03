@@ -13,6 +13,25 @@ const localStore = new Map();
 const sessionStore = new Map();
 const topbarNode = {
   hidden: false,
+  classes: new Set(),
+  classList: {
+    add(name) {
+      topbarNode.classes.add(name);
+    },
+    remove(name) {
+      topbarNode.classes.delete(name);
+    },
+    toggle(name, active) {
+      if (active) topbarNode.classes.add(name);
+      else topbarNode.classes.delete(name);
+    },
+    contains(name) {
+      return topbarNode.classes.has(name);
+    },
+  },
+  contains(element) {
+    return element?.insideTopbar === true;
+  },
   getBoundingClientRect() {
     return { top: 0, bottom: 64 };
   },
@@ -106,10 +125,16 @@ const pageContent = {
     if (selector === "[data-rss-translation-error]") return rssTranslationErrorNode;
     return null;
   },
+  querySelectorAll() {
+    return [];
+  },
   insertBefore(node, referenceNode) {
     if (node.dataset?.rssTranslationError) rssTranslationErrorNode = node;
     else pendingSummaryNode = node;
     this.insertedBefore = referenceNode;
+  },
+  replaceChildren(node) {
+    this.firstChild = node || null;
   },
 };
 const rssList = {
@@ -138,6 +163,19 @@ const pageBlockEditor = {
   },
   querySelectorAll() {
     return [];
+  },
+};
+const pageEditorShell = {
+  hidden: false,
+  classes: new Set(),
+  classList: {
+    toggle(name, active) {
+      if (active) pageEditorShell.classes.add(name);
+      else pageEditorShell.classes.delete(name);
+    },
+  },
+  contains(element) {
+    return element?.insideEditorShell === true;
   },
 };
 const rssSearchInput = {
@@ -171,7 +209,15 @@ const rssSearchToggle = {
 const elements = {
   "page-content": pageContent,
   "page-editor": pageEditor,
+  "page-editor-shell": pageEditorShell,
+  "edit-button": mockButton(false),
   "page-block-editor": pageBlockEditor,
+  "page-new-block-button": mockButton(false),
+  "page-draft-banner": { hidden: true },
+  "page-editor-status": { textContent: "", hidden: true },
+  "recent-pages": { innerHTML: "" },
+  "recent-edits": { innerHTML: "" },
+  "recent-panel": { hidden: true },
   "rss-list": rssList,
   "rss-search-form": rssSearchForm,
   "rss-search-input": rssSearchInput,
@@ -197,6 +243,8 @@ const fetchJsonResponses = [];
 const sandbox = {
   console,
   document: {
+    activeElement: null,
+    documentElement: { scrollHeight: 1400 },
     addEventListener() {},
     getElementById(id) {
       return elements[id] || null;
@@ -206,6 +254,16 @@ const sandbox = {
       return null;
     },
     createElement(tagName) {
+      if (tagName === "template") {
+        return {
+          innerHTML: "",
+          content: {
+            querySelectorAll() {
+              return [];
+            },
+          },
+        };
+      }
       return {
         tagName: tagName.toUpperCase(),
         className: "",
@@ -255,6 +313,8 @@ const sandbox = {
     requestAnimationFrame(callback) {
       callback();
     },
+    setTimeout() {},
+    clearTimeout() {},
     open(url, target, features) {
       const opened = { url, target, features, opener: "set" };
       openedWindows.push(opened);
@@ -291,6 +351,11 @@ this.__obrTest = {
   editorBlockHtml,
   pageBlocksHtml,
   formatTextareaCjkSpacing,
+  handlePageBlockEditorActionPointerDown,
+  clearPageBlockEditorActionPointer,
+  handlePageBlockEditorClick,
+  handlePageBlockEditorFocusOut,
+  deleteEmptyEditorBlock,
   commitActiveEditorBlockForSave,
   syncEditorBlocksForSave,
   rssItemHtml,
@@ -321,6 +386,7 @@ this.__obrTest = {
   updateRssTranslationFloatingButton,
   toggleRssDetailActions,
   handleRssSecondaryAction,
+  updateRssDetailTopbarVisibility,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
@@ -342,6 +408,11 @@ const {
   editorBlockHtml,
   pageBlocksHtml,
   formatTextareaCjkSpacing,
+  handlePageBlockEditorActionPointerDown,
+  clearPageBlockEditorActionPointer,
+  handlePageBlockEditorClick,
+  handlePageBlockEditorFocusOut,
+  deleteEmptyEditorBlock,
   commitActiveEditorBlockForSave,
   syncEditorBlocksForSave,
   rssItemHtml,
@@ -372,6 +443,7 @@ const {
   updateRssTranslationFloatingButton,
   toggleRssDetailActions,
   handleRssSecondaryAction,
+  updateRssDetailTopbarVisibility,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
@@ -457,6 +529,80 @@ assert(editorBlockHtml(state.editorBlocks[1], 1, true).includes('data-editor-blo
 const pageBlocks = pageBlocksHtml(state.editorBlocks);
 assert(pageBlocks.includes('data-page-block-action="edit"'));
 assert(pageBlocks.includes("page-render-block is-empty"));
+
+setEditorSource("one\n\n\n\nthree", [
+  { source: "one", separator: "\n\n", html: "<p>one</p>" },
+  { source: "", separator: "\n\n", html: '<p class="editor-preview-empty">Empty block</p>' },
+  { source: "three", separator: "", html: "<p>three</p>" },
+]);
+state.editorMode = "blocks";
+state.activeEditorBlock = 1;
+activeBlockTextarea = {
+  dataset: { blockIndex: "1" },
+  value: "",
+};
+handlePageBlockEditorActionPointerDown({
+  target: {
+    closest(selector) {
+      return selector === "[data-editor-block-action]" ? {} : null;
+    },
+  },
+});
+handlePageBlockEditorFocusOut({ relatedTarget: null });
+assert.strictEqual(state.activeEditorBlock, 1);
+assertSource("one\n\n\n\nthree");
+clearPageBlockEditorActionPointer();
+
+deleteEmptyEditorBlock(2);
+assert.strictEqual(state.activeEditorBlock, 1);
+assertSource("one\n\n\n\nthree");
+activeBlockTextarea = null;
+
+setEditorSource("one\n\n\n\n八点\n\n测试一下", [
+  { source: "one", separator: "\n\n", html: "<p>one</p>" },
+  { source: "", separator: "\n\n", html: '<p class="editor-preview-empty">Empty block</p>' },
+  { source: "八点", separator: "\n\n", html: "<p>八点</p>" },
+  { source: "测试一下", separator: "", html: "<p>测试一下</p>" },
+]);
+state.editorMode = "blocks";
+state.activeEditorBlock = 1;
+state.currentFile = "Posts/mobile.md";
+state.currentContent = "one\n\n\n\n八点\n\n测试一下";
+activeBlockTextarea = {
+  dataset: { blockIndex: "1" },
+  value: "",
+};
+function editorActionTarget(action, index) {
+  return {
+    closest(selector) {
+      if (selector !== "[data-editor-block-action]") return null;
+      return {
+        dataset: {
+          editorBlockAction: action,
+          blockIndex: String(index),
+        },
+      };
+    },
+  };
+}
+handlePageBlockEditorActionPointerDown({
+  target: editorActionTarget("delete-empty", 1),
+  preventDefault() {},
+  stopPropagation() {},
+});
+assertSource("one\n\n八点\n\n测试一下");
+activeBlockTextarea = null;
+handlePageBlockEditorClick({
+  target: editorActionTarget("edit", 2),
+  preventDefault() {},
+  stopPropagation() {},
+}).catch(() => {});
+assertSource("one\n\n八点\n\n测试一下");
+assert.deepStrictEqual(
+  state.editorBlocks.map((block) => block.source),
+  ["one", "八点", "测试一下"],
+);
+activeBlockTextarea = null;
 
 const composingTextarea = {
   value: "中文abc",
@@ -808,6 +954,61 @@ function assertRssDetailBackTarget() {
     state.view = previousView;
     state.currentFile = previousFile;
     state.lastListView = previousListView;
+  }
+}
+
+function assertRssDetailTopbarAutoHide() {
+  const previousView = state.view;
+  const previousFile = state.currentFile;
+  const previousListView = state.lastListView;
+  const previousScrollY = sandbox.window.scrollY;
+  const previousActiveElement = sandbox.document.activeElement;
+  const previousEditorHidden = pageEditor.hidden;
+  const previousHidden = state.rssDetailTopbarHidden;
+  const previousLastY = state.rssDetailTopbarLastY;
+
+  try {
+    topbarNode.classes.clear();
+    state.view = "page";
+    state.currentFile = "rss:item-1";
+    state.lastListView = "rss";
+    pageEditor.hidden = true;
+    sandbox.document.activeElement = null;
+
+    sandbox.window.scrollY = 0;
+    updateRssDetailTopbarVisibility({ forceShow: true, resetScroll: true });
+    assert.strictEqual(topbarNode.classes.has("is-rss-detail-immersive"), true);
+    assert.strictEqual(topbarNode.classes.has("is-hidden-on-scroll"), false);
+
+    sandbox.window.scrollY = 140;
+    updateRssDetailTopbarVisibility();
+    assert.strictEqual(topbarNode.classes.has("is-hidden-on-scroll"), true);
+
+    sandbox.window.scrollY = 120;
+    updateRssDetailTopbarVisibility();
+    assert.strictEqual(topbarNode.classes.has("is-hidden-on-scroll"), false);
+
+    sandbox.window.scrollY = 180;
+    updateRssDetailTopbarVisibility();
+    assert.strictEqual(topbarNode.classes.has("is-hidden-on-scroll"), true);
+    sandbox.document.activeElement = { insideTopbar: true };
+    updateRssDetailTopbarVisibility();
+    assert.strictEqual(topbarNode.classes.has("is-hidden-on-scroll"), false);
+
+    pageEditor.hidden = false;
+    updateRssDetailTopbarVisibility();
+    assert.strictEqual(topbarNode.classes.has("is-rss-detail-immersive"), false);
+    assert.strictEqual(topbarNode.classes.has("is-hidden-on-scroll"), false);
+  } finally {
+    state.view = previousView;
+    state.currentFile = previousFile;
+    state.lastListView = previousListView;
+    sandbox.window.scrollY = previousScrollY;
+    sandbox.document.activeElement = previousActiveElement;
+    pageEditor.hidden = previousEditorHidden;
+    state.rssDetailTopbarHidden = previousHidden;
+    state.rssDetailTopbarLastY = previousLastY;
+    topbarNode.classes.clear();
   }
 }
 
@@ -1180,6 +1381,7 @@ function assertRssSearchDisclosure() {
   assertRssCacheSignatures();
   assertRssResumeState();
   assertRssDetailBackTarget();
+  assertRssDetailTopbarAutoHide();
   assertThemeSchedule();
   assertRssAiSummaryHtml();
   assertRssTranslationButtonShowsWhenMissingTranslation();

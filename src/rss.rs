@@ -4956,12 +4956,13 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
     #[test]
     fn missing_translation_does_not_trigger_auto_enrichment_by_default() -> Result<()> {
         let (mut reader, root) = test_reader()?;
-        let item_id = insert_test_item(
+        let item_id = insert_english_ai_item(
             &reader,
             "https://example.test/feed.xml",
             "translation-disabled",
         )?;
         let item = reader.get_item(&item_id)?.unwrap();
+        assert!(item.needs_translation);
         reader.save_item_ai_enrichment(
             &item,
             &AiEnrichment {

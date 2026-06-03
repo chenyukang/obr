@@ -15,6 +15,9 @@ const state = {
   editorMode: "closed",
   editorRenderRequestId: 0,
   activeEditorBlock: -1,
+  editorBlockActionPointerDown: false,
+  editorBlockActionSuppressUntil: 0,
+  editorBlockPendingDeleteIndex: null,
   lastReadBlockIndex: -1,
   lastReadBlockFile: "",
   searchController: null,
@@ -41,6 +44,8 @@ const state = {
   rssCurrentNeedsTranslation: false,
   rssCurrentHackerNewsUrl: "",
   rssDetailActionsExpanded: false,
+  rssDetailTopbarHidden: false,
+  rssDetailTopbarLastY: 0,
   rssAnnotationQuote: "",
   rssAnnotationSaving: false,
   rssRefreshing: false,
@@ -114,7 +119,10 @@ const RSS_SUMMARY_TIMEOUT_MS = 120000;
 const RSS_TRANSLATION_TIMEOUT_MS = 180000;
 const LONG_PRESS_COPY_MS = 650;
 const LONG_PRESS_MOVE_PX = 12;
+const EDITOR_BLOCK_ACTION_SUPPRESS_MS = 2000;
 const SCROLL_SAVE_MS = 160;
+const RSS_DETAIL_TOPBAR_HIDE_AFTER_PX = 96;
+const RSS_DETAIL_TOPBAR_SCROLL_DELTA_PX = 8;
 const TOAST_MS = 1800;
 const PING_TIMEOUT_MS = 5000;
 const CONNECTION_HEARTBEAT_MS = 10000;
@@ -282,6 +290,9 @@ function bindEvents() {
   el("page-editor").addEventListener("input", handlePageEditorInput);
   el("page-editor").addEventListener("compositionstart", handleTextareaCompositionStart);
   el("page-editor").addEventListener("compositionend", handlePageEditorCompositionEnd);
+  el("page-block-editor").addEventListener("pointerdown", handlePageBlockEditorActionPointerDown);
+  el("page-block-editor").addEventListener("pointercancel", clearPageBlockEditorActionPointer);
+  el("page-block-editor").addEventListener("mousedown", handlePageBlockEditorActionPointerDown);
   el("page-block-editor").addEventListener("click", handlePageBlockEditorClick);
   el("page-block-editor").addEventListener("focusout", handlePageBlockEditorFocusOut);
   el("discard-page-draft").addEventListener("click", discardRestoredPageDraft);
@@ -1949,6 +1960,7 @@ async function showView(name, options = {}) {
     view.hidden = true;
   }
   el("page-view").classList.remove("is-rss-detail");
+  updateRssDetailTopbarVisibility({ forceShow: true, resetScroll: true });
   hideRssDetailActions();
   if (name === "todo") {
     clearPageOutline();
@@ -4099,6 +4111,7 @@ function showPage(title, html, sourceView, options = {}) {
   state.view = "page";
   const pageView = el("page-view");
   pageView.classList.toggle("is-rss-detail", isRssDetailPage());
+  updateRssDetailTopbarVisibility({ forceShow: true, resetScroll: true });
   for (const view of document.querySelectorAll(".view")) {
     view.hidden = true;
   }
@@ -4443,6 +4456,7 @@ async function openPageEditor(mode, options = {}) {
   updateRssDetailActionBar();
   closeRssAnnotationDialog();
   closeTocPanel();
+  updateRssDetailTopbarVisibility({ forceShow: true, resetScroll: true });
   updateReadingProgress();
   showPageDraftBanner(draft !== null);
   if (insertedNewBlock) persistPageDraft();
@@ -4625,8 +4639,24 @@ function handlePageEditorCompositionEnd(event) {
 }
 
 async function handlePageBlockEditorClick(event) {
+  if (
+    state.editorBlockPendingDeleteIndex !== null &&
+    Date.now() <= state.editorBlockActionSuppressUntil
+  ) {
+    const index = state.editorBlockPendingDeleteIndex;
+    clearPageBlockEditorActionPointer();
+    event.preventDefault();
+    event.stopPropagation();
+    await deleteEmptyEditorBlock(index);
+    return;
+  }
+  if (state.editorBlockPendingDeleteIndex !== null) {
+    clearPageBlockEditorActionPointer();
+  }
+
   const action = event.target.closest("[data-editor-block-action]");
   if (action) {
+    clearPageBlockEditorActionPointer();
     event.preventDefault();
     event.stopPropagation();
     const index = Number(action.dataset.blockIndex || 0);
@@ -4637,14 +4667,46 @@ async function handlePageBlockEditorClick(event) {
     activateEditorBlock(index);
     return;
   }
+  clearPageBlockEditorActionPointer();
 
   const block = event.target.closest(".editor-block");
   if (!block) return;
   activateEditorBlock(Number(block.dataset.blockIndex || 0));
 }
 
+function handlePageBlockEditorActionPointerDown(event) {
+  const action = event.target.closest("[data-editor-block-action]");
+  state.editorBlockActionPointerDown = Boolean(action);
+  state.editorBlockActionSuppressUntil = action
+    ? Date.now() + EDITOR_BLOCK_ACTION_SUPPRESS_MS
+    : 0;
+  state.editorBlockPendingDeleteIndex =
+    action?.dataset?.editorBlockAction === "delete-empty"
+      ? Number(action.dataset.blockIndex || 0)
+      : null;
+  if (state.editorBlockPendingDeleteIndex !== null) {
+    event.preventDefault();
+    event.stopPropagation();
+    deleteEmptyEditorBlock(state.editorBlockPendingDeleteIndex).catch((error) => {
+      console.error(error);
+    });
+  }
+}
+
+function clearPageBlockEditorActionPointer() {
+  state.editorBlockActionPointerDown = false;
+  state.editorBlockActionSuppressUntil = 0;
+  state.editorBlockPendingDeleteIndex = null;
+}
+
+function isPageBlockEditorActionPending() {
+  return state.editorBlockActionPointerDown ||
+    Date.now() <= state.editorBlockActionSuppressUntil;
+}
+
 function handlePageBlockEditorFocusOut(event) {
   const shell = el("page-editor-shell");
+  if (isPageBlockEditorActionPending() && !event.relatedTarget) return;
   if (shell.hidden || shell.contains(event.relatedTarget)) return;
   commitActiveEditorBlock();
 }
@@ -4766,13 +4828,21 @@ function handleBlockTextareaKeydown(event) {
 }
 
 async function deleteEmptyEditorBlock(index) {
-  const textarea = el("page-block-editor")?.querySelector(
-    `.editor-block.is-active textarea[data-block-index="${index}"]`,
-  );
-  const value = textarea ? textarea.value : editorBlockText(state.editorBlocks[index]);
+  const textarea = el("page-block-editor")?.querySelector(".editor-block.is-active textarea");
+  const activeIndex = Number(textarea?.dataset.blockIndex ?? state.activeEditorBlock);
+  const requestedIndex = Number(index);
+  if (
+    !Number.isInteger(activeIndex) ||
+    activeIndex < 0 ||
+    activeIndex >= state.editorBlocks.length ||
+    (Number.isInteger(requestedIndex) && requestedIndex !== activeIndex)
+  ) {
+    return;
+  }
+  const value = textarea ? textarea.value : editorBlockText(state.editorBlocks[activeIndex]);
   if (normalizeEditorText(value).trim()) return;
-  replaceEditorBlock(index, value);
-  deleteEditorBlocks(index, 1);
+  replaceEditorBlock(activeIndex, value);
+  deleteEditorBlocks(activeIndex, 1);
   persistPageDraft();
   setPageEditorStatus("Deleting block...");
   state.activeEditorBlock = -1;
@@ -5114,8 +5184,39 @@ function setPageEditorStatus(message) {
 function handleWindowScroll() {
   updateActiveOutline();
   updateReadingProgress();
+  updateRssDetailTopbarVisibility();
   window.clearTimeout(state.scrollTimer);
   state.scrollTimer = window.setTimeout(saveCurrentScrollPosition, SCROLL_SAVE_MS);
+}
+
+function updateRssDetailTopbarVisibility(options = {}) {
+  const { forceShow = false, resetScroll = false } = options;
+  const topbar = document.querySelector(".topbar");
+  if (!topbar) return;
+  const y = Math.max(0, Math.round(window.scrollY || 0));
+  const immersive = isRssDetailPage() && el("page-editor")?.hidden !== false;
+  topbar.classList.toggle("is-rss-detail-immersive", immersive);
+  if (!immersive) {
+    state.rssDetailTopbarHidden = false;
+    state.rssDetailTopbarLastY = y;
+    topbar.classList.remove("is-hidden-on-scroll");
+    return;
+  }
+
+  const delta = y - state.rssDetailTopbarLastY;
+  let hidden = state.rssDetailTopbarHidden;
+  const hasTopbarFocus = topbar.contains?.(document.activeElement);
+  if (forceShow || resetScroll || hasTopbarFocus || y <= 24) {
+    hidden = false;
+  } else if (delta > RSS_DETAIL_TOPBAR_SCROLL_DELTA_PX && y > RSS_DETAIL_TOPBAR_HIDE_AFTER_PX) {
+    hidden = true;
+  } else if (delta < -RSS_DETAIL_TOPBAR_SCROLL_DELTA_PX) {
+    hidden = false;
+  }
+
+  state.rssDetailTopbarHidden = hidden;
+  state.rssDetailTopbarLastY = y;
+  topbar.classList.toggle("is-hidden-on-scroll", hidden);
 }
 
 function updateReadingProgress() {
@@ -5226,6 +5327,7 @@ function restorePageScroll(y) {
   window.requestAnimationFrame(() => {
     const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     window.scrollTo(0, Math.min(y, maxY));
+    updateRssDetailTopbarVisibility({ forceShow: true, resetScroll: true });
   });
 }
 
