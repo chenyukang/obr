@@ -1496,6 +1496,24 @@ function assertEntryOutboxPreservesCreatedAt() {
     createdAt: 1780527607000,
   });
   assert.strictEqual(legacy.created_at, new Date(1780527607000).toISOString());
+  assert.strictEqual(
+    legacy.timezone_offset_minutes,
+    new Date(1780527607000).getTimezoneOffset(),
+  );
+  const stringOffset = entryPayloadForSync({
+    type: "entry",
+    payload: {
+      sync_id: "id-string-offset",
+      created_at: "2026-06-04T01:02:03.000Z",
+      timezone_offset_minutes: "-480",
+      page: "",
+      links: "",
+      text: "queued with string offset",
+      image: "",
+    },
+    createdAt: 1780527607000,
+  });
+  assert.strictEqual(stringOffset.timezone_offset_minutes, -480);
 
   const queued = queueOfflineMutation("entry", {
     page: "",
@@ -1506,16 +1524,22 @@ function assertEntryOutboxPreservesCreatedAt() {
   assert(queued.payload.sync_id);
   assert(queued.payload.created_at);
   assert(!Number.isNaN(Date.parse(queued.payload.created_at)));
+  assert.strictEqual(
+    queued.payload.timezone_offset_minutes,
+    new Date(Date.parse(queued.payload.created_at)).getTimezoneOffset(),
+  );
 
   const formData = entryFormData({
     sync_id: "id-1",
     created_at: "2026-06-04T01:02:03.000Z",
+    timezone_offset_minutes: -480,
     page: "",
     links: "",
     text: "memo",
   });
   assert.strictEqual(formData.get("sync_id"), "id-1");
   assert.strictEqual(formData.get("created_at"), "2026-06-04T01:02:03.000Z");
+  assert.strictEqual(formData.get("timezone_offset_minutes"), "-480");
 }
 
 (async () => {

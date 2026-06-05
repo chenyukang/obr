@@ -1025,18 +1025,33 @@ function newOutboxId(timestamp = Date.now()) {
   return `${timestamp}-${Math.random().toString(36).slice(2)}`;
 }
 
+function normalizeTimezoneOffsetMinutes(value) {
+  const offset = Number(value);
+  if (!Number.isFinite(offset)) return null;
+  if (offset < -14 * 60 || offset > 14 * 60) return null;
+  return Math.trunc(offset);
+}
+
+function timezoneOffsetMinutesFor(value = Date.now()) {
+  const date = new Date(value);
+  const source = Number.isNaN(date.getTime()) ? new Date() : date;
+  return source.getTimezoneOffset();
+}
+
 function queueOfflineMutation(type, payload) {
   const items = readOutbox();
   const now = Date.now();
   const id = payload.sync_id || newOutboxId(now);
-  const queuedPayload =
-    type === "entry"
-      ? {
-          ...payload,
-          sync_id: id,
-          created_at: payload.created_at || new Date(now).toISOString(),
-        }
-      : payload;
+  const queuedPayload = type === "entry"
+    ? {
+        ...payload,
+        sync_id: id,
+        created_at: payload.created_at || new Date(now).toISOString(),
+        timezone_offset_minutes:
+          normalizeTimezoneOffsetMinutes(payload.timezone_offset_minutes) ??
+          timezoneOffsetMinutesFor(payload.created_at || now),
+      }
+    : payload;
   const item = {
     id,
     type,
@@ -1530,12 +1545,19 @@ async function syncOutboxItem(item, options = {}) {
 
 function entryPayloadForSync(item) {
   const payload = item.payload || {};
-  if (payload.created_at) return payload;
   const createdAt = Number(item.createdAt);
-  if (!Number.isFinite(createdAt) || createdAt <= 0) return payload;
+  const createdAtIso = payload.created_at ||
+    (Number.isFinite(createdAt) && createdAt > 0 ? new Date(createdAt).toISOString() : "");
+  const payloadTimezoneOffset = normalizeTimezoneOffsetMinutes(payload.timezone_offset_minutes);
+  const timezoneOffsetMinutes =
+    payloadTimezoneOffset ?? timezoneOffsetMinutesFor(createdAtIso || createdAt || Date.now());
+  if (payload.created_at && payloadTimezoneOffset !== null) {
+    return { ...payload, timezone_offset_minutes: payloadTimezoneOffset };
+  }
   return {
     ...payload,
-    created_at: new Date(createdAt).toISOString(),
+    ...(createdAtIso ? { created_at: createdAtIso } : {}),
+    timezone_offset_minutes: timezoneOffsetMinutes,
   };
 }
 
@@ -2062,6 +2084,7 @@ async function saveEntry() {
   const payload = {
     sync_id: newOutboxId(createdAt),
     created_at: new Date(createdAt).toISOString(),
+    timezone_offset_minutes: timezoneOffsetMinutesFor(createdAt),
     page: el("entry-page").value,
     links: el("entry-links").value,
     text: el("entry-text").value,
@@ -2090,6 +2113,8 @@ function entryFormData(payload, imageBlob = null) {
   const formData = new FormData();
   if (payload.sync_id) formData.append("sync_id", payload.sync_id);
   if (payload.created_at) formData.append("created_at", payload.created_at);
+  const timezoneOffset = normalizeTimezoneOffsetMinutes(payload.timezone_offset_minutes);
+  if (timezoneOffset !== null) formData.append("timezone_offset_minutes", String(timezoneOffset));
   formData.append("page", payload.page);
   formData.append("links", payload.links);
   formData.append("text", payload.text);

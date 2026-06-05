@@ -19,7 +19,7 @@ use axum::{
     },
     response::{Html, IntoResponse, Response},
 };
-use chrono::{Local, TimeZone, Utc};
+use chrono::{FixedOffset, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 use tracing::warn;
@@ -97,6 +97,7 @@ pub(crate) struct MarkdownBlocksRequest {
 pub(crate) struct EntryRequest {
     sync_id: Option<String>,
     created_at: Option<String>,
+    timezone_offset_minutes: Option<i32>,
     page: String,
     links: String,
     text: String,
@@ -1467,7 +1468,11 @@ pub(crate) async fn post_entry(
     State(state): State<Arc<AppState>>,
     Json(body): Json<EntryRequest>,
 ) -> AppResult<Response> {
-    let entry_time = entry_timestamp(body.created_at.as_deref(), body.sync_id.as_deref());
+    let entry_time = entry_timestamp(
+        body.created_at.as_deref(),
+        body.sync_id.as_deref(),
+        body.timezone_offset_minutes,
+    );
     let date = entry_time.format("%Y-%m-%d").to_string();
     let dedupe = body
         .sync_id
@@ -1505,6 +1510,7 @@ pub(crate) async fn post_entry_multipart(
 ) -> AppResult<Response> {
     let mut sync_id = String::new();
     let mut created_at = String::new();
+    let mut timezone_offset_minutes = None;
     let mut page = String::new();
     let mut links = String::new();
     let mut text = String::new();
@@ -1520,6 +1526,10 @@ pub(crate) async fn post_entry_multipart(
                 dedupe = !sync_id.trim().is_empty()
             }
             "created_at" => created_at = field.text().await.map_err(anyhow::Error::from)?,
+            "timezone_offset_minutes" => {
+                let value = field.text().await.map_err(anyhow::Error::from)?;
+                timezone_offset_minutes = value.trim().parse::<i32>().ok();
+            }
             "page" => page = field.text().await.map_err(anyhow::Error::from)?,
             "links" => links = field.text().await.map_err(anyhow::Error::from)?,
             "text" => text = field.text().await.map_err(anyhow::Error::from)?,
@@ -1542,7 +1552,7 @@ pub(crate) async fn post_entry_multipart(
         }
     }
 
-    let entry_time = entry_timestamp(Some(&created_at), Some(&sync_id));
+    let entry_time = entry_timestamp(Some(&created_at), Some(&sync_id), timezone_offset_minutes);
     let date = entry_time.format("%Y-%m-%d").to_string();
     if dedupe && entry_already_contains_body(&state, &page, &links, &text, &date)? {
         return Ok("ok".into_response());
@@ -1575,7 +1585,7 @@ pub(crate) async fn post_entry_multipart(
 }
 
 struct EntryPayload {
-    entry_time: chrono::DateTime<Local>,
+    entry_time: chrono::DateTime<FixedOffset>,
     dedupe: bool,
     page: String,
     links: String,
@@ -1597,24 +1607,39 @@ fn normalize_multipart_image_type(content_type: &str, file_name: Option<&str>) -
     }
 }
 
-fn entry_timestamp(created_at: Option<&str>, sync_id: Option<&str>) -> chrono::DateTime<Local> {
+fn entry_timestamp(
+    created_at: Option<&str>,
+    sync_id: Option<&str>,
+    timezone_offset_minutes: Option<i32>,
+) -> chrono::DateTime<FixedOffset> {
+    let client_offset = client_timezone_offset(timezone_offset_minutes);
     created_at
-        .and_then(parse_entry_created_at)
-        .or_else(|| sync_id.and_then(parse_entry_sync_id_timestamp))
-        .unwrap_or_else(Local::now)
+        .and_then(|value| parse_entry_created_at(value, client_offset.as_ref()))
+        .or_else(|| {
+            sync_id.and_then(|value| parse_entry_sync_id_timestamp(value, client_offset.as_ref()))
+        })
+        .unwrap_or_else(|| now_with_entry_timezone(client_offset.as_ref()))
 }
 
-fn parse_entry_created_at(value: &str) -> Option<chrono::DateTime<Local>> {
+fn parse_entry_created_at(
+    value: &str,
+    client_offset: Option<&FixedOffset>,
+) -> Option<chrono::DateTime<FixedOffset>> {
     let value = value.trim();
     if value.is_empty() {
         return None;
     }
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|timestamp| timestamp.with_timezone(&Local))
+    let timestamp = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+    Some(match client_offset {
+        Some(offset) => timestamp.with_timezone(offset),
+        None => timestamp,
+    })
 }
 
-fn parse_entry_sync_id_timestamp(sync_id: &str) -> Option<chrono::DateTime<Local>> {
+fn parse_entry_sync_id_timestamp(
+    sync_id: &str,
+    client_offset: Option<&FixedOffset>,
+) -> Option<chrono::DateTime<FixedOffset>> {
     let millis = sync_id
         .trim()
         .split_once('-')
@@ -1625,7 +1650,31 @@ fn parse_entry_sync_id_timestamp(sync_id: &str) -> Option<chrono::DateTime<Local
     if !(946_684_800_000..4_102_444_800_000).contains(&millis) {
         return None;
     }
-    Local.timestamp_millis_opt(millis).single()
+    match client_offset {
+        Some(offset) => Utc
+            .timestamp_millis_opt(millis)
+            .single()
+            .map(|timestamp| timestamp.with_timezone(offset)),
+        None => Local
+            .timestamp_millis_opt(millis)
+            .single()
+            .map(|timestamp| timestamp.fixed_offset()),
+    }
+}
+
+fn client_timezone_offset(timezone_offset_minutes: Option<i32>) -> Option<FixedOffset> {
+    let minutes = timezone_offset_minutes?;
+    if !(-14 * 60..=14 * 60).contains(&minutes) {
+        return None;
+    }
+    FixedOffset::east_opt(-minutes * 60)
+}
+
+fn now_with_entry_timezone(client_offset: Option<&FixedOffset>) -> chrono::DateTime<FixedOffset> {
+    match client_offset {
+        Some(offset) => Utc::now().with_timezone(offset),
+        None => Local::now().fixed_offset(),
+    }
 }
 
 fn entry_already_contains_body(
@@ -1801,8 +1850,11 @@ mod tests {
 
     #[test]
     fn entry_timestamp_prefers_client_created_at() {
-        let timestamp =
-            entry_timestamp(Some("2026-06-04T09:08:07+08:00"), Some("1780000000000-old"));
+        let timestamp = entry_timestamp(
+            Some("2026-06-04T09:08:07+08:00"),
+            Some("1780000000000-old"),
+            None,
+        );
 
         assert_eq!(
             timestamp.timestamp_millis(),
@@ -1813,8 +1865,27 @@ mod tests {
     }
 
     #[test]
+    fn entry_timestamp_applies_client_timezone_offset_to_utc_created_at() {
+        let timestamp = entry_timestamp(Some("2026-06-04T16:30:00.000Z"), None, Some(-480));
+
+        assert_eq!(
+            timestamp.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-06-05 00:30"
+        );
+        assert_eq!(timestamp.offset().local_minus_utc(), 8 * 60 * 60);
+    }
+
+    #[test]
+    fn entry_timestamp_applies_client_timezone_offset_to_sync_id() {
+        let timestamp = entry_timestamp(None, Some("1780527607000-old"), Some(-480));
+
+        assert_eq!(timestamp.timestamp_millis(), 1_780_527_607_000);
+        assert_eq!(timestamp.offset().local_minus_utc(), 8 * 60 * 60);
+    }
+
+    #[test]
     fn entry_timestamp_uses_sync_id_for_legacy_outbox_items() {
-        let timestamp = entry_timestamp(None, Some("1780527607000-old"));
+        let timestamp = entry_timestamp(None, Some("1780527607000-old"), None);
 
         assert_eq!(timestamp.timestamp_millis(), 1_780_527_607_000);
     }

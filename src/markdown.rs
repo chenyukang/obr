@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use chrono::Local;
+use chrono::{DateTime, FixedOffset, Local};
 use notify::{
     Config as NotifyConfig, Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -575,7 +575,7 @@ pub(crate) fn save_data_url_image(
     vault: &Path,
     image_dir: &Path,
     image: &str,
-    now: &chrono::DateTime<Local>,
+    now: &DateTime<FixedOffset>,
 ) -> Result<String> {
     let (meta, data) = image
         .split_once(',')
@@ -595,7 +595,7 @@ pub(crate) fn save_image_bytes(
     image_dir: &Path,
     bytes: &[u8],
     mime: &str,
-    now: &chrono::DateTime<Local>,
+    now: &DateTime<FixedOffset>,
 ) -> Result<String> {
     let ext = match mime {
         "image/jpeg" | "jpeg" | "jpg" => "jpg",
