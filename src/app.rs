@@ -1,4 +1,10 @@
-use std::{fs, net::SocketAddr, process::Command, sync::Arc, time::Instant};
+use std::{
+    fs,
+    net::SocketAddr,
+    process::Command,
+    sync::{Arc, Mutex, TryLockError},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -45,6 +51,7 @@ pub(crate) struct AppState {
     pub(crate) config: Config,
     pub(crate) data_dir: std::path::PathBuf,
     pub(crate) login_limiter: LoginLimiter,
+    git_sync_lock: Mutex<()>,
     pub(crate) webauthn: Arc<Webauthn>,
     pub(crate) passkey_store: Arc<PasskeyStore>,
     pub(crate) markdown_index: Arc<MarkdownIndex>,
@@ -53,6 +60,7 @@ pub(crate) struct AppState {
 
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
 const DATA_DIR: &str = "data";
+const VAULT_GIT_PULL_INTERVAL: Duration = Duration::from_secs(2 * 60);
 const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
     "default-src 'self'; ",
     "script-src 'self'; ",
@@ -210,6 +218,7 @@ async fn serve() -> Result<()> {
         config,
         data_dir,
         login_limiter: LoginLimiter::default(),
+        git_sync_lock: Mutex::new(()),
         webauthn,
         passkey_store: Arc::new(passkey_store),
         markdown_index: Arc::new(markdown_index),
@@ -218,6 +227,7 @@ async fn serve() -> Result<()> {
     if let Some(rss_reader) = state.rss_reader.clone() {
         rss_reader.spawn_refresh_loop();
     }
+    state.clone().spawn_git_pull_loop();
     let app = router(Arc::clone(&state), session_layer);
 
     let listener = TcpListener::bind(listen).await?;
@@ -444,6 +454,82 @@ fn is_pdf_attachment_path(path: &str) -> bool {
 }
 
 impl AppState {
+    fn spawn_git_pull_loop(self: Arc<Self>) {
+        if !self.config.auto_git_sync {
+            return;
+        }
+        tokio::spawn(async move {
+            self.clone().try_git_pull_in_background().await;
+            let mut interval = tokio::time::interval(VAULT_GIT_PULL_INTERVAL);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                self.clone().try_git_pull_in_background().await;
+            }
+        });
+    }
+
+    async fn try_git_pull_in_background(self: Arc<Self>) {
+        let result = tokio::task::spawn_blocking(move || self.try_git_pull_if_clean()).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => warn!(error = %err, "vault git pull failed"),
+            Err(err) => warn!(error = %err, "vault git pull task failed"),
+        }
+    }
+
+    fn try_git_pull_if_clean(&self) -> Result<()> {
+        let _guard = match self.git_sync_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => {
+                info!("vault git pull skipped because another git sync is running");
+                return Ok(());
+            }
+            Err(TryLockError::Poisoned(_)) => bail!("vault git sync lock poisoned"),
+        };
+        if !self.config.vault_path.join(".git").exists() {
+            info!("vault git pull skipped because vault is not a git repository");
+            return Ok(());
+        }
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&self.config.vault_path)
+            .output()
+            .context("check vault git status")?;
+        if !status.status.success() {
+            bail!(
+                "git status exited with {}: {}",
+                status.status,
+                String::from_utf8_lossy(&status.stderr).trim()
+            );
+        }
+        if !status.stdout.is_empty() {
+            info!("vault git pull skipped because vault has uncommitted changes");
+            return Ok(());
+        }
+        let output = Command::new("git")
+            .args(["pull", "--ff-only"])
+            .current_dir(&self.config.vault_path)
+            .output()
+            .context("pull vault git updates")?;
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let summary = stdout.trim();
+            if summary.is_empty() {
+                info!("vault git pull completed");
+            } else {
+                info!(summary, "vault git pull completed");
+            }
+            Ok(())
+        } else {
+            bail!(
+                "git pull --ff-only exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        }
+    }
+
     pub(crate) fn login_limiter_key(&self, username: &str) -> String {
         if username == self.config.username {
             "configured-user".to_string()
@@ -456,6 +542,13 @@ impl AppState {
         if !self.config.auto_git_sync {
             return;
         }
+        let _guard = match self.git_sync_lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                warn!("vault git sync skipped because lock is poisoned");
+                return;
+            }
+        };
         let commands: &[&[&str]] = &[&["add", "."], &["commit", "-m", "update"], &["push"]];
         for args in commands {
             match Command::new("git")
