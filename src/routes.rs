@@ -1080,7 +1080,6 @@ fn normalize_markdown_text(value: &str) -> String {
 }
 
 fn read_page_content(state: &AppState, query: PageQuery) -> AppResult<Option<(String, String)>> {
-    state.maybe_git_pull();
     let requested = match query.query_type.as_deref() {
         Some("rand") => match state.markdown_index.random_file()? {
             Some(path) => path,
@@ -1107,8 +1106,6 @@ pub(crate) async fn search(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Response> {
-    state.maybe_git_pull();
-
     let keyword = query.keyword.unwrap_or_default();
     let page = query.page.unwrap_or_default();
     let results = state.markdown_index.search_page(&keyword, page)?;

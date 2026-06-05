@@ -452,19 +452,6 @@ impl AppState {
         }
     }
 
-    pub(crate) fn maybe_git_pull(&self) {
-        if !self.config.auto_git_sync {
-            return;
-        }
-        if let Err(err) = Command::new("git")
-            .arg("pull")
-            .current_dir(&self.config.vault_path)
-            .status()
-        {
-            warn!("git pull failed to start: {err}");
-        }
-    }
-
     pub(crate) fn maybe_git_sync(&self) {
         if !self.config.auto_git_sync {
             return;
