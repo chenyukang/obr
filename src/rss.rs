@@ -50,6 +50,11 @@ const RSS_AI_BACKGROUND_INTERVAL: Duration = Duration::from_secs(30);
 const RSS_AI_RETRY_BASE_MINUTES: i64 = 15;
 const RSS_AI_RATE_LIMIT_RETRY_MINUTES: i64 = 60;
 const RSS_AI_RETRY_MAX_MINUTES: i64 = 24 * 60;
+const RSS_EMAIL_BODY_SELECTORS: &[&str] = &[
+    "td.post-content",
+    ".post-content",
+    "td[class~='post-content']",
+];
 const ARTICLE_FALLBACK_SELECTORS: &[&str] = &[
     "article",
     "main article",
@@ -3213,11 +3218,76 @@ fn render_rss_display_html(
     item_id: &str,
     base_url: &str,
 ) -> String {
-    if let Some(source_html) = source_html.filter(|html| !html.trim().is_empty()) {
-        return normalize_rss_display_html(source_html, base_url);
+    let source_html = source_html.filter(|html| !html.trim().is_empty());
+    let source_html_is_email_shell = source_html.is_some_and(looks_like_html_email_source);
+    if let Some(source_html) = source_html {
+        if !source_html_is_email_shell {
+            return normalize_rss_display_html(source_html, base_url);
+        }
+        if let Some(article_html) = extract_rss_email_body_html(source_html) {
+            return normalize_rss_display_html(&article_html, base_url);
+        }
     }
-    let html = render_markdown_html_for_file(content_markdown, &format!("rss/{item_id}.md"));
+
+    let cleaned_markdown;
+    let display_markdown = if source_html_is_email_shell {
+        cleaned_markdown = clean_rss_email_shell_display_markdown(content_markdown);
+        cleaned_markdown.as_str()
+    } else {
+        content_markdown
+    };
+    let html = render_markdown_html_for_file(display_markdown, &format!("rss/{item_id}.md"));
     normalize_rss_display_html(&html, base_url)
+}
+
+fn extract_rss_email_body_html(html: &str) -> Option<String> {
+    let document = Html::parse_document(html);
+    let mut best: Option<(usize, String)> = None;
+    for selector in RSS_EMAIL_BODY_SELECTORS {
+        let Ok(selector) = Selector::parse(selector) else {
+            continue;
+        };
+        for element in document.select(&selector) {
+            let element_html = element.inner_html();
+            let markdown = markup_to_markdown(&element_html, "text/html");
+            let text_len = article_markdown_text_len(&markdown);
+            if text_len == 0 {
+                continue;
+            }
+            let replace = best
+                .as_ref()
+                .map(|(best_len, _)| text_len > *best_len)
+                .unwrap_or(true);
+            if replace {
+                best = Some((text_len, element_html));
+            }
+        }
+    }
+    best.map(|(_, html)| html)
+}
+
+fn looks_like_html_email_source(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    html.contains("SPACING TO AVOID BODY TEXT")
+        || html.contains("Outlook doesn't respect max-width")
+        || html.contains("END CENTERED WHITE CONTAINER")
+        || lower.contains("data-testid=\"email-preview-body\"")
+        || lower.contains("class=\"preheader\"")
+        || lower.contains("email.ghost.")
+        || lower.contains("mailgun.substack.com/api/v1/email/open")
+}
+
+fn clean_rss_email_shell_display_markdown(markdown: &str) -> String {
+    let mut lines = Vec::new();
+    for line in markdown.lines() {
+        let cleaned = clean_email_markdown_line(line);
+        if cleaned.trim().is_empty() {
+            lines.push(String::new());
+        } else if !should_drop_email_markdown_line(&cleaned) {
+            lines.push(cleaned);
+        }
+    }
+    compact_markdown_blank_lines(lines)
 }
 
 fn normalize_rss_display_html(html: &str, base_url: &str) -> String {
@@ -3508,7 +3578,11 @@ fn clean_email_markdown_cell(cell: &str) -> String {
 }
 
 fn clean_email_markdown_line(line: &str) -> String {
-    decode_email_markdown_entities(line)
+    let decoded = decode_email_markdown_entities(line);
+    if is_email_tracking_markdown_image_line(&decoded) {
+        return String::new();
+    }
+    decoded
         .replace("\\|", "|")
         .replace("在浏览器中打开", "")
         .split_whitespace()
@@ -3552,6 +3626,17 @@ fn should_drop_email_markdown_line(line: &str) -> bool {
         || trimmed
             .chars()
             .all(|ch| ch.is_whitespace() || is_email_preview_filler(ch))
+}
+
+fn is_email_tracking_markdown_image_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("![](") {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("email.ghost.")
+        || lower.contains("mailgun.substack.com/api/v1/email/open")
+        || (lower.contains("email.mg") && lower.contains("/o/"))
 }
 
 fn is_email_preview_filler(ch: char) -> bool {
@@ -4245,6 +4330,28 @@ mod tests {
     }
 
     #[test]
+    fn markup_to_markdown_drops_email_tracking_preheader() {
+        let markdown = markup_to_markdown(
+            r#"
+            <!-- SPACING TO AVOID BODY TEXT BEING DUPLICATED IN PREVIEW TEXT -->
+            <img width="1" height="1" alt="" src="https://email.ghost.example.test/o/track">
+            <span class="preheader">Hidden preview text</span>
+            <table>
+              <tr>
+                <td><!-- Outlook doesn't respect max-width so we need an extra centered table --></td>
+                <td>Visible body</td>
+              </tr>
+            </table>
+            "#,
+            "html",
+        );
+
+        assert!(markdown.contains("Visible body"));
+        assert!(!markdown.contains("Hidden preview text"));
+        assert!(!markdown.contains("email.ghost"));
+    }
+
+    #[test]
     fn normalize_markdown_cleans_broken_numbered_heading_bold() {
         let markdown = normalize_markdown(concat!(
             "## **1.\u{00a0}**[**What would you do?**](https://example.test/story)\n",
@@ -4419,6 +4526,95 @@ Body
         ));
         assert!(!html.contains("Fallback"));
         assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn render_rss_display_html_extracts_email_post_content() {
+        let html = render_rss_display_html(
+            Some(
+                r#"
+                <!doctype html>
+                <html>
+                    <body data-testid="email-preview-body">
+                        <img width="1" height="1" alt="" src="https://email.ghost.example.test/o/track">
+                        <span class="preheader">Hidden preview text</span>
+                        <!-- SPACING TO AVOID BODY TEXT BEING DUPLICATED IN PREVIEW TEXT -->
+                        <table><tr><td><a href="https://example.test/open">在浏览器中打开</a></td></tr></table>
+                        <table>
+                            <tr>
+                                <td class="post-content">
+                                    <h2><a href="/story?x=1&amp;y=2">1. Sell the Truth</a></h2>
+                                    <p>推荐语：正文来自邮件主体。</p>
+                                    <blockquote><p>金句：真实不用记住自己编过什么。</p></blockquote>
+                                    <script>alert(1)</script>
+                                </td>
+                            </tr>
+                        </table>
+                        <p><a href="https://kill-the-newsletter.com/feeds/example">Kill the Newsletter! feed settings</a></p>
+                    </body>
+                </html>
+                "#,
+            ),
+            "Fallback **markdown**",
+            "item-id",
+            "https://example.test/posts/base/",
+        );
+
+        assert!(html.contains("<h2>"));
+        assert!(html.contains("1. Sell the Truth"));
+        assert!(html.contains(r#"href="https://example.test/story?x=1&amp;y=2""#));
+        assert!(html.contains("正文来自邮件主体"));
+        assert!(html.contains("真实不用记住"));
+        assert!(!html.contains("Fallback"));
+        assert!(!html.contains("Hidden preview text"));
+        assert!(!html.contains("email.ghost"));
+        assert!(!html.contains("在浏览器中打开"));
+        assert!(!html.contains("Kill the Newsletter"));
+        assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn render_rss_display_html_ignores_email_shell_source_html() {
+        let html = render_rss_display_html(
+            Some(
+                r#"
+                <!doctype html>
+                <html>
+                    <body data-testid="email-preview-body">
+                        <img width="1" height="1" alt="" src="https://email.ghost.example.test/o/track">
+                        <span class="preheader">Hidden preview text</span>
+                        <!-- SPACING TO AVOID BODY TEXT BEING DUPLICATED IN PREVIEW TEXT -->
+                        <table><tr><td><a href="https://example.test/open">在浏览器中打开</a></td></tr></table>
+                        <table><tr><td><p>Template-only body should not render.</p></td></tr></table>
+                        <p><a href="https://kill-the-newsletter.com/feeds/example">Kill the Newsletter! feed settings</a></p>
+                    </body>
+                </html>
+                "#,
+            ),
+            r#"![](https://email.ghost.example.test/o/track) Hidden preview text
+
+把真话卖出去
+
+1. Sell the Truth
+
+推荐语：正文来自清理后的 Markdown
+
+评论
+
+[Kill the Newsletter! feed settings](https://kill-the-newsletter.com/feeds/example)
+"#,
+            "item-id",
+            "https://example.test/posts/base/",
+        );
+
+        assert!(html.contains("把真话卖出去"));
+        assert!(html.contains("正文来自清理后的 Markdown"));
+        assert!(!html.contains("Template-only body"));
+        assert!(!html.contains("Hidden preview text"));
+        assert!(!html.contains("email.ghost"));
+        assert!(!html.contains("在浏览器中打开"));
+        assert!(!html.contains("Kill the Newsletter"));
+        assert!(!html.contains("评论"));
     }
 
     #[test]

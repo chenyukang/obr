@@ -299,7 +299,17 @@ const sandbox = {
       json: () => Promise.resolve(json),
     });
   },
-  FormData: class FormData {},
+  FormData: class FormData {
+    constructor() {
+      this.fields = [];
+    }
+    append(name, value, fileName) {
+      this.fields.push([name, value, fileName]);
+    }
+    get(name) {
+      return this.fields.find(([field]) => field === name)?.[1] ?? null;
+    }
+  },
   URLSearchParams,
   window: {
     innerHeight: 700,
@@ -378,6 +388,7 @@ this.__obrTest = {
   rssDetailBodyHtml,
   rssAiSummaryHtml,
   rssAiEnrichmentErrorHtml,
+  friendlyRssAiErrorMessage,
   renderRssSummaryPending,
   clearRssSummaryPending,
   renderRssTranslationPending,
@@ -388,10 +399,14 @@ this.__obrTest = {
   toggleRssDetailActions,
   handleRssSecondaryAction,
   updateRssDetailTopbarVisibility,
+  shouldRouteBackToRssList,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
   updateRssSearchClear,
+  entryPayloadForSync,
+  entryFormData,
+  queueOfflineMutation,
 };`,
   sandbox,
 );
@@ -436,6 +451,7 @@ const {
   rssDetailBodyHtml,
   rssAiSummaryHtml,
   rssAiEnrichmentErrorHtml,
+  friendlyRssAiErrorMessage,
   renderRssSummaryPending,
   clearRssSummaryPending,
   renderRssTranslationPending,
@@ -446,10 +462,14 @@ const {
   toggleRssDetailActions,
   handleRssSecondaryAction,
   updateRssDetailTopbarVisibility,
+  shouldRouteBackToRssList,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
   updateRssSearchClear,
+  entryPayloadForSync,
+  entryFormData,
+  queueOfflineMutation,
 } = sandbox.__obrTest;
 
 function assertSource(expected) {
@@ -986,6 +1006,7 @@ function assertRssDetailBackTarget() {
   const previousView = state.view;
   const previousFile = state.currentFile;
   const previousListView = state.lastListView;
+  const previousHistoryIndex = state.appHistoryIndex;
 
   try {
     state.view = "page";
@@ -994,15 +1015,21 @@ function assertRssDetailBackTarget() {
     assert.strictEqual(isRssDetailPage(), true);
 
     state.lastListView = "find";
-    assert.strictEqual(isRssDetailPage(), false);
+    assert.strictEqual(isRssDetailPage(), true);
+
+    state.appHistoryIndex = 3;
+    assert.strictEqual(shouldRouteBackToRssList({ historyIndex: 2 }), true);
+    assert.strictEqual(shouldRouteBackToRssList({ historyIndex: 4 }), false);
 
     state.lastListView = "rss";
     state.currentFile = "Posts/welcome";
     assert.strictEqual(isRssDetailPage(), false);
+    assert.strictEqual(shouldRouteBackToRssList({ historyIndex: 2 }), false);
   } finally {
     state.view = previousView;
     state.currentFile = previousFile;
     state.lastListView = previousListView;
+    state.appHistoryIndex = previousHistoryIndex;
   }
 }
 
@@ -1111,11 +1138,14 @@ function assertRssAiSummaryHtml() {
     ai_summary_model: "deepseek-v4-flash",
   });
 
-  assert(html.includes('<details class="rss-ai-summary">'));
-  assert(!html.includes("<details open"));
+  assert(html.includes('<details class="rss-ai-summary" open>'));
   assert(html.includes("中文总结"));
   assert(html.includes("deepseek-v4-flash"));
   assert(html.includes("第一行<br>第二行 &lt;script&gt;"));
+
+  const closedHtml = rssAiSummaryHtml({ ai_summary_zh: "已有总结" }, { open: false });
+  assert(closedHtml.includes('<details class="rss-ai-summary">'));
+  assert(!closedHtml.includes('<details class="rss-ai-summary" open>'));
 
   const openHtml = rssAiSummaryHtml({ ai_summary_zh: "新生成总结" }, { open: true });
   assert(openHtml.includes('<details class="rss-ai-summary" open>'));
@@ -1128,6 +1158,15 @@ function assertRssAiSummaryHtml() {
   assert(enrichmentErrorHtml.includes("自动总结/翻译失败"));
   assert(enrichmentErrorHtml.includes("HTTP 429 &lt;limit&gt;"));
   assert(enrichmentErrorHtml.includes("下次自动重试"));
+  const emptyErrorHtml = rssAiEnrichmentErrorHtml({
+    ai_enrichment_error: "RSS AI enrichment returned no content",
+  });
+  assert(emptyErrorHtml.includes("DeepSeek returned an empty response. Try again later."));
+  assert(!emptyErrorHtml.includes("returned no content"));
+  assert.strictEqual(
+    friendlyRssAiErrorMessage("RSS AI summary returned empty content"),
+    "DeepSeek returned an empty response. Try again later.",
+  );
 
   const hnLinksHtml = rssDetailExternalLinksHtml({
     url: "https://example.test/post",
@@ -1422,6 +1461,41 @@ function assertRssSearchDisclosure() {
   assert.strictEqual(rssSearchToggle.focused, true);
 }
 
+function assertEntryOutboxPreservesCreatedAt() {
+  const legacy = entryPayloadForSync({
+    type: "entry",
+    payload: {
+      sync_id: "1780527607000-legacy",
+      page: "",
+      links: "",
+      text: "queued before upgrade",
+      image: "",
+    },
+    createdAt: 1780527607000,
+  });
+  assert.strictEqual(legacy.created_at, new Date(1780527607000).toISOString());
+
+  const queued = queueOfflineMutation("entry", {
+    page: "",
+    links: "",
+    text: "new offline memo",
+    image: "",
+  });
+  assert(queued.payload.sync_id);
+  assert(queued.payload.created_at);
+  assert(!Number.isNaN(Date.parse(queued.payload.created_at)));
+
+  const formData = entryFormData({
+    sync_id: "id-1",
+    created_at: "2026-06-04T01:02:03.000Z",
+    page: "",
+    links: "",
+    text: "memo",
+  });
+  assert.strictEqual(formData.get("sync_id"), "id-1");
+  assert.strictEqual(formData.get("created_at"), "2026-06-04T01:02:03.000Z");
+}
+
 (async () => {
   await assertRssMarkReadFromList();
   assertRssMarkReadLocalCache();
@@ -1439,6 +1513,7 @@ function assertRssSearchDisclosure() {
   assertRssSummaryLoadingState();
   assertRssSummaryFocusUsesStickyOffset();
   assertRssSearchDisclosure();
+  assertEntryOutboxPreservesCreatedAt();
 })()
   .then(() => {
     console.log("editor and RSS regression tests passed");

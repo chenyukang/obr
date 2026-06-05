@@ -506,6 +506,7 @@ function currentAppHistoryEntry() {
 async function handleAppPopState(event) {
   const target = event.state;
   if (!target?.obr) return;
+  const routeBackToRssList = shouldRouteBackToRssList(target);
 
   if (!(await prepareToLeavePageEditor())) {
     pushAppHistory(currentAppHistoryEntry());
@@ -516,6 +517,10 @@ async function handleAppPopState(event) {
   try {
     if (Number.isFinite(target.historyIndex)) {
       state.appHistoryIndex = target.historyIndex;
+    }
+    if (routeBackToRssList) {
+      await showRssListFromDetail();
+      return;
     }
     if (target.view === "page" && target.file) {
       if (target.file.startsWith("rss:")) {
@@ -1008,21 +1013,28 @@ function writeOutbox(items) {
   updateConnectionStatusLabel();
 }
 
-function newOutboxId() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+function newOutboxId(timestamp = Date.now()) {
+  return `${timestamp}-${Math.random().toString(36).slice(2)}`;
 }
 
 function queueOfflineMutation(type, payload) {
   const items = readOutbox();
-  const id = payload.sync_id || newOutboxId();
+  const now = Date.now();
+  const id = payload.sync_id || newOutboxId(now);
   const queuedPayload =
-    type === "entry" && !payload.sync_id ? { ...payload, sync_id: id } : payload;
+    type === "entry"
+      ? {
+          ...payload,
+          sync_id: id,
+          created_at: payload.created_at || new Date(now).toISOString(),
+        }
+      : payload;
   const item = {
     id,
     type,
     payload: queuedPayload,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
+    createdAt: now,
+    updatedAt: now,
     attempts: 0,
     status: "pending",
     error: "",
@@ -1452,26 +1464,27 @@ function errorMessage(error) {
 
 async function syncOutboxItem(item, options = {}) {
   if (item.type === "entry") {
-    const imageBlob = item.payload.image ? dataUrlToBlob(item.payload.image) : null;
+    const payload = entryPayloadForSync(item);
+    const imageBlob = payload.image ? dataUrlToBlob(payload.image) : null;
     const response = imageBlob
       ? await request("/api/entry/multipart", {
           method: "POST",
-          body: entryFormData(item.payload, imageBlob),
+          body: entryFormData(payload, imageBlob),
           signal: options.signal,
           timeoutMs: ENTRY_SYNC_TIMEOUT_MS,
           timeoutMessage: "Upload timed out. Draft kept.",
         })
       : await request("/api/entry", {
           method: "POST",
-          body: JSON.stringify(item.payload),
+          body: JSON.stringify(payload),
           signal: options.signal,
           timeoutMs: ENTRY_SYNC_TIMEOUT_MS,
           timeoutMessage: "Upload timed out. Draft kept.",
         });
     const text = await response.text();
     if (text !== "ok") throw new Error(text);
-    showToast(item.payload.image ? "Image memo synced." : "Memo synced.");
-    if (item.payload.page === "todo" && state.view === "todo") {
+    showToast(payload.image ? "Image memo synced." : "Memo synced.");
+    if (payload.page === "todo" && state.view === "todo") {
       await loadTodo({ renderCache: false });
     }
     return;
@@ -1505,6 +1518,17 @@ async function syncOutboxItem(item, options = {}) {
   }
 
   throw new Error(`Unknown offline item: ${item.type}`);
+}
+
+function entryPayloadForSync(item) {
+  const payload = item.payload || {};
+  if (payload.created_at) return payload;
+  const createdAt = Number(item.createdAt);
+  if (!Number.isFinite(createdAt) || createdAt <= 0) return payload;
+  return {
+    ...payload,
+    created_at: new Date(createdAt).toISOString(),
+  };
 }
 
 function readJson(key, fallback) {
@@ -2026,8 +2050,10 @@ async function saveEntry() {
   const image = state.image;
   formatTextareaCjkSpacing(el("entry-text"));
   persistDraft();
+  const createdAt = Date.now();
   const payload = {
-    sync_id: newOutboxId(),
+    sync_id: newOutboxId(createdAt),
+    created_at: new Date(createdAt).toISOString(),
     page: el("entry-page").value,
     links: el("entry-links").value,
     text: el("entry-text").value,
@@ -2055,6 +2081,7 @@ async function saveEntry() {
 function entryFormData(payload, imageBlob = null) {
   const formData = new FormData();
   if (payload.sync_id) formData.append("sync_id", payload.sync_id);
+  if (payload.created_at) formData.append("created_at", payload.created_at);
   formData.append("page", payload.page);
   formData.append("links", payload.links);
   formData.append("text", payload.text);
@@ -3009,7 +3036,7 @@ function renderRssDetailPage(item, options = {}) {
   `;
   showPage(
     item.title || "Untitled",
-    `${metaHtml}${rssAiSummaryHtml(item, { open: Boolean(options.expandAiSummary) })}${rssAiEnrichmentErrorHtml(item)}${rssDetailBodyHtml(item, { openTranslation: Boolean(options.expandAiTranslation) })}`,
+    `${metaHtml}${rssAiSummaryHtml(item, { open: options.expandAiSummary })}${rssAiEnrichmentErrorHtml(item)}${rssDetailBodyHtml(item, { openTranslation: Boolean(options.expandAiTranslation) })}`,
     "rss",
     {
       ...options,
@@ -3057,7 +3084,7 @@ function rssAiSummaryHtml(item, options = {}) {
   if (!summary) return "";
   const model = (item?.ai_summary_model || "").trim();
   const meta = model ? `<span>${escapeHtml(model)}</span>` : "";
-  const openAttr = options.open ? " open" : "";
+  const openAttr = options.open === false ? "" : " open";
   return `
     <details class="rss-ai-summary"${openAttr}>
       <summary><strong>中文总结</strong>${meta}</summary>
@@ -3067,7 +3094,7 @@ function rssAiSummaryHtml(item, options = {}) {
 }
 
 function rssAiEnrichmentErrorHtml(item) {
-  const message = (item?.ai_enrichment_error || "").trim();
+  const message = friendlyRssAiErrorMessage(item?.ai_enrichment_error || "");
   if (!message) return "";
   const retryAt = formatTime(item?.ai_enrichment_next_attempt_at);
   const retryHtml = retryAt
@@ -3115,11 +3142,20 @@ function rssTranslationMarkdownHtml(markdown) {
 }
 
 function readableRssAiError(error, fallback) {
-  const message = errorMessage(error).trim();
+  const message = friendlyRssAiErrorMessage(errorMessage(error));
+  if (!message) return fallback;
+  return message;
+}
+
+function friendlyRssAiErrorMessage(message) {
+  message = String(message || "").trim();
   if (/timeout|timed out|operation timed out/i.test(message)) {
     return "DeepSeek did not respond in time. Try again later.";
   }
-  return message || fallback;
+  if (/(no content returned|returned no content|returned empty content|empty response)/i.test(message)) {
+    return "DeepSeek returned an empty response. Try again later.";
+  }
+  return message;
 }
 
 async function summarizeCurrentRssItem(button) {
@@ -3952,6 +3988,7 @@ async function addTodo() {
   const text = el("todo-input").value.trim();
   if (!text) return;
   const payload = {
+    created_at: new Date().toISOString(),
     page: "todo",
     links: "",
     text,
@@ -5380,10 +5417,13 @@ async function goBackToLastList() {
 }
 
 function isRssDetailPage() {
+  return state.view === "page" && state.currentFile?.startsWith("rss:");
+}
+
+function shouldRouteBackToRssList(target) {
   return (
-    state.view === "page" &&
-    state.lastListView === "rss" &&
-    state.currentFile?.startsWith("rss:")
+    isRssDetailPage() &&
+    (!Number.isFinite(target?.historyIndex) || target.historyIndex < state.appHistoryIndex)
   );
 }
 

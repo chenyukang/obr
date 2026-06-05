@@ -19,7 +19,7 @@ use axum::{
     },
     response::{Html, IntoResponse, Response},
 };
-use chrono::{Local, Utc};
+use chrono::{Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 use tracing::warn;
@@ -96,6 +96,7 @@ pub(crate) struct MarkdownBlocksRequest {
 #[derive(Deserialize)]
 pub(crate) struct EntryRequest {
     sync_id: Option<String>,
+    created_at: Option<String>,
     page: String,
     links: String,
     text: String,
@@ -1469,8 +1470,8 @@ pub(crate) async fn post_entry(
     State(state): State<Arc<AppState>>,
     Json(body): Json<EntryRequest>,
 ) -> AppResult<Response> {
-    let now = Local::now();
-    let date = now.format("%Y-%m-%d").to_string();
+    let entry_time = entry_timestamp(body.created_at.as_deref(), body.sync_id.as_deref());
+    let date = entry_time.format("%Y-%m-%d").to_string();
     let dedupe = body
         .sync_id
         .as_deref()
@@ -1485,12 +1486,13 @@ pub(crate) async fn post_entry(
             &state.config.vault_path,
             &state.config.image_dir,
             &body.image,
-            &now,
+            &entry_time,
         )?)
     };
     write_entry(
         state,
         EntryPayload {
+            entry_time,
             dedupe,
             page: body.page,
             links: body.links,
@@ -1504,8 +1506,8 @@ pub(crate) async fn post_entry_multipart(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> AppResult<Response> {
-    let now = Local::now();
-    let date = now.format("%Y-%m-%d").to_string();
+    let mut sync_id = String::new();
+    let mut created_at = String::new();
     let mut page = String::new();
     let mut links = String::new();
     let mut text = String::new();
@@ -1517,13 +1519,10 @@ pub(crate) async fn post_entry_multipart(
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
             "sync_id" => {
-                dedupe = !field
-                    .text()
-                    .await
-                    .map_err(anyhow::Error::from)?
-                    .trim()
-                    .is_empty()
+                sync_id = field.text().await.map_err(anyhow::Error::from)?;
+                dedupe = !sync_id.trim().is_empty()
             }
+            "created_at" => created_at = field.text().await.map_err(anyhow::Error::from)?,
             "page" => page = field.text().await.map_err(anyhow::Error::from)?,
             "links" => links = field.text().await.map_err(anyhow::Error::from)?,
             "text" => text = field.text().await.map_err(anyhow::Error::from)?,
@@ -1546,6 +1545,8 @@ pub(crate) async fn post_entry_multipart(
         }
     }
 
+    let entry_time = entry_timestamp(Some(&created_at), Some(&sync_id));
+    let date = entry_time.format("%Y-%m-%d").to_string();
     if dedupe && entry_already_contains_body(&state, &page, &links, &text, &date)? {
         return Ok("ok".into_response());
     }
@@ -1556,7 +1557,7 @@ pub(crate) async fn post_entry_multipart(
             &state.config.image_dir,
             &bytes,
             &image_type,
-            &now,
+            &entry_time,
         )?)
     } else {
         None
@@ -1565,6 +1566,7 @@ pub(crate) async fn post_entry_multipart(
     let response = write_entry(
         state,
         EntryPayload {
+            entry_time,
             dedupe,
             page: page.clone(),
             links,
@@ -1576,6 +1578,7 @@ pub(crate) async fn post_entry_multipart(
 }
 
 struct EntryPayload {
+    entry_time: chrono::DateTime<Local>,
     dedupe: bool,
     page: String,
     links: String,
@@ -1597,6 +1600,37 @@ fn normalize_multipart_image_type(content_type: &str, file_name: Option<&str>) -
     }
 }
 
+fn entry_timestamp(created_at: Option<&str>, sync_id: Option<&str>) -> chrono::DateTime<Local> {
+    created_at
+        .and_then(parse_entry_created_at)
+        .or_else(|| sync_id.and_then(parse_entry_sync_id_timestamp))
+        .unwrap_or_else(Local::now)
+}
+
+fn parse_entry_created_at(value: &str) -> Option<chrono::DateTime<Local>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Local))
+}
+
+fn parse_entry_sync_id_timestamp(sync_id: &str) -> Option<chrono::DateTime<Local>> {
+    let millis = sync_id
+        .trim()
+        .split_once('-')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(sync_id)
+        .parse::<i64>()
+        .ok()?;
+    if !(946_684_800_000..4_102_444_800_000).contains(&millis) {
+        return None;
+    }
+    Local.timestamp_millis_opt(millis).single()
+}
+
 fn entry_already_contains_body(
     state: &AppState,
     page: &str,
@@ -1612,9 +1646,8 @@ fn entry_already_contains_body(
 }
 
 fn write_entry(state: Arc<AppState>, body: EntryPayload) -> AppResult<Response> {
-    let now = Local::now();
-    let date = now.format("%Y-%m-%d").to_string();
-    let time = now.format("%H:%M").to_string();
+    let date = body.entry_time.format("%Y-%m-%d").to_string();
+    let time = body.entry_time.format("%H:%M").to_string();
 
     let page = body.page.trim();
     if page.is_empty()
@@ -1752,7 +1785,7 @@ mod tests {
 
     use super::{
         append_rss_annotation_markdown, ensure_image_preview, entry_body_already_exists,
-        new_rss_annotation_markdown, normalize_annotation_text, rel_to_vault,
+        entry_timestamp, new_rss_annotation_markdown, normalize_annotation_text, rel_to_vault,
         resolve_attachment_path, rss_annotation_highlight_count, rss_annotation_item_markdown,
         sanitize_annotation_filename,
     };
@@ -1767,6 +1800,26 @@ mod tests {
         ));
         assert!(!entry_body_already_exists(existing, ""));
         assert!(!entry_body_already_exists(existing, "different"));
+    }
+
+    #[test]
+    fn entry_timestamp_prefers_client_created_at() {
+        let timestamp =
+            entry_timestamp(Some("2026-06-04T09:08:07+08:00"), Some("1780000000000-old"));
+
+        assert_eq!(
+            timestamp.timestamp_millis(),
+            chrono::DateTime::parse_from_rfc3339("2026-06-04T09:08:07+08:00")
+                .unwrap()
+                .timestamp_millis()
+        );
+    }
+
+    #[test]
+    fn entry_timestamp_uses_sync_id_for_legacy_outbox_items() {
+        let timestamp = entry_timestamp(None, Some("1780527607000-old"));
+
+        assert_eq!(timestamp.timestamp_millis(), 1_780_527_607_000);
     }
 
     #[test]
