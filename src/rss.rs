@@ -1995,17 +1995,16 @@ JSON schema:
         let summary_enabled = self.ai_summary.is_some();
         let translation_enabled = self.auto_full_translation_enabled();
         let mut stmt = conn.prepare(
-            "SELECT id
-             FROM items
-             WHERE ai_enrichment_next_attempt_at IS NOT NULL
-               AND ai_enrichment_next_attempt_at <= ?1
-               AND read_at IS NULL
-               AND (
-                 (?2 AND (ai_summary_zh IS NULL OR trim(ai_summary_zh) = ''))
-                 OR (?3 AND (ai_translation_md IS NULL OR trim(ai_translation_md) = ''))
-               )
-             ORDER BY sort_at IS NULL, sort_at DESC, first_seen_at DESC
-             LIMIT 200",
+            r#"SELECT id
+            FROM items
+            WHERE ai_enrichment_next_attempt_at IS NOT NULL
+            AND ai_enrichment_next_attempt_at <= ?1
+            AND (
+                (?2 AND (ai_summary_zh IS NULL OR trim(ai_summary_zh) = ''))
+                OR (?3 AND (ai_translation_md IS NULL OR trim(ai_translation_md) = ''))
+            )
+            ORDER BY sort_at IS NULL, sort_at DESC, first_seen_at DESC
+            LIMIT 200"#,
         )?;
         let rows = stmt.query_map(
             params![now_string(), summary_enabled, translation_enabled],
@@ -2029,9 +2028,6 @@ JSON schema:
     }
 
     fn ai_enrichment_need_for_item(&self, item: &RssItemDetail) -> AiEnrichmentNeed {
-        if item.read_at.is_some() {
-            return AiEnrichmentNeed::default();
-        }
         let missing_summary = item_missing_summary(item);
         let missing_translation = item_missing_translation(item);
         let needs_summary = self.ai_summary.is_some()
@@ -5303,7 +5299,7 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
     }
 
     #[test]
-    fn read_items_are_not_auto_enriched_in_background() -> Result<()> {
+    fn read_items_remain_auto_enriched_in_background() -> Result<()> {
         let (mut reader, root) = test_reader()?;
         reader.ai_summary = Some(AiSummaryConfig {
             api_key: "test-key".to_string(),
@@ -5325,9 +5321,15 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
         let item = reader.get_item(&item_id)?.unwrap();
         assert_eq!(
             reader.ai_enrichment_need_for_item(&item),
-            AiEnrichmentNeed::default()
+            AiEnrichmentNeed {
+                summary: true,
+                translation: true,
+            }
         );
-        assert_eq!(reader.next_pending_ai_enrichment_item_id()?, None);
+        assert_eq!(
+            reader.next_pending_ai_enrichment_item_id()?.as_deref(),
+            Some(item_id.as_str())
+        );
 
         fs::remove_dir_all(root)?;
         Ok(())
