@@ -9,6 +9,7 @@ let rssListHtml = "";
 let rssListWrites = 0;
 let pendingSummaryNode = null;
 let scrolledTo = null;
+let pageRenderBlocks = [];
 const localStore = new Map();
 const sessionStore = new Map();
 const topbarNode = {
@@ -125,7 +126,8 @@ const pageContent = {
     if (selector === "[data-rss-translation-error]") return rssTranslationErrorNode;
     return null;
   },
-  querySelectorAll() {
+  querySelectorAll(selector) {
+    if (selector === ".page-render-block") return pageRenderBlocks;
     return [];
   },
   insertBefore(node, referenceNode) {
@@ -360,6 +362,7 @@ this.__obrTest = {
   editorBlocksPayload,
   editorBlockHtml,
   pageBlocksHtml,
+  setSelectedPageBlock,
   formatTextareaCjkSpacing,
   handlePageBlockEditorActionPointerDown,
   clearPageBlockEditorActionPointer,
@@ -423,6 +426,7 @@ const {
   editorBlocksPayload,
   editorBlockHtml,
   pageBlocksHtml,
+  setSelectedPageBlock,
   formatTextareaCjkSpacing,
   handlePageBlockEditorActionPointerDown,
   clearPageBlockEditorActionPointer,
@@ -552,6 +556,24 @@ assert(editorBlockHtml(state.editorBlocks[1], 1, true).includes('data-editor-blo
 const pageBlocks = pageBlocksHtml(state.editorBlocks);
 assert(pageBlocks.includes('data-page-block-action="edit"'));
 assert(pageBlocks.includes("page-render-block is-empty"));
+assert(!pageBlocks.includes("is-selected"));
+pageRenderBlocks = [0, 1, 2].map((index) => ({
+  dataset: { pageBlockIndex: String(index) },
+  classes: new Set(),
+  classList: {
+    toggle(name, active) {
+      if (active) this.block.classes.add(name);
+      else this.block.classes.delete(name);
+    },
+  },
+}));
+pageRenderBlocks.forEach((block) => {
+  block.classList.block = block;
+});
+setSelectedPageBlock(1);
+assert(!pageRenderBlocks[0].classes.has("is-selected"));
+assert(pageRenderBlocks[1].classes.has("is-selected"));
+assert(!pageRenderBlocks[2].classes.has("is-selected"));
 
 setEditorSource("one\n\n\n\nthree", [
   { source: "one", separator: "\n\n", html: "<p>one</p>" },

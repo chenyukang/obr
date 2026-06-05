@@ -691,7 +691,6 @@ main {
 .page-render-block {
   position: relative;
   min-height: 30px;
-  padding-right: 34px;
 }
 
 .page-render-block + .page-render-block {
@@ -718,7 +717,12 @@ main {
   background: var(--button-bg);
   color: var(--muted);
   padding: 0;
-  opacity: 0.35;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    visibility 120ms ease;
+  visibility: hidden;
 }
 
 .page-block-edit .icon {
@@ -726,10 +730,12 @@ main {
   height: 13px;
 }
 
-.page-render-block:hover .page-block-edit,
+.page-render-block.is-selected .page-block-edit,
 .page-render-block:focus-within .page-block-edit,
 .page-block-edit:focus-visible {
   opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
 }
 
 .page-new-block-button {

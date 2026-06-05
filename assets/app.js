@@ -48,6 +48,7 @@ const state = {
   rssDetailTopbarLastY: 0,
   rssAnnotationQuote: "",
   rssAnnotationSaving: false,
+  selectedPageBlockIndex: null,
   rssRefreshing: false,
   passkeyRegistered: false,
   passwordLoginAllowed: true,
@@ -409,6 +410,13 @@ function bindEvents() {
     if (wiki) {
       event.preventDefault();
       await fetchPage(wiki.dataset.page, state.lastListView);
+      return;
+    }
+
+    const block = event.target.closest(".page-render-block");
+    if (block && el("page-content").contains(block)) {
+      setSelectedPageBlock(Number(block.dataset.pageBlockIndex || 0));
+      return;
     }
   });
 }
@@ -4207,6 +4215,7 @@ function setPageContentHtml(html, options = {}) {
 }
 
 function pageBlocksHtml(blocks) {
+  state.selectedPageBlockIndex = null;
   return blocks
     .map((block, index) => {
       const source = editorBlockText(block);
@@ -4222,6 +4231,18 @@ function pageBlocksHtml(blocks) {
       `;
     })
     .join("");
+}
+
+function setSelectedPageBlock(index) {
+  const content = el("page-content");
+  const selectedIndex = Number.isFinite(index) && index >= 0 ? index : null;
+  state.selectedPageBlockIndex = selectedIndex;
+  content.querySelectorAll(".page-render-block").forEach((block) => {
+    block.classList.toggle(
+      "is-selected",
+      selectedIndex !== null && Number(block.dataset.pageBlockIndex || -1) === selectedIndex,
+    );
+  });
 }
 
 function clearPageOutline() {
