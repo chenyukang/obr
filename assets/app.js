@@ -58,6 +58,8 @@ const state = {
   connectionLastPingAt: 0,
   connectionRetryTimer: 0,
   connectionWindowFocused: true,
+  startupRecoveryPending: false,
+  startupRecoveryInFlight: false,
   entrySaving: false,
   entryImagePreparing: false,
   longPress: null,
@@ -129,8 +131,8 @@ const PING_TIMEOUT_MS = 5000;
 const CONNECTION_HEARTBEAT_MS = 10000;
 const CONNECTION_MIN_PING_GAP_MS = 9000;
 const CONNECTION_RETRY_MS = 5000;
-const STARTUP_VERIFY_TIMEOUT_MS = 1200;
-const AUTH_OPTIONS_TIMEOUT_MS = 1200;
+const STARTUP_VERIFY_TIMEOUT_MS = 4000;
+const AUTH_OPTIONS_TIMEOUT_MS = 4000;
 const IMAGE_DOUBLE_TAP_MS = 340;
 const IMAGE_LIGHTBOX_MIN_SCALE = 1;
 const IMAGE_LIGHTBOX_MAX_SCALE = 4;
@@ -219,16 +221,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   updateEntrySaveState();
   const ok = await verify();
   if (ok) {
+    state.startupRecoveryPending = false;
     await refreshAppConfig();
     showApp();
     showView("day", { updateHistory: false });
     void syncOutbox();
   } else if (canUseOfflineApp()) {
+    state.startupRecoveryPending = true;
     showApp();
     await showOfflineStart();
+    scheduleConnectivityRetry(0);
   } else {
+    state.startupRecoveryPending = !state.connectionOnline;
     await refreshAuthOptions();
     showLogin();
+    if (state.startupRecoveryPending) scheduleConnectivityRetry(0);
   }
 });
 
@@ -657,7 +664,10 @@ async function checkConnectivity(options = {}) {
     });
     const online = response.ok;
     setConnectionStatus(online);
-    if (online && options.sync) void syncOutbox();
+    if (online && options.sync) {
+      void syncOutbox();
+      void recoverOnlineStartup();
+    }
     return online;
   } catch {
     if (isForegroundPage()) {
@@ -685,6 +695,60 @@ function pingUrl() {
     focused: state.connectionWindowFocused ? "1" : "0",
   });
   return `/api/ping?${params}`;
+}
+
+async function recoverOnlineStartup() {
+  if (!state.startupRecoveryPending || state.startupRecoveryInFlight) return;
+  state.startupRecoveryInFlight = true;
+  try {
+    const ok = await verify();
+    if (!ok) {
+      if (state.connectionOnline) {
+        state.startupRecoveryPending = false;
+        await refreshAuthOptions();
+        showLogin();
+      }
+      return;
+    }
+    state.startupRecoveryPending = false;
+    await refreshAppConfig();
+    showApp();
+    showToast("Back online.");
+    await refreshCurrentViewAfterReconnect();
+    void syncOutbox();
+  } catch (error) {
+    console.error(error);
+  } finally {
+    state.startupRecoveryInFlight = false;
+  }
+}
+
+async function refreshCurrentViewAfterReconnect() {
+  if (state.editorMode !== "closed") return;
+  if (state.view === "rss") {
+    await showView("rss", {
+      focusSearch: false,
+      restoreRssLast: true,
+      updateHistory: false,
+    });
+    return;
+  }
+  if (state.view === "todo") {
+    await showView("todo", { updateHistory: false });
+    return;
+  }
+  if (state.view === "find") {
+    await showView("find", { focusSearch: false, updateHistory: false });
+    return;
+  }
+  if (state.view === "page" && state.currentFile) {
+    await fetchPage(state.currentFile, state.lastListView, state.currentHighlightKeyword, {
+      updateHistory: false,
+      saveScroll: false,
+    });
+    return;
+  }
+  await showView("day", { updateHistory: false });
 }
 
 function clientId() {

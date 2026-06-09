@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260606-entry-timezone";
+const CACHE_VERSION = "obr-offline-20260609-startup-reconnect";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = "obr-images-v1";
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260606-entry-timezone",
-  "/assets/app.js?v=20260606-entry-timezone",
+  "/assets/style.css?v=20260609-startup-reconnect",
+  "/assets/app.js?v=20260609-startup-reconnect",
 ];
 
 self.addEventListener("install", (event) => {
@@ -90,7 +90,10 @@ function isPageApi(url) {
     url.pathname === "/api/page" ||
     url.pathname === "/api/page/edit" ||
     url.pathname === "/api/page/source" ||
-    url.pathname === "/api/search"
+    url.pathname === "/api/search" ||
+    url.pathname === "/api/app/config" ||
+    url.pathname === "/api/rss/items" ||
+    /^\/api\/rss\/items\/[^/]+$/.test(url.pathname)
   );
 }
 
