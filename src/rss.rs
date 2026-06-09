@@ -358,16 +358,20 @@ struct DeepSeekThinking<'a> {
 
 #[derive(Deserialize)]
 struct DeepSeekChatResponse {
+    #[serde(default)]
     choices: Vec<DeepSeekChoice>,
 }
 
 #[derive(Deserialize)]
 struct DeepSeekChoice {
     message: DeepSeekResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct DeepSeekResponseMessage {
+    #[serde(default)]
     content: Option<String>,
 }
 
@@ -1539,14 +1543,20 @@ translation_md: {}
         }
         let completion: DeepSeekChatResponse =
             serde_json::from_str(&body).context("parse DeepSeek RSS enrichment response")?;
-        let Some(content) = completion
-            .choices
-            .into_iter()
-            .find_map(|choice| choice.message.content)
-        else {
-            return Ok(None);
+        let content = deepseek_response_content(completion, &body, "DeepSeek RSS enrichment")?;
+        let parsed = parse_ai_enrichment(&content).with_context(|| {
+            format!(
+                "parse DeepSeek RSS enrichment content: {}",
+                truncate_chars(&content, 360)
+            )
+        })?;
+        let Some(parsed) = parsed else {
+            bail!(
+                "DeepSeek RSS enrichment returned no JSON object: {}",
+                truncate_chars(&content, 360)
+            );
         };
-        parse_ai_enrichment(&content)
+        Ok(Some(parsed))
     }
 
     async fn fetch_deepseek_ai_summary_batch(
@@ -1627,14 +1637,20 @@ JSON schema:
         }
         let completion: DeepSeekChatResponse =
             serde_json::from_str(&body).context("parse DeepSeek RSS summary batch response")?;
-        let Some(content) = completion
-            .choices
-            .into_iter()
-            .find_map(|choice| choice.message.content)
-        else {
-            return Ok(HashMap::new());
-        };
-        parse_ai_summary_batch(&content)
+        let content = deepseek_response_content(completion, &body, "DeepSeek RSS summary batch")?;
+        let summaries = parse_ai_summary_batch(&content).with_context(|| {
+            format!(
+                "parse DeepSeek RSS summary batch content: {}",
+                truncate_chars(&content, 360)
+            )
+        })?;
+        if summaries.is_empty() {
+            bail!(
+                "DeepSeek RSS summary batch returned no summaries: {}",
+                truncate_chars(&content, 360)
+            );
+        }
+        Ok(summaries)
     }
 
     async fn fetch_article_content(&self, url: &str) -> Result<ArticleContent> {
@@ -1838,16 +1854,13 @@ JSON schema:
                 Err(err) => {
                     let message = format!("RSS AI summary batch failed: {err:#}");
                     warn!(error = %message, "RSS AI summary batch failed");
-                    for pending in &summary_items {
-                        self.record_item_ai_enrichment_error(&pending.id, &message)?;
-                    }
                 }
             }
         }
 
         for pending in pending {
             let summary_from_batch = summaries.remove(&pending.item.id);
-            let summary_was_batched = summary_batch_ids.contains(&pending.item.id);
+            let summary_was_batched = summary_from_batch.is_some();
             self.process_pending_ai_enrichment_item(
                 pending,
                 summary_from_batch,
@@ -3022,6 +3035,39 @@ fn truncate_chars(value: &str, limit: usize) -> String {
         output.push_str("...");
     }
     output
+}
+
+fn deepseek_response_content(
+    completion: DeepSeekChatResponse,
+    raw_body: &str,
+    context: &str,
+) -> Result<String> {
+    let finish_reasons = completion
+        .choices
+        .iter()
+        .filter_map(|choice| choice.finish_reason.as_deref())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let content = completion
+        .choices
+        .into_iter()
+        .filter_map(|choice| choice.message.content)
+        .map(|content| content.trim().to_string())
+        .find(|content| !content.is_empty());
+    let Some(content) = content else {
+        let finish_reason = if finish_reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" (finish_reason={})", finish_reasons.join(","))
+        };
+        bail!(
+            "{context} returned empty content{finish_reason}; response preview: {}",
+            truncate_chars(raw_body, 360)
+        );
+    };
+    Ok(content)
 }
 
 fn parse_feed_urls(raw: &str) -> Vec<String> {
@@ -4485,6 +4531,47 @@ Body
         );
         assert!(!parsed.contains_key("item-2"));
         Ok(())
+    }
+
+    #[test]
+    fn reads_non_empty_deepseek_content() -> Result<()> {
+        let content = deepseek_response_content(
+            DeepSeekChatResponse {
+                choices: vec![DeepSeekChoice {
+                    message: DeepSeekResponseMessage {
+                        content: Some("  {\"summary_zh\":\"ok\"}\n".to_string()),
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+            },
+            "{}",
+            "DeepSeek test",
+        )?;
+
+        assert_eq!(content, "{\"summary_zh\":\"ok\"}");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_deepseek_content_reports_finish_reason_and_preview() {
+        let err = deepseek_response_content(
+            DeepSeekChatResponse {
+                choices: vec![DeepSeekChoice {
+                    message: DeepSeekResponseMessage {
+                        content: Some(" \n".to_string()),
+                    },
+                    finish_reason: Some("length".to_string()),
+                }],
+            },
+            r#"{"choices":[{"finish_reason":"length","message":{"content":""}}]}"#,
+            "DeepSeek test",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("DeepSeek test returned empty content"));
+        assert!(err.contains("finish_reason=length"));
+        assert!(err.contains("response preview"));
     }
 
     #[test]
