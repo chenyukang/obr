@@ -1,7 +1,9 @@
 use std::{
+    any::Any,
     collections::{HashMap, HashSet},
-    fs,
+    fmt, fs,
     ops::Range,
+    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -1676,8 +1678,10 @@ JSON schema:
             url: Some(url.to_string()),
             ..ExtractOptions::default()
         };
-        let extracted = extract_bytes_with_options(&bytes, &options)
-            .map_err(|err| anyhow!("extract article content: {err}"))?;
+        let extracted = run_panic_safe(
+            || extract_bytes_with_options(&bytes, &options),
+            "extract article content",
+        )?;
         let markdown = extracted
             .content_markdown
             .filter(|markdown| !markdown.trim().is_empty())
@@ -2817,6 +2821,31 @@ fn item_identity(feed_url: &str, entry: &Entry) -> ItemIdentity {
 
 fn should_ai_summarize_rss_item(title: &str, content_markdown: &str) -> bool {
     should_translate_rss_item(title, content_markdown)
+}
+
+fn run_panic_safe<T, E, F>(operation: F, context: &str) -> Result<T>
+where
+    E: fmt::Display,
+    F: FnOnce() -> std::result::Result<T, E>,
+{
+    match panic::catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(anyhow!("{context}: {err}")),
+        Err(payload) => Err(anyhow!(
+            "{context} panicked: {}",
+            panic_payload_message(payload.as_ref())
+        )),
+    }
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "unknown panic"
+    }
 }
 
 fn item_missing_summary(item: &RssItemDetail) -> bool {
@@ -4273,6 +4302,30 @@ mod tests {
         assert_eq!(stable_id("item", "a"), stable_id("item", "a"));
         assert_ne!(stable_id("item", "a"), stable_id("feed", "a"));
         assert_ne!(stable_id("item", "a"), stable_id("item", "b"));
+    }
+
+    #[test]
+    fn panic_safe_article_extraction_turns_panics_into_errors() {
+        let error = run_panic_safe(
+            || -> std::result::Result<&'static str, &'static str> { panic!("broken html parser") },
+            "extract article content",
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("extract article content panicked"));
+        assert!(message.contains("broken html parser"));
+    }
+
+    #[test]
+    fn panic_safe_article_extraction_preserves_library_errors() {
+        let error = run_panic_safe(
+            || -> std::result::Result<&'static str, &'static str> { Err("bad markup") },
+            "extract article content",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "extract article content: bad markup");
     }
 
     #[test]
