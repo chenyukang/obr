@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260622-block-back-scroll";
+const CACHE_VERSION = "obr-offline-20260625-block-save-preview";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = "obr-images-v1";
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260622-block-back-scroll",
-  "/assets/app.js?v=20260622-block-back-scroll",
+  "/assets/style.css?v=20260625-block-save-preview",
+  "/assets/app.js?v=20260625-block-save-preview",
 ];
 
 self.addEventListener("install", (event) => {

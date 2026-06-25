@@ -4539,7 +4539,7 @@ function pageBlocksHtml(blocks) {
     .map((block, index) => {
       const source = editorBlockText(block);
       const emptyClass = source.trim() ? "" : " is-empty";
-      const rendered = block.html || pendingEditorBlockHtml(source);
+      const rendered = editorBlockRenderedHtml(block);
       return `
         <div class="page-render-block${emptyClass}" data-page-block-index="${index}">
           ${rendered}
@@ -5288,9 +5288,15 @@ function editorBlockHtml(block, index, active) {
 }
 
 function editorBlockPreviewHtml(block, index) {
-  const source = editorBlockText(block);
-  const rendered = block.html || pendingEditorBlockHtml(source);
+  const rendered = editorBlockRenderedHtml(block);
   return `${rendered}<button class="editor-block-action editor-block-edit" type="button" data-editor-block-action="edit" data-block-index="${index}" aria-label="Edit block ${index + 1}" title="Edit block">${iconSvg("pencil")}</button>`;
+}
+
+function editorBlockRenderedHtml(block) {
+  const source = editorBlockText(block);
+  if (!source.trim()) return EMPTY_BLOCK_HTML;
+  if (block.html && block.html !== EMPTY_BLOCK_HTML) return block.html;
+  return pendingEditorBlockPreviewHtml(source);
 }
 
 function escapeTextarea(value) {
@@ -5299,13 +5305,16 @@ function escapeTextarea(value) {
 
 function normalizeEditorBlocks(blocks, options = {}) {
   const normalized = Array.isArray(blocks)
-    ? blocks.map((block) => ({
-        source: normalizeEditorText(block?.source || ""),
-        separator: normalizeEditorText(block?.separator || ""),
-        html: typeof block?.html === "string" && block.html
-          ? block.html
-          : EMPTY_BLOCK_HTML,
-      }))
+    ? blocks.map((block) => {
+        const source = normalizeEditorText(block?.source || "");
+        return {
+          source,
+          separator: normalizeEditorText(block?.separator || ""),
+          html: typeof block?.html === "string" && block.html
+            ? block.html
+            : pendingEditorBlockHtml(source),
+        };
+      })
     : [];
   if (normalized.length) return normalized;
   if (options.fallback === false) return [];
@@ -5352,6 +5361,15 @@ function pendingEditorBlockHtml(source) {
   return normalizeEditorText(source).trim()
     ? ""
     : EMPTY_BLOCK_HTML;
+}
+
+function pendingEditorBlockPreviewHtml(source) {
+  const text = normalizeEditorText(source).trim();
+  if (!text) return EMPTY_BLOCK_HTML;
+  return text
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, "<br>")}</p>`)
+    .join("");
 }
 
 function insertEditorBlocks(index, blocks) {

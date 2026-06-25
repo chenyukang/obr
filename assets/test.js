@@ -627,6 +627,7 @@ setEditorSource("one\n\ntwo\n\nthree", [
 replaceEditorBlock(1, "two edited");
 assert.strictEqual(state.editorBlocks[1].html, "");
 assert.strictEqual(pendingEditorBlockHtml("two edited"), "");
+assert(editorBlockHtml(state.editorBlocks[1], 1, false).includes("two edited"));
 assert(!JSON.stringify(state.editorBlocks).includes("Preview updates after editing"));
 state.activeEditorBlock = 2;
 assert.strictEqual(
@@ -811,6 +812,22 @@ activeBlockTextarea = {
 };
 assert.strictEqual(commitActiveEditorBlockForSave(), true);
 assertSource("one\n\nthree");
+
+setEditorSource("one\n\n", [
+  { source: "one", separator: "\n\n", html: "<p>one</p>" },
+  { source: "", separator: "", html: '<p class="editor-preview-empty">Empty block</p>' },
+]);
+state.editorMode = "blocks";
+state.activeEditorBlock = 1;
+activeBlockTextarea = {
+  dataset: { blockIndex: "1" },
+  value: "new block",
+};
+assert.strictEqual(commitActiveEditorBlockForSave(), false);
+assertSource("one\n\nnew block");
+assert(pageBlockEditor.innerHTML.includes("new block"));
+assert(!pageBlockEditor.innerHTML.includes("Empty block"));
+activeBlockTextarea = null;
 
 setEditorSource("one\n\ntwo\n\nthree", [
   { source: "one", separator: "\n\n", html: "<p>one</p>" },
