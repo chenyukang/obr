@@ -257,14 +257,23 @@ const sandbox = {
     },
     createElement(tagName) {
       if (tagName === "template") {
-        return {
-          innerHTML: "",
+        const template = {
+          _innerHTML: "",
           content: {
+            innerHTML: "",
             querySelectorAll() {
               return [];
             },
           },
+          get innerHTML() {
+            return this._innerHTML;
+          },
+          set innerHTML(value) {
+            this._innerHTML = String(value || "");
+            this.content.innerHTML = this._innerHTML;
+          },
         };
+        return template;
       }
       return {
         tagName: tagName.toUpperCase(),
@@ -403,6 +412,8 @@ this.__obrTest = {
   handleRssSecondaryAction,
   updateRssDetailTopbarVisibility,
   shouldRouteBackToRssList,
+  isPageEditorOpen,
+  goBackToLastList,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
@@ -467,6 +478,8 @@ const {
   handleRssSecondaryAction,
   updateRssDetailTopbarVisibility,
   shouldRouteBackToRssList,
+  isPageEditorOpen,
+  goBackToLastList,
   focusRssSummaryTarget,
   setRssSearchOpen,
   toggleRssSearch,
@@ -1024,6 +1037,77 @@ function assertRssResumeState() {
   }
 }
 
+async function assertBackClosesBlockEditorToReadingPage() {
+  const previous = {
+    view: state.view,
+    currentFile: state.currentFile,
+    currentContent: state.currentContent,
+    currentBlocks: state.currentBlocks,
+    editorMode: state.editorMode,
+    editorHidden: pageEditor.hidden,
+    editorShellHidden: elements["page-editor-shell"].hidden,
+    contentHidden: pageContent.hidden,
+    newBlockHidden: elements["page-new-block-button"].hidden,
+    statusText: elements["page-editor-status"].textContent,
+    statusHidden: elements["page-editor-status"].hidden,
+    scrollY: sandbox.window.scrollY,
+    scrolledTo,
+    localStore: new Map(localStore),
+  };
+  try {
+    state.view = "page";
+    state.currentFile = "Posts/back-test";
+    state.currentContent = "one edited\n\ntwo";
+    state.currentBlocks = [
+      { source: "one edited", separator: "\n\n", html: "<p>one edited</p>" },
+      { source: "two", separator: "", html: "<p>two</p>" },
+    ];
+    setEditorSource("one edited\n\ntwo", state.currentBlocks);
+    state.editorMode = "blocks";
+    pageEditor.hidden = false;
+    elements["page-editor-shell"].hidden = false;
+    pageContent.hidden = true;
+    elements["page-new-block-button"].hidden = true;
+    sandbox.window.scrollY = 640;
+    scrolledTo = null;
+
+    assert.strictEqual(isPageEditorOpen(), true);
+    await goBackToLastList();
+
+    assert.strictEqual(state.view, "page");
+    assert.strictEqual(state.currentFile, "Posts/back-test");
+    assert.strictEqual(isPageEditorOpen(), false);
+    assert.strictEqual(state.editorMode, "closed");
+    assert.strictEqual(pageContent.hidden, false);
+    assert.strictEqual(elements["page-new-block-button"].hidden, false);
+    assert(pageContent.firstChild.innerHTML.includes("one edited"));
+    assert(!pageContent.firstChild.innerHTML.includes("<p>one</p>"));
+    assert.strictEqual(scrolledTo.top, 640);
+    assert.strictEqual(
+      JSON.parse(localStore.get("obr.reading.Posts%2Fback-test") || "{}").y,
+      640,
+    );
+  } finally {
+    state.view = previous.view;
+    state.currentFile = previous.currentFile;
+    state.currentContent = previous.currentContent;
+    state.currentBlocks = previous.currentBlocks;
+    state.editorMode = previous.editorMode;
+    pageEditor.hidden = previous.editorHidden;
+    elements["page-editor-shell"].hidden = previous.editorShellHidden;
+    pageContent.hidden = previous.contentHidden;
+    elements["page-new-block-button"].hidden = previous.newBlockHidden;
+    elements["page-editor-status"].textContent = previous.statusText;
+    elements["page-editor-status"].hidden = previous.statusHidden;
+    sandbox.window.scrollY = previous.scrollY;
+    scrolledTo = previous.scrolledTo;
+    localStore.clear();
+    for (const [key, value] of previous.localStore) {
+      localStore.set(key, value);
+    }
+  }
+}
+
 function assertRssDetailBackTarget() {
   const previousView = state.view;
   const previousFile = state.currentFile;
@@ -1549,6 +1633,7 @@ function assertEntryOutboxPreservesCreatedAt() {
   await assertRssListCacheRefresh();
   assertRssCacheSignatures();
   assertRssResumeState();
+  await assertBackClosesBlockEditorToReadingPage();
   assertRssDetailBackTarget();
   assertRssDetailTopbarAutoHide();
   assertThemeSchedule();

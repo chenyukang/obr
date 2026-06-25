@@ -523,7 +523,11 @@ async function handleAppPopState(event) {
   if (!target?.obr) return;
   const routeBackToRssList = shouldRouteBackToRssList(target);
 
-  if (!(await prepareToLeavePageEditor())) {
+  if (isPageEditorOpen()) {
+    if (!(await prepareToLeavePageEditor())) {
+      pushAppHistory(currentAppHistoryEntry());
+      return;
+    }
     pushAppHistory(currentAppHistoryEntry());
     return;
   }
@@ -1600,7 +1604,6 @@ async function syncOutboxItem(item, options = {}) {
       }
       setPageEditorStatus("");
     }
-    showToast("Offline page synced.");
     return;
   }
 
@@ -4628,7 +4631,8 @@ async function savePageEditor(options = {}) {
     scheduleEditorBlockRender(spacedEditorSource);
   }
   persistPageDraft();
-  setPageEditorStatus("Local draft saved. Syncing...");
+  const keepEditorOpenAfterSave = state.editorMode === "blocks";
+  if (!keepEditorOpenAfterSave) setPageEditorStatus("Local draft saved. Syncing...");
   button.disabled = true;
   setButtonIcon(button, "save", "Saving...");
   const payload = {
@@ -4653,6 +4657,12 @@ async function savePageEditor(options = {}) {
     rememberRecentEdit(state.currentFile);
     replaceAppHistory(currentAppHistoryEntry());
     clearPageDraft(state.currentFile);
+    if (keepEditorOpenAfterSave) {
+      applyRenderedEditorBlocks(state.currentBlocks, state.currentContent);
+      setPageEditorStatus("");
+      setButtonIcon(button, "save", "Save");
+      return;
+    }
     setPageContentHtml(data.html || "");
     updatePageOutline();
     highlightPageContent(state.currentHighlightKeyword);
@@ -4677,9 +4687,15 @@ async function savePageEditor(options = {}) {
         state.currentBlocks = [];
         state.currentContentLoaded = true;
         replaceAppHistory(currentAppHistoryEntry());
-        clearPageDraft(state.currentFile);
         rememberPageSource(state.currentFile, payload.content);
         rememberRecentEdit(state.currentFile);
+        if (keepEditorOpenAfterSave) {
+          setPageEditorStatus("Saved locally. Sync will retry when online.");
+          showToast("Sync failed; saved locally.");
+          setButtonIcon(button, "save", "Save");
+          return;
+        }
+        clearPageDraft(state.currentFile);
         content.innerHTML = offlineSourcePreview(payload.content);
         updatePageOutline();
         editor.hidden = true;
@@ -5271,6 +5287,8 @@ function hasUnsavedPageEdit() {
 function closePageEditor() {
   const editor = el("page-editor");
   if (editor.hidden) return;
+  const restoreFile = state.currentFile;
+  const restoreY = Math.max(0, Math.round(window.scrollY || 0));
   editor.hidden = true;
   el("page-editor-shell").hidden = true;
   setEditorMode("closed");
@@ -5279,9 +5297,20 @@ function closePageEditor() {
   el("page-new-block-button").hidden = false;
   showPageDraftBanner(false);
   state.editorRenderRequestId += 1;
+  refreshReadingPageFromCurrentState();
   el("page-content").hidden = false;
   setButtonIcon(el("edit-button"), "pencil", "Edit");
   setPageEditorStatus("");
+  restoreReadingPositionAfterEdit(restoreFile, restoreY);
+  updateReadingProgress();
+}
+
+function refreshReadingPageFromCurrentState() {
+  if (state.view !== "page") return;
+  const html = offlineSourcePreview(state.currentContent || "");
+  setPageContentHtml(html);
+  updatePageOutline();
+  highlightPageContent(state.currentHighlightKeyword);
 }
 
 function setEditorMode(mode) {
@@ -5512,6 +5541,10 @@ function readingPositionKey(file) {
 }
 
 async function goBackToLastList() {
+  if (isPageEditorOpen()) {
+    await prepareToLeavePageEditor();
+    return;
+  }
   if (isRssDetailPage()) {
     await showRssListFromDetail();
     return;
