@@ -242,6 +242,75 @@ const elements = {
 };
 const fetchCalls = [];
 const fetchJsonResponses = [];
+function fakeIndexedDb() {
+  const databases = new Map();
+  return {
+    open(name) {
+      const request = {};
+      queueMicrotask(() => {
+        let stores = databases.get(name);
+        const isNew = !stores;
+        if (!stores) {
+          stores = new Map();
+          databases.set(name, stores);
+        }
+        const db = {
+          objectStoreNames: {
+            contains(storeName) {
+              return stores.has(storeName);
+            },
+          },
+          createObjectStore(storeName) {
+            if (!stores.has(storeName)) stores.set(storeName, new Map());
+          },
+          transaction(storeName) {
+            const records = stores.get(storeName);
+            const transaction = {
+              oncomplete: null,
+              onerror: null,
+              onabort: null,
+              objectStore() {
+                return {
+                  put(record) {
+                    records.set(record.id, structuredClone(record));
+                    queueMicrotask(() => transaction.oncomplete?.());
+                  },
+                  get(id) {
+                    const getRequest = {};
+                    queueMicrotask(() => {
+                      getRequest.result = records.get(id) || null;
+                      getRequest.onsuccess?.();
+                      queueMicrotask(() => transaction.oncomplete?.());
+                    });
+                    return getRequest;
+                  },
+                  getAll() {
+                    const getRequest = {};
+                    queueMicrotask(() => {
+                      getRequest.result = [...records.values()].map((record) => structuredClone(record));
+                      getRequest.onsuccess?.();
+                      queueMicrotask(() => transaction.oncomplete?.());
+                    });
+                    return getRequest;
+                  },
+                  delete(id) {
+                    records.delete(id);
+                    queueMicrotask(() => transaction.oncomplete?.());
+                  },
+                };
+              },
+            };
+            return transaction;
+          },
+        };
+        request.result = db;
+        if (isNew) request.onupgradeneeded?.();
+        request.onsuccess?.();
+      });
+      return request;
+    },
+  };
+}
 const sandbox = {
   console,
   document: {
@@ -343,6 +412,8 @@ const sandbox = {
     },
   },
   navigator: {},
+  indexedDB: fakeIndexedDb(),
+  Blob,
   localStorage: {
     getItem(key) { return localStore.has(key) ? localStore.get(key) : null; },
     setItem(key, value) { localStore.set(key, String(value)); },
@@ -420,7 +491,13 @@ this.__obrTest = {
   updateRssSearchClear,
   entryPayloadForSync,
   entryFormData,
+  initializeOutboxStorage,
+  readOutbox,
   queueOfflineMutation,
+  outboxRetryDelay,
+  outboxItemReady,
+  nextOutboxRetryDelay,
+  resetFailedOutboxItems,
 };`,
   sandbox,
 );
@@ -486,7 +563,13 @@ const {
   updateRssSearchClear,
   entryPayloadForSync,
   entryFormData,
+  initializeOutboxStorage,
+  readOutbox,
   queueOfflineMutation,
+  outboxRetryDelay,
+  outboxItemReady,
+  nextOutboxRetryDelay,
+  resetFailedOutboxItems,
 } = sandbox.__obrTest;
 
 function assertSource(expected) {
@@ -1567,7 +1650,7 @@ function assertRssSearchDisclosure() {
   assert.strictEqual(rssSearchToggle.focused, true);
 }
 
-function assertEntryOutboxPreservesCreatedAt() {
+async function assertEntryOutboxPreservesCreatedAt() {
   const legacy = entryPayloadForSync({
     type: "entry",
     payload: {
@@ -1599,7 +1682,11 @@ function assertEntryOutboxPreservesCreatedAt() {
   });
   assert.strictEqual(stringOffset.timezone_offset_minutes, -480);
 
-  const queued = queueOfflineMutation("entry", {
+  localStore.set("obr.offline.outbox", JSON.stringify([{ id: "old", type: "entry" }]));
+  await initializeOutboxStorage();
+  assert.strictEqual(localStore.has("obr.offline.outbox"), false);
+
+  const queued = await queueOfflineMutation("entry", {
     page: "",
     links: "",
     text: "new offline memo",
@@ -1612,6 +1699,20 @@ function assertEntryOutboxPreservesCreatedAt() {
     queued.payload.timezone_offset_minutes,
     new Date(Date.parse(queued.payload.created_at)).getTimezoneOffset(),
   );
+  assert.strictEqual(localStore.has("obr.offline.outbox"), false);
+  const items = readOutbox();
+  assert.strictEqual(items.length, 1);
+  assert.strictEqual(items[0].payload.text, "new offline memo");
+  assert.strictEqual(items[0].payloadSummary.text, "new offline memo");
+  assert.strictEqual(outboxRetryDelay(1), 15000);
+  assert.strictEqual(outboxRetryDelay(2), 30000);
+  const retryAt = Date.now() + 30000;
+  state.outboxItems = [{ ...items[0], status: "pending", nextRetryAt: retryAt }];
+  assert.strictEqual(outboxItemReady(readOutbox()[0], retryAt - 1), false);
+  assert.strictEqual(outboxItemReady(readOutbox()[0], retryAt), true);
+  assert(nextOutboxRetryDelay(readOutbox(), retryAt - 1000) <= 1000);
+  resetFailedOutboxItems(items[0].id);
+  assert.strictEqual(readOutbox()[0].nextRetryAt, 0);
 
   const formData = entryFormData({
     sync_id: "id-1",
@@ -1644,7 +1745,7 @@ function assertEntryOutboxPreservesCreatedAt() {
   assertRssSummaryLoadingState();
   assertRssSummaryFocusUsesStickyOffset();
   assertRssSearchDisclosure();
-  assertEntryOutboxPreservesCreatedAt();
+  await assertEntryOutboxPreservesCreatedAt();
 })()
   .then(() => {
     console.log("editor and RSS regression tests passed");

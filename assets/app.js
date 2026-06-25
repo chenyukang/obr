@@ -73,6 +73,8 @@ const state = {
   outboxAbortController: null,
   outboxActiveItemId: "",
   outboxCancelingIds: new Set(),
+  outboxItems: [],
+  outboxDbOpenPromise: null,
   historyReady: false,
   appHistoryIndex: 0,
   appHistoryMaxIndex: 0,
@@ -151,7 +153,12 @@ const RSS_RESUME_KEY = "obr.rss.resume";
 const THEME_MODE_KEY = "obr.theme-mode";
 const LIGHT_THEME_COLOR = "#eef5f3";
 const DARK_THEME_COLOR = "#111c18";
-const OUTBOX_KEY = "obr.offline.outbox";
+const LEGACY_OUTBOX_KEY = "obr.offline.outbox";
+const OUTBOX_DB_NAME = "obr-offline";
+const OUTBOX_DB_VERSION = 1;
+const OUTBOX_STORE = "outbox-items";
+const OUTBOX_RETRY_BASE_MS = 15000;
+const OUTBOX_RETRY_MAX_MS = 5 * 60 * 1000;
 const APP_CONFIG_KEY = "obr.app-config";
 const CLIENT_ID_KEY = "obr.client-id";
 const LOADED_IMAGE_URLS_KEY = "obr.loaded-image-urls";
@@ -218,6 +225,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   void registerServiceWorker();
   startConnectionMonitor();
   restoreDraft();
+  await initializeOutboxStorage();
   updateEntrySaveState();
   const ok = await verify();
   if (ok) {
@@ -1067,9 +1075,7 @@ function rememberSearchResults(keyword, page, html) {
 }
 
 function readOutbox() {
-  return readJson(OUTBOX_KEY, [])
-    .filter((item) => item?.id && item?.type)
-    .map(normalizeOutboxItem);
+  return state.outboxItems.map(normalizeOutboxItem);
 }
 
 function normalizeOutboxItem(item) {
@@ -1080,13 +1086,143 @@ function normalizeOutboxItem(item) {
     ...item,
     status,
     attempts: Number(item.attempts || 0),
+    nextRetryAt: Number(item.nextRetryAt || 0),
     error: item.error || "",
   };
 }
 
 function writeOutbox(items) {
-  writeJson(OUTBOX_KEY, items.map(normalizeOutboxItem));
+  state.outboxItems = items.map(normalizeOutboxItem);
   updateConnectionStatusLabel();
+}
+
+function outboxPayloadSummary(type, payload) {
+  if (type === "page") {
+    return {
+      file: payload.file || "",
+      contentBytes: stringBytes(payload.content || ""),
+    };
+  }
+  return {
+    page: payload.page || "",
+    text: firstLine(payload.text || ""),
+    hasImage: Boolean(payload.image),
+    imageBytes: payload.image ? dataUrlApproxBytes(payload.image) : 0,
+  };
+}
+
+function stringBytes(value) {
+  return new Blob([String(value || "")]).size;
+}
+
+function dataUrlApproxBytes(dataUrl) {
+  const encoded = String(dataUrl || "").split(",", 2)[1] || "";
+  return Math.floor((encoded.length * 3) / 4);
+}
+
+function canUseIndexedDb() {
+  return typeof indexedDB !== "undefined";
+}
+
+function openOutboxDb() {
+  if (!canUseIndexedDb()) {
+    return Promise.reject(new Error("IndexedDB is not available."));
+  }
+  if (state.outboxDbOpenPromise) return state.outboxDbOpenPromise;
+  state.outboxDbOpenPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(OUTBOX_DB_NAME, OUTBOX_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(OUTBOX_STORE)) {
+        db.createObjectStore(OUTBOX_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      state.outboxDbOpenPromise = null;
+      reject(request.error || new Error("Could not open IndexedDB."));
+    };
+    request.onblocked = () => {
+      state.outboxDbOpenPromise = null;
+      reject(new Error("IndexedDB is blocked by another tab."));
+    };
+  });
+  return state.outboxDbOpenPromise;
+}
+
+async function withOutboxStore(mode, callback) {
+  const db = await openOutboxDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(OUTBOX_STORE, mode);
+    const store = transaction.objectStore(OUTBOX_STORE);
+    let result;
+    try {
+      result = callback(store);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error || new Error("IndexedDB transaction failed."));
+    transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted."));
+  });
+}
+
+async function initializeOutboxStorage() {
+  localStorage.removeItem(LEGACY_OUTBOX_KEY);
+  try {
+    state.outboxItems = await readStoredOutboxItems();
+  } catch (error) {
+    console.warn("Could not open IndexedDB outbox.", error);
+    state.outboxItems = [];
+  }
+  updateConnectionStatusLabel();
+}
+
+async function readStoredOutboxItems() {
+  const items = await withOutboxStore("readonly", (store) => {
+    const request = store.getAll();
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error || new Error("Could not read queued items."));
+    });
+  });
+  return items
+    .filter((item) => item?.id && item?.type)
+    .map(normalizeOutboxItem)
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+}
+
+async function putOutboxItem(item) {
+  const stored = normalizeOutboxItem(item);
+  await withOutboxStore("readwrite", (store) => {
+    store.put(stored);
+  });
+  return stored;
+}
+
+async function deleteOutboxItemRecord(id) {
+  await withOutboxStore("readwrite", (store) => {
+    store.delete(id);
+  });
+}
+
+function persistOutboxItemInBackground(item) {
+  void putOutboxItem(item).catch((error) => {
+    console.warn("Could not persist queued item.", error);
+  });
+}
+
+function deleteOutboxItemRecordInBackground(id) {
+  void deleteOutboxItemRecord(id).catch((error) => {
+    console.warn("Could not remove queued item.", error);
+  });
+}
+
+function requireOutboxStorage() {
+  if (!canUseIndexedDb()) {
+    throw new Error("Offline storage is not available in this browser.");
+  }
 }
 
 function newOutboxId(timestamp = Date.now()) {
@@ -1106,7 +1242,8 @@ function timezoneOffsetMinutesFor(value = Date.now()) {
   return source.getTimezoneOffset();
 }
 
-function queueOfflineMutation(type, payload) {
+async function queueOfflineMutation(type, payload) {
+  requireOutboxStorage();
   const items = readOutbox();
   const now = Date.now();
   const id = payload.sync_id || newOutboxId(now);
@@ -1124,21 +1261,30 @@ function queueOfflineMutation(type, payload) {
     id,
     type,
     payload: queuedPayload,
+    payloadSummary: outboxPayloadSummary(type, queuedPayload),
     createdAt: now,
     updatedAt: now,
     attempts: 0,
     status: "pending",
+    nextRetryAt: 0,
     error: "",
   };
   if (type === "page") {
     const filtered = items.filter(
       (existing) =>
-        existing.type !== "page" || existing.payload.file !== payload.file,
+        existing.type !== "page" || outboxPageFile(existing) !== payload.file,
     );
+    for (const existing of items) {
+      if (existing.type === "page" && outboxPageFile(existing) === payload.file) {
+        deleteOutboxItemRecordInBackground(existing.id);
+      }
+    }
+    await putOutboxItem(item);
     writeOutbox([...filtered, item]);
     scheduleOutboxSync();
     return item;
   }
+  await putOutboxItem(item);
   writeOutbox([...items, item]);
   scheduleOutboxSync();
   return item;
@@ -1150,14 +1296,23 @@ function updateOutboxItem(id, patch) {
     item.id === id ? { ...item, ...patch, updatedAt: Date.now() } : item,
   );
   writeOutbox(next);
+  const updated = next.find((item) => item.id === id);
+  if (updated) persistOutboxItemInBackground(updated);
 }
 
 function removeOutboxItem(id) {
   writeOutbox(readOutbox().filter((item) => item.id !== id));
+  deleteOutboxItemRecordInBackground(id);
 }
 
 function scheduleOutboxSync(delay = 250) {
   if (state.outboxSyncTimer) return;
+  const items = readOutbox();
+  const ready = items.some((item) => item.status === "pending" && outboxItemReady(item));
+  const nextDelay = nextOutboxRetryDelay(items);
+  if (!ready && nextDelay !== null) {
+    delay = Math.max(delay, nextDelay);
+  }
   state.outboxSyncTimer = window.setTimeout(() => {
     state.outboxSyncTimer = 0;
     void syncOutbox();
@@ -1166,20 +1321,22 @@ function scheduleOutboxSync(delay = 250) {
 
 function resetFailedOutboxItems(id = "") {
   const items = readOutbox();
-  writeOutbox(
-    items.map((item) => {
-      if (id && item.id !== id) return item;
-      if (item.status !== "failed") return item;
-      return { ...item, status: "pending", error: "", updatedAt: Date.now() };
-    }),
-  );
+  const next = items.map((item) => {
+    if (id && item.id !== id) return item;
+    if (item.status !== "failed" && !item.nextRetryAt) return item;
+    return { ...item, status: "pending", error: "", nextRetryAt: 0, updatedAt: Date.now() };
+  });
+  writeOutbox(next);
+  for (const item of next) {
+    if (!id || item.id === id) persistOutboxItemInBackground(item);
+  }
 }
 
 function pendingPageContent(file) {
   const item = [...readOutbox()]
     .reverse()
-    .find((queued) => queued.type === "page" && queued.payload.file === file);
-  return item?.payload.content ?? null;
+    .find((queued) => queued.type === "page" && outboxPageFile(queued) === file);
+  return item?.payload?.content ?? null;
 }
 
 async function syncOutbox() {
@@ -1190,14 +1347,21 @@ async function syncOutbox() {
   updateConnectionStatusLabel();
   try {
     while (state.connectionOnline) {
-      const item = readOutbox().find((queued) => queued.status === "pending");
-      if (!item) break;
+      const items = readOutbox();
+      const item = items.find((queued) => queued.status === "pending" && outboxItemReady(queued));
+      if (!item) {
+        const retryDelay = nextOutboxRetryDelay(items);
+        if (retryDelay !== null) scheduleOutboxSync(retryDelay);
+        break;
+      }
+      const attempts = Number(item.attempts || 0) + 1;
       state.outboxActiveItemId = item.id;
       state.outboxAbortController = new AbortController();
       updateOutboxItem(item.id, {
         status: "syncing",
         error: "",
-        attempts: item.attempts + 1,
+        attempts,
+        nextRetryAt: 0,
         lastTriedAt: Date.now(),
       });
       try {
@@ -1209,10 +1373,19 @@ async function syncOutbox() {
           state.outboxCancelingIds.delete(item.id);
           removeOutboxItem(item.id);
           showToast("Sync item canceled.");
+        } else if (isRetryableOutboxError(error)) {
+          const retryDelay = outboxRetryDelay(attempts);
+          updateOutboxItem(item.id, {
+            status: "pending",
+            error: errorMessage(error),
+            nextRetryAt: Date.now() + retryDelay,
+          });
+          scheduleOutboxSync(retryDelay);
         } else {
           updateOutboxItem(item.id, {
             status: "failed",
             error: errorMessage(error),
+            nextRetryAt: 0,
           });
         }
         break;
@@ -1227,11 +1400,37 @@ async function syncOutbox() {
   }
 }
 
+function outboxItemReady(item, now = Date.now()) {
+  return !item.nextRetryAt || Number(item.nextRetryAt) <= now;
+}
+
+function nextOutboxRetryDelay(items = readOutbox(), now = Date.now()) {
+  const retryAt = items
+    .filter((item) => item.status === "pending" && item.nextRetryAt && item.nextRetryAt > now)
+    .map((item) => item.nextRetryAt)
+    .sort((a, b) => a - b)[0];
+  if (!retryAt) return null;
+  return Math.max(0, retryAt - now);
+}
+
+function outboxRetryDelay(attempts) {
+  const exponent = Math.max(0, Math.min(Number(attempts || 1) - 1, 8));
+  return Math.min(OUTBOX_RETRY_MAX_MS, OUTBOX_RETRY_BASE_MS * 2 ** exponent);
+}
+
+function isRetryableOutboxError(error) {
+  if (!state.connectionOnline) return true;
+  if (error?.name === "AbortError" || error?.name === "TimeoutError") return true;
+  if (error instanceof TypeError) return true;
+  const status = Number(error?.status || 0);
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 function updateOutboxButton(pending = readOutbox().length) {
   const button = el("outbox-button");
   if (!button) return;
   const items = readOutbox();
-  const failed = items.some((item) => item.status === "failed");
+  const failed = items.some((item) => item.status === "failed" || item.error);
   const syncing = items.some((item) => item.status === "syncing");
   button.hidden = pending === 0;
   button.classList.toggle("has-error", failed);
@@ -1303,10 +1502,11 @@ function outboxItemHtml(item) {
   const title = item.type === "page" ? "Page edit" : "Memo";
   const detail = outboxItemDetail(item);
   const status = outboxItemStatus(item);
+  const delayed = outboxRetryDelayRemaining(item) > 0;
   const error = item.error
     ? `<p class="outbox-item-error">${escapeHtml(item.error)}</p>`
     : "";
-  const retry = status === "failed"
+  const retry = status === "failed" || delayed
     ? `<button type="button" data-outbox-retry="${escapeHtmlAttr(item.id)}">${iconSvg("rotate-ccw")}<span>Retry</span></button>`
     : "";
   const cancel = status === "pending" || status === "syncing"
@@ -1352,7 +1552,20 @@ function outboxStatusLabel(item) {
   const status = outboxItemStatus(item);
   if (status === "syncing") return `Syncing${item.attempts ? ` · attempt ${item.attempts}` : ""}`;
   if (status === "failed") return `Failed${item.attempts ? ` · attempt ${item.attempts}` : ""}`;
+  const retryDelay = outboxRetryDelayRemaining(item);
+  if (retryDelay > 0) return `Queued · retry in ${formatDuration(retryDelay)}`;
   return item.attempts ? `Queued · ${item.attempts} tried` : "Queued";
+}
+
+function outboxRetryDelayRemaining(item) {
+  return Math.max(0, Number(item.nextRetryAt || 0) - Date.now());
+}
+
+function formatDuration(ms) {
+  const seconds = Math.max(1, Math.ceil(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.ceil(seconds / 60);
+  return `${minutes}m`;
 }
 
 function cancelOutboxItem(id) {
@@ -1367,12 +1580,18 @@ function cancelOutboxItem(id) {
 
 function outboxItemDetail(item) {
   if (item.type === "page") {
-    return item.payload?.file || "Untitled page";
+    return outboxPageFile(item) || "Untitled page";
   }
-  const page = item.payload?.page?.trim() || state.appConfig.dailyDir;
-  const text = firstLine(item.payload?.text || "");
-  const image = item.payload?.image ? " + image" : "";
+  const summary = item.payloadSummary || {};
+  const payload = item.payload || {};
+  const page = (summary.page || payload.page || "").trim() || state.appConfig.dailyDir;
+  const text = firstLine(summary.text || payload.text || "");
+  const image = summary.hasImage || payload.image ? " + image" : "";
   return text ? `${page}: ${text}${image}` : `${page}${image}`;
+}
+
+function outboxPageFile(item) {
+  return item.payloadSummary?.file || item.payload?.file || "";
 }
 
 function restoreAppConfig() {
@@ -1573,7 +1792,11 @@ async function syncOutboxItem(item, options = {}) {
           timeoutMessage: "Upload timed out. Draft kept.",
         });
     const text = await response.text();
-    if (text !== "ok") throw new Error(text);
+    if (!response.ok || text !== "ok") {
+      const error = new Error(text || "Sync failed.");
+      error.status = response.status;
+      throw error;
+    }
     showToast(payload.image ? "Image memo synced." : "Memo synced.");
     if (payload.page === "todo" && state.view === "todo") {
       await loadTodo({ renderCache: false });
@@ -1587,7 +1810,11 @@ async function syncOutboxItem(item, options = {}) {
       body: JSON.stringify(item.payload),
       signal: options.signal,
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) {
+      const error = new Error(await response.text());
+      error.status = response.status;
+      throw error;
+    }
     const data = await response.json();
     rememberPage(data, item.payload.file, item.payload.content);
     if (state.currentFile === data.file) {
@@ -2161,7 +2388,7 @@ async function saveEntry() {
   setEntryStatus("Saving locally...");
   try {
     if (image) payload.image = await blobToDataUrl(image);
-    const item = queueOfflineMutation("entry", payload);
+    const item = await queueOfflineMutation("entry", payload);
     resetEntry();
     setEntryStatus("");
     showToast(image ? "Saved locally. Image syncing..." : "Saved locally. Syncing...");
@@ -4112,7 +4339,7 @@ async function addTodo() {
     console.error(error);
     if (shouldQueueOffline(error)) {
       try {
-        queueOfflineMutation("entry", payload);
+        await queueOfflineMutation("entry", payload);
         el("todo-input").value = "";
         el("todo-status").textContent = "";
         el("todo-status").hidden = true;
@@ -4682,7 +4909,7 @@ async function savePageEditor(options = {}) {
     console.error(error);
     if (shouldQueueOffline(error)) {
       try {
-        queueOfflineMutation("page", payload);
+        await queueOfflineMutation("page", payload);
         state.currentContent = payload.content;
         state.currentBlocks = [];
         state.currentContentLoaded = true;
