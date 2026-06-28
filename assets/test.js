@@ -3,7 +3,23 @@ const fs = require("fs");
 const vm = require("vm");
 
 const app = fs.readFileSync(require.resolve("./app.js"), "utf8");
-const pageEditor = { value: "", hidden: false };
+const pageEditor = {
+  value: "",
+  hidden: false,
+  selectionStart: 0,
+  selectionEnd: 0,
+  scrollTop: 0,
+  scrollHeight: 1000,
+  clientHeight: 300,
+  focused: false,
+  focus() {
+    this.focused = true;
+  },
+  setSelectionRange(start, end) {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  },
+};
 let activeBlockTextarea = null;
 let rssListHtml = "";
 let rssListWrites = 0;
@@ -130,6 +146,9 @@ const pageContent = {
     if (selector === ".page-render-block") return pageRenderBlocks;
     return [];
   },
+  getBoundingClientRect() {
+    return { top: 0, bottom: 1000, height: 1000 };
+  },
   insertBefore(node, referenceNode) {
     if (node.dataset?.rssTranslationError) rssTranslationErrorNode = node;
     else pendingSummaryNode = node;
@@ -239,9 +258,18 @@ const elements = {
     hidden: true,
     classList: { toggle() {} },
   },
+  "todo-input": { value: "" },
+  "todo-add": mockButton(false),
+  "todo-list": {
+    innerHTML: "",
+    querySelectorAll() { return []; },
+    replaceChildren(node) { this.innerHTML = node?.innerHTML || ""; },
+  },
+  "todo-status": { textContent: "", hidden: true },
 };
 const fetchCalls = [];
 const fetchJsonResponses = [];
+const fetchTextResponses = [];
 function fakeIndexedDb() {
   const databases = new Map();
   return {
@@ -371,11 +399,12 @@ const sandbox = {
   fetch(path, options) {
     fetchCalls.push({ path, options });
     const json = fetchJsonResponses.length ? fetchJsonResponses.shift() : {};
+    const text = fetchTextResponses.length ? fetchTextResponses.shift() : "";
     return Promise.resolve({
       ok: true,
       status: 200,
       headers: { get() { return null; } },
-      text: () => Promise.resolve(""),
+      text: () => Promise.resolve(text),
       json: () => Promise.resolve(json),
     });
   },
@@ -457,6 +486,14 @@ this.__obrTest = {
   markRssItemReadFromList,
   markRssItemReadLocally,
   loadRssItems,
+  addTodo,
+  appendOptimisticTodo,
+  renderTodoHtml,
+  renderTodoListFromState,
+  initialEditorBlockIndex,
+  focusSourceEditorAtBlock,
+  syncTodoMark,
+  markTodo,
   sameRssItemsPage,
   sameRssItemDetail,
   readRssResumeState,
@@ -478,6 +515,7 @@ this.__obrTest = {
   renderRssTranslationError,
   clearRssTranslationError,
   updateRssPageActions,
+  updateRssDetailActionBar,
   updateRssTranslationFloatingButton,
   toggleRssDetailActions,
   handleRssSecondaryAction,
@@ -529,6 +567,14 @@ const {
   markRssItemReadFromList,
   markRssItemReadLocally,
   loadRssItems,
+  addTodo,
+  appendOptimisticTodo,
+  renderTodoHtml,
+  renderTodoListFromState,
+  initialEditorBlockIndex,
+  focusSourceEditorAtBlock,
+  syncTodoMark,
+  markTodo,
   sameRssItemsPage,
   sameRssItemDetail,
   readRssResumeState,
@@ -550,6 +596,7 @@ const {
   renderRssTranslationError,
   clearRssTranslationError,
   updateRssPageActions,
+  updateRssDetailActionBar,
   updateRssTranslationFloatingButton,
   toggleRssDetailActions,
   handleRssSecondaryAction,
@@ -575,6 +622,184 @@ const {
 function assertSource(expected) {
   assert.strictEqual(joinEditorBlocks(state.editorBlocks), expected);
   assert.strictEqual(pageEditor.value, expected);
+}
+
+async function assertOptimisticTodoAdd() {
+  elements["todo-input"].value = "Buy milk";
+  elements["todo-list"].innerHTML = '<p class="empty">No todos.</p>';
+  elements["todo-status"].textContent = "stale";
+  elements["todo-status"].hidden = false;
+  elements["todo-add"].disabled = false;
+  elements["todo-add"].classes.clear();
+  fetchCalls.length = 0;
+  const originalFetch = sandbox.fetch;
+  let resolveFetch;
+  sandbox.fetch = (path, options) => {
+    fetchCalls.push({ path, options });
+    if (path !== "/api/entry") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get() { return null; } },
+        text: () => Promise.resolve(""),
+        json: () => Promise.resolve({ file: "NoPage", html: "" }),
+      });
+    }
+    return new Promise((resolve) => {
+      resolveFetch = () => resolve({
+        ok: true,
+        status: 200,
+        headers: { get() { return null; } },
+        text: () => Promise.resolve("ok"),
+        json: () => Promise.resolve({}),
+      });
+    });
+  };
+
+  const result = addTodo();
+
+  assert.strictEqual(result, undefined);
+  assert.strictEqual(elements["todo-input"].value, "");
+  assert(elements["todo-list"].innerHTML.includes("Buy milk"));
+  assert(elements["todo-list"].innerHTML.includes('class="todo-optimistic"'));
+  assert(elements["todo-list"].innerHTML.includes("<h3"));
+  assert(!elements["todo-list"].innerHTML.includes("<label"));
+  assert(!elements["todo-list"].innerHTML.includes("Syncing"));
+  assert.strictEqual(elements["todo-status"].hidden, true);
+  assert.strictEqual(elements["todo-add"].disabled, true);
+  assert(elements["todo-add"].classes.has("is-loading"));
+  assert.strictEqual(fetchCalls[0].path, "/api/entry");
+  const addPayload = JSON.parse(fetchCalls[0].options.body);
+  assert.deepStrictEqual(addPayload.text, "Buy milk");
+  assert(addPayload.sync_id);
+  assert(addPayload.created_at);
+  assert.strictEqual(typeof addPayload.timezone_offset_minutes, "number");
+
+  resolveFetch();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  sandbox.fetch = originalFetch;
+  assert.strictEqual(elements["todo-add"].disabled, false);
+  assert(!elements["todo-add"].classes.has("is-loading"));
+  assert(elements["todo-list"].innerHTML.includes("Buy milk"));
+  renderTodoHtml("<h3>2026-06-27 17:12</h3><ul><li><input type=\"checkbox\" data-task-index=\"0\"> Buy milk</li><li><input type=\"checkbox\" data-task-index=\"1\"> Old server todo</li></ul>", "No todos.");
+  assert(elements["todo-list"].innerHTML.includes('class="todo-optimistic"'));
+  const optimisticTime = elements["todo-list"].innerHTML.match(/<h3[^>]*>([^<]+)<\/h3>/)[1];
+  renderTodoHtml(`<h3>${optimisticTime}</h3><ul><li><input type=\"checkbox\" data-task-index=\"0\"> Buy milk</li><li><input type=\"checkbox\" data-task-index=\"1\"> Old server todo</li></ul>`, "No todos.");
+  assert(!elements["todo-list"].innerHTML.includes('class="todo-optimistic"'));
+}
+
+
+function assertInitialEditorBlockUsesCurrentReadingViewport() {
+  const previous = {
+    currentBlocks: state.currentBlocks,
+    currentContent: state.currentContent,
+    editorBlocks: state.editorBlocks,
+    lastReadBlockFile: state.lastReadBlockFile,
+    lastReadBlockIndex: state.lastReadBlockIndex,
+    pageRenderBlocks,
+  };
+  try {
+    state.currentFile = "Pub/Obr 介绍.md";
+    state.lastReadBlockFile = "";
+    state.lastReadBlockIndex = -1;
+    const blocks = [
+      { source: "frontmatter", separator: "\n\n", html: "<p>frontmatter</p>" },
+      { source: "visible paragraph", separator: "\n\n", html: "<p>visible paragraph</p>" },
+      { source: "later paragraph", separator: "", html: "<p>later paragraph</p>" },
+    ];
+    state.currentBlocks = blocks;
+    state.currentContent = blocks.map((block) => block.source).join("\n\n");
+    state.editorBlocks = blocks;
+    pageRenderBlocks = [
+      { dataset: { pageBlockIndex: "0" }, getBoundingClientRect: () => ({ top: -240, bottom: -20 }) },
+      { dataset: { pageBlockIndex: "1" }, getBoundingClientRect: () => ({ top: 82, bottom: 260 }) },
+      { dataset: { pageBlockIndex: "2" }, getBoundingClientRect: () => ({ top: 420, bottom: 680 }) },
+    ];
+
+    assert.strictEqual(initialEditorBlockIndex(), 1);
+  } finally {
+    state.currentBlocks = previous.currentBlocks;
+    state.currentContent = previous.currentContent;
+    state.editorBlocks = previous.editorBlocks;
+    state.lastReadBlockFile = previous.lastReadBlockFile;
+    state.lastReadBlockIndex = previous.lastReadBlockIndex;
+    pageRenderBlocks = previous.pageRenderBlocks;
+  }
+}
+
+function assertSourceEditorFocusesCurrentBlockOffset() {
+  const previous = {
+    editorBlocks: state.editorBlocks,
+    editorValue: pageEditor.value,
+    selectionStart: pageEditor.selectionStart,
+    selectionEnd: pageEditor.selectionEnd,
+    scrollTop: pageEditor.scrollTop,
+    focused: pageEditor.focused,
+  };
+  try {
+    state.editorBlocks = [
+      { source: "alpha", separator: "\n\n", html: "<p>alpha</p>" },
+      { source: "beta paragraph", separator: "\n\n", html: "<p>beta paragraph</p>" },
+      { source: "gamma", separator: "", html: "<p>gamma</p>" },
+    ];
+    pageEditor.value = state.editorBlocks.map((block) => block.source).join("\n\n");
+    pageEditor.selectionStart = 0;
+    pageEditor.selectionEnd = 0;
+    pageEditor.scrollTop = 0;
+    pageEditor.focused = false;
+
+    focusSourceEditorAtBlock(pageEditor, 1);
+
+    const expected = "alpha\n\n".length;
+    assert.strictEqual(pageEditor.focused, true);
+    assert.strictEqual(pageEditor.selectionStart, expected);
+    assert.strictEqual(pageEditor.selectionEnd, expected);
+    assert(pageEditor.scrollTop > 0);
+  } finally {
+    state.editorBlocks = previous.editorBlocks;
+    pageEditor.value = previous.editorValue;
+    pageEditor.selectionStart = previous.selectionStart;
+    pageEditor.selectionEnd = previous.selectionEnd;
+    pageEditor.scrollTop = previous.scrollTop;
+    pageEditor.focused = previous.focused;
+  }
+}
+
+function assertOptimisticTodoAddsStayNewestFirstAndSeparate() {
+  state.optimisticTodos = [];
+  state.todoBaseHtml = '<h3>2026-06-27 17:12</h3><ul><li><input type="checkbox"> Existing</li></ul>';
+  renderTodoListFromState();
+  appendOptimisticTodo("First local", new Date("2026-06-28T01:10:00+08:00").getTime());
+  const firstHtml = elements["todo-list"].innerHTML;
+  assert(firstHtml.indexOf("todo-optimistic-separator") < firstHtml.indexOf("First local"));
+  assert.strictEqual((firstHtml.match(/todo-optimistic-separator/g) || []).length, 2);
+  appendOptimisticTodo("Second local", new Date("2026-06-28T01:11:00+08:00").getTime());
+  const html = elements["todo-list"].innerHTML;
+  assert(html.indexOf("Second local") < html.indexOf("First local"));
+  assert(html.indexOf("First local") < html.indexOf("Existing"));
+  assert.strictEqual((html.match(/Second local/g) || []).length, 1);
+  assert.strictEqual((html.match(/First local/g) || []).length, 1);
+  assert.strictEqual((html.match(/Existing/g) || []).length, 1);
+  assert.strictEqual((html.match(/todo-optimistic-heading/g) || []).length, 2);
+  assert(html.indexOf("todo-optimistic-separator") < html.indexOf("Second local"));
+  assert.strictEqual((html.match(/todo-optimistic-separator/g) || []).length, 3);
+}
+
+async function assertOptimisticTodoMark() {
+  const task = { checked: true, disabled: false, dataset: { taskIndex: "3" } };
+  let refreshed = false;
+  fetchCalls.length = 0;
+
+  await syncTodoMark(task, () => {
+    refreshed = true;
+  });
+
+  assert.strictEqual(task.checked, true);
+  assert.strictEqual(task.disabled, true);
+  assert.strictEqual(refreshed, true);
+  assert.strictEqual(fetchCalls[0].path, "/api/mark?index=3");
+  assert.strictEqual(fetchCalls[0].options.method, "POST");
 }
 
 setEditorSource("one\n\ntwo\n\nthree", [
@@ -1563,6 +1788,52 @@ function assertRssActionBarUsesHackerNewsButton() {
   }
 }
 
+function assertTocOnlyDoesNotShowRssActionToggle() {
+  const previous = {
+    expanded: state.rssDetailActionsExpanded,
+    barClasses: new Set(rssActionBar.classes),
+    toggleHidden: rssActionToggle.hidden,
+    toggleAttributes: { ...rssActionToggle.attributes },
+    tocHidden: tocButton.hidden,
+    summaryHidden: rssSummaryFloatingButton.hidden,
+    translateHidden: rssTranslateFloatingButton.hidden,
+    starHidden: rssStarButton.hidden,
+    unsubHidden: rssUnsubscribeButton.hidden,
+    annotationHidden: rssAnnotationButton.hidden,
+  };
+  try {
+    rssActionBar.classes.clear();
+    rssActionToggle.hidden = false;
+    rssActionToggle.attributes = {};
+    state.rssDetailActionsExpanded = true;
+    tocButton.hidden = false;
+    rssSummaryFloatingButton.hidden = true;
+    rssTranslateFloatingButton.hidden = true;
+    rssStarButton.hidden = true;
+    rssUnsubscribeButton.hidden = true;
+    rssAnnotationButton.hidden = true;
+
+    updateRssDetailActionBar();
+
+    assert(!rssActionBar.classes.has("has-actions"));
+    assert(!rssActionBar.classes.has("is-expanded"));
+    assert.strictEqual(rssActionToggle.hidden, true);
+    assert.strictEqual(rssActionToggle.attributes["aria-expanded"], "false");
+    assert.strictEqual(tocButton.hidden, false);
+  } finally {
+    state.rssDetailActionsExpanded = previous.expanded;
+    rssActionBar.classes = previous.barClasses;
+    rssActionToggle.hidden = previous.toggleHidden;
+    rssActionToggle.attributes = previous.toggleAttributes;
+    tocButton.hidden = previous.tocHidden;
+    rssSummaryFloatingButton.hidden = previous.summaryHidden;
+    rssTranslateFloatingButton.hidden = previous.translateHidden;
+    rssStarButton.hidden = previous.starHidden;
+    rssUnsubscribeButton.hidden = previous.unsubHidden;
+    rssAnnotationButton.hidden = previous.annotationHidden;
+  }
+}
+
 function assertRssTranslationErrorState() {
   pendingSummaryNode = null;
   rssTranslationErrorNode = null;
@@ -1745,6 +2016,11 @@ async function assertEntryOutboxPreservesCreatedAt() {
 }
 
 (async () => {
+  await assertOptimisticTodoAdd();
+  assertInitialEditorBlockUsesCurrentReadingViewport();
+  assertSourceEditorFocusesCurrentBlockOffset();
+  assertOptimisticTodoAddsStayNewestFirstAndSeparate();
+  await assertOptimisticTodoMark();
   await assertRssMarkReadFromList();
   assertRssMarkReadLocalCache();
   await assertRssPagination();
@@ -1758,6 +2034,7 @@ async function assertEntryOutboxPreservesCreatedAt() {
   assertRssAiSummaryHtml();
   assertRssTranslationButtonShowsWhenMissingTranslation();
   assertRssActionBarUsesHackerNewsButton();
+  assertTocOnlyDoesNotShowRssActionToggle();
   assertRssTranslationErrorState();
   assertRssSummaryLoadingState();
   assertRssSummaryFocusUsesStickyOffset();
@@ -1765,7 +2042,7 @@ async function assertEntryOutboxPreservesCreatedAt() {
   await assertEntryOutboxPreservesCreatedAt();
 })()
   .then(() => {
-    console.log("editor and RSS regression tests passed");
+    console.log("editor, todo, and RSS regression tests passed");
   })
   .catch((error) => {
     console.error(error);

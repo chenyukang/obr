@@ -27,6 +27,8 @@ const state = {
   pageController: null,
   pageRequestId: 0,
   todoRequestId: 0,
+  optimisticTodos: [],
+  todoBaseHtml: "",
   rssFilter: "unread",
   rssItemsRequestId: 0,
   rssItemRequestId: 0,
@@ -347,16 +349,15 @@ function bindEvents() {
     await fetchPage(link.id, state.view, el("search-input").value.trim());
   });
 
-  el("todo-form").addEventListener("submit", async (event) => {
+  el("todo-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    await addTodo();
+    addTodo();
   });
 
-  el("todo-list").addEventListener("change", async (event) => {
+  el("todo-list").addEventListener("change", (event) => {
     const task = event.target.closest("input[data-task-index]");
     if (!task || !task.checked) return;
-    await markTodo(task.dataset.taskIndex);
-    await loadTodo({ renderCache: false });
+    void syncTodoMark(task);
   });
 
   document.querySelectorAll("[data-rss-filter]").forEach((button) => {
@@ -416,8 +417,8 @@ function bindEvents() {
 
     const task = event.target.closest("input[data-task-index]");
     if (task && state.currentFile === state.appConfig.todoFile) {
-      await markTodo(task.dataset.taskIndex);
-      await fetchPage(state.appConfig.todoPath, "todo");
+      if (!task.checked) return;
+      void syncTodoMark(task, () => fetchPage(state.appConfig.todoPath, "todo"));
       return;
     }
 
@@ -2986,7 +2987,8 @@ async function loadTodo(options = {}) {
       void warmPageSource(data.file);
     }
     const html = data.file === "NoPage" ? "" : data.html || "";
-    if (!renderCache || !cached || html !== cachedHtml) {
+    reconcileOptimisticTodos(html);
+    if (!renderCache || !cached || html !== cachedHtml || state.optimisticTodos.length) {
       renderTodoHtml(html, "No todos.");
     }
   } catch (error) {
@@ -2997,10 +2999,58 @@ async function loadTodo(options = {}) {
 }
 
 function renderTodoHtml(html, emptyMessage) {
-  setDeferredMarkdownHtml(
-    el("todo-list"),
-    html.trim() ? html : `<p class="empty">${escapeHtml(emptyMessage)}</p>`,
-  );
+  reconcileOptimisticTodos(html);
+  state.todoBaseHtml = html.trim() ? html : `<p class="empty">${escapeHtml(emptyMessage)}</p>`;
+  renderTodoListFromState();
+}
+
+function renderTodoListFromState() {
+  el("todo-list").innerHTML = mergeOptimisticTodoHtml(state.todoBaseHtml);
+}
+
+function mergeOptimisticTodoHtml(html) {
+  if (!state.optimisticTodos.length) return html;
+  const blocks = state.optimisticTodos.map(optimisticTodoBlock).join(optimisticTodoSeparator());
+  const current = String(html || "").trim();
+  const leadingSeparator = optimisticTodoSeparator();
+  if (!current || current.includes('class="empty"')) return `${leadingSeparator}${blocks}`;
+  return `${leadingSeparator}${blocks}${optimisticTodoSeparator()}${current}`;
+}
+
+function optimisticTodoSeparator() {
+  return '<div class="todo-optimistic-separator" aria-hidden="true"></div>';
+}
+
+function optimisticTodoBlock(item) {
+  const time = formatOptimisticTodoTime(item.createdAt);
+  return `<h3 class="todo-optimistic-heading" data-optimistic-todo-id="${escapeHtmlAttr(item.id)}">${escapeHtml(time)}</h3><ul><li class="todo-optimistic"><input type="checkbox" disabled> ${escapeHtml(item.text)}</li></ul>`;
+}
+
+function formatOptimisticTodoTime(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function reconcileOptimisticTodos(serverHtml) {
+  if (!state.optimisticTodos.length) return;
+  const normalized = htmlTextContent(serverHtml).replace(/\s+/g, " ");
+  state.optimisticTodos = state.optimisticTodos.filter((item) => {
+    const serverTime = formatOptimisticTodoTime(item.createdAt);
+    return !(normalized.includes(serverTime) && normalized.includes(item.text));
+  });
+}
+
+function htmlTextContent(html) {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"');
 }
 
 async function loadRssItems(options = {}) {
@@ -3991,17 +4041,16 @@ function updateRssDetailActionBar() {
     "rss-summary-floating-button",
     "rss-translate-floating-button",
     "rss-annotation-button",
-    "toc-button",
     "rss-star-button",
     "rss-unsubscribe-button",
   ];
-  const hasVisibleActions = actionIds.some((id) => {
+  const hasVisibleRssActions = actionIds.some((id) => {
     const action = el(id);
     return action && !action.hidden;
   });
-  bar.classList.toggle("has-actions", hasVisibleActions);
-  toggle.hidden = !hasVisibleActions;
-  if (!hasVisibleActions) {
+  bar.classList.toggle("has-actions", hasVisibleRssActions);
+  toggle.hidden = !hasVisibleRssActions;
+  if (!hasVisibleRssActions) {
     setRssDetailActionsExpanded(false);
   } else {
     setRssDetailActionsExpanded(state.rssDetailActionsExpanded);
@@ -4311,45 +4360,108 @@ function pageDisplayName(file) {
     .pop() || file;
 }
 
-async function addTodo() {
-  const text = el("todo-input").value.trim();
+function addTodo() {
+  const input = el("todo-input");
+  const text = input.value.trim();
   if (!text) return;
+  const createdAt = Date.now();
   const payload = {
-    created_at: new Date().toISOString(),
+    sync_id: newOutboxId(createdAt),
+    created_at: new Date(createdAt).toISOString(),
+    timezone_offset_minutes: timezoneOffsetMinutesFor(createdAt),
     page: "todo",
     links: "",
     text,
     image: "",
   };
-  el("todo-status").textContent = "Local draft saved. Syncing...";
-  el("todo-status").hidden = false;
+  const optimisticTodo = appendOptimisticTodo(text, createdAt);
+  input.value = "";
+  clearTodoStatus();
+  setTodoAddLoading(true);
+  void syncTodoAdd(payload, optimisticTodo);
+}
+
+async function syncTodoAdd(payload, optimisticTodo) {
   try {
     const response = await request("/api/entry", {
       method: "POST",
       body: JSON.stringify(payload),
     });
     const result = await response.text();
-    if (result !== "ok") throw new Error(result);
-    el("todo-input").value = "";
-    el("todo-status").textContent = "";
-    el("todo-status").hidden = true;
-    showToast("Todo synced to file.");
-    await loadTodo({ renderCache: false });
+    if (!response.ok || result !== "ok") throw new Error(result || "Save failed.");
+    showToast("Todo synced.");
+    void loadTodo({ renderCache: false });
   } catch (error) {
     console.error(error);
     if (shouldQueueOffline(error)) {
       try {
         await queueOfflineMutation("entry", payload);
-        el("todo-input").value = "";
-        el("todo-status").textContent = "";
-        el("todo-status").hidden = true;
         showToast("Todo waiting to sync.");
         return;
       } catch (queueError) {
         console.error(queueError);
       }
     }
-    el("todo-status").textContent = "Save failed.";
+    showTodoStatus("Save failed.");
+    showToast("Todo sync failed.");
+  } finally {
+    setTodoAddLoading(false);
+  }
+}
+
+function setTodoAddLoading(loading) {
+  const button = el("todo-add");
+  if (!button) return;
+  button.disabled = Boolean(loading);
+  button.classList.toggle("is-loading", Boolean(loading));
+  button.setAttribute("aria-busy", loading ? "true" : "false");
+}
+
+function showTodoStatus(message) {
+  const status = el("todo-status");
+  status.textContent = message;
+  status.hidden = !message;
+}
+
+function clearTodoStatus() {
+  showTodoStatus("");
+}
+
+function appendOptimisticTodo(text, createdAt = Date.now()) {
+  const optimisticTodo = {
+    id: `${createdAt}-${Math.random().toString(36).slice(2)}`,
+    text,
+    createdAt,
+  };
+  state.optimisticTodos.unshift(optimisticTodo);
+  renderTodoListFromState();
+  return optimisticTodo;
+}
+
+function removeOptimisticTodo(optimisticTodo) {
+  if (!optimisticTodo) return;
+  state.optimisticTodos = state.optimisticTodos.filter((item) => item.id !== optimisticTodo.id);
+  document.querySelectorAll(`[data-optimistic-todo-id="${cssEscape(optimisticTodo.id)}"]`).forEach((node) => node.remove());
+}
+
+function cssEscape(value) {
+  if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+}
+
+async function syncTodoMark(task, refresh = () => loadTodo({ renderCache: false })) {
+  const previousChecked = !task.checked;
+  task.checked = true;
+  task.disabled = true;
+  try {
+    await markTodo(task.dataset.taskIndex);
+    showToast("Todo updated.");
+    void refresh();
+  } catch (error) {
+    console.error(error);
+    task.checked = previousChecked;
+    task.disabled = false;
+    showToast("Todo update failed.");
   }
 }
 
@@ -4725,6 +4837,23 @@ function estimateEditorBlockIndexFromViewportY(clientY) {
     ? state.currentBlocks
     : normalizeEditorBlocks([{ source: state.currentContent, separator: "" }]);
   if (!content || !blocks.length) return 0;
+  const renderedBlocks = [...content.querySelectorAll(".page-render-block")];
+  if (renderedBlocks.length) {
+    let closestIndex = 0;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    for (const block of renderedBlocks) {
+      const index = Number(block.dataset.pageBlockIndex ?? -1);
+      if (!Number.isInteger(index) || index < 0 || index >= blocks.length) continue;
+      const rect = block.getBoundingClientRect();
+      if (clientY >= rect.top && clientY <= rect.bottom) return index;
+      const distance = clientY < rect.top ? rect.top - clientY : clientY - rect.bottom;
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestIndex = index;
+      }
+    }
+    return closestIndex;
+  }
   const rect = content.getBoundingClientRect();
   const height = Math.max(rect.height, 1);
   const relativeY = clamp(clientY - rect.top, 0, height);
@@ -4815,11 +4944,7 @@ async function openPageEditor(mode, options = {}) {
     blockEditor.innerHTML = "";
     state.activeEditorBlock = -1;
     syncPageEditorValue();
-    window.requestAnimationFrame(() => {
-      editor.focus();
-      editor.selectionStart = editor.value.length;
-      editor.selectionEnd = editor.value.length;
-    });
+    focusSourceEditorAtBlock(editor, activeIndex);
   }
   if (draft !== null) scheduleEditorBlockRender(editSource);
   content.hidden = true;
@@ -4839,6 +4964,30 @@ async function openPageEditor(mode, options = {}) {
   if (insertedNewBlock) persistPageDraft();
   setPageEditorStatus(insertedNewBlock ? "Unsaved draft." : "");
   setButtonIcon(button, "save", "Save");
+}
+
+function focusSourceEditorAtBlock(editor, blockIndex) {
+  const index = Math.min(
+    Math.max(Number(blockIndex) || 0, 0),
+    Math.max(state.editorBlocks.length - 1, 0),
+  );
+  let offset = 0;
+  for (let i = 0; i < index; i += 1) {
+    offset += editorBlockText(state.editorBlocks[i]).length + editorBlockSeparator(state.editorBlocks[i]).length;
+  }
+  const position = Math.min(Math.max(offset, 0), editor.value.length);
+  window.requestAnimationFrame(() => {
+    editor.focus();
+    if (typeof editor.setSelectionRange === "function") {
+      editor.setSelectionRange(position, position);
+    } else {
+      editor.selectionStart = position;
+      editor.selectionEnd = position;
+    }
+    const ratio = editor.value.length ? position / editor.value.length : 0;
+    const maxScroll = Math.max(0, (editor.scrollHeight || 0) - (editor.clientHeight || 0));
+    if (maxScroll) editor.scrollTop = Math.max(0, Math.round(maxScroll * ratio) - 24);
+  });
 }
 
 async function savePageEditor(options = {}) {
@@ -6549,10 +6698,11 @@ function iconSvg(iconName) {
 }
 
 async function markTodo(index) {
-  await request(`/api/mark?index=${encodeURIComponent(index)}`, {
+  const response = await request(`/api/mark?index=${encodeURIComponent(index)}`, {
     method: "POST",
     body: JSON.stringify({}),
   });
+  if (!response.ok) throw new Error(await response.text());
 }
 
 function escapeHtml(value) {
