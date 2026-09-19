@@ -1,4 +1,4 @@
-const CACHE_VERSION = "obr-offline-20260628-source-edit-position";
+const CACHE_VERSION = "obr-offline-20260919-passkey-hybrid";
 const SHELL_CACHE = `${CACHE_VERSION}:shell`;
 const PAGE_CACHE = `${CACHE_VERSION}:pages`;
 const IMAGE_CACHE = "obr-images-v1";
@@ -11,8 +11,8 @@ const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
   "/assets/favicon.svg",
-  "/assets/style.css?v=20260628-source-edit-position",
-  "/assets/app.js?v=20260628-source-edit-position",
+  "/assets/style.css?v=20260919-local-passkey",
+  "/assets/app.js?v=20260919-local-passkey",
 ];
 
 self.addEventListener("install", (event) => {

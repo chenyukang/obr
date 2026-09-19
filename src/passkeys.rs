@@ -62,12 +62,15 @@ impl PasskeyStore {
     }
 
     pub(crate) fn has_credentials(&self) -> bool {
-        !self
-            .data
+        self.credential_count() > 0
+    }
+
+    pub(crate) fn credential_count(&self) -> usize {
+        self.data
             .lock()
             .expect("passkey store lock poisoned")
             .credentials
-            .is_empty()
+            .len()
     }
 
     pub(crate) fn add_credential(&self, passkey: Passkey) -> Result<()> {

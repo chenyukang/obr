@@ -193,6 +193,7 @@ pub(crate) struct RssItemDetail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RssItemFilter {
     Unread,
+    News,
     Done,
     All,
 }
@@ -582,8 +583,20 @@ impl RssReader {
         );
         let mut clauses = Vec::new();
         let mut values = vec![Value::Integer(summary_chars)];
+        let hacker_news_clause = "(lower(COALESCE(f.title, '')) LIKE '%hacker news%'
+             OR lower(f.url) = 'https://hnrss.org'
+             OR lower(f.url) = 'http://hnrss.org'
+             OR lower(f.url) LIKE 'https://hnrss.org/%'
+             OR lower(f.url) LIKE 'http://hnrss.org/%')";
         match filter {
-            RssItemFilter::Unread => clauses.push("i.read_at IS NULL".to_string()),
+            RssItemFilter::Unread => {
+                clauses.push("i.read_at IS NULL".to_string());
+                clauses.push(format!("NOT {hacker_news_clause}"));
+            }
+            RssItemFilter::News => {
+                clauses.push("i.read_at IS NULL".to_string());
+                clauses.push(hacker_news_clause.to_string());
+            }
             RssItemFilter::Done => clauses.push("i.read_at IS NOT NULL".to_string()),
             RssItemFilter::All => {}
         };
@@ -604,7 +617,7 @@ impl RssReader {
             sql.push_str(&clauses.join(" AND "));
         }
         let order_by = match filter {
-            RssItemFilter::Unread => {
+            RssItemFilter::Unread | RssItemFilter::News => {
                 " ORDER BY i.sort_at IS NULL, i.sort_at DESC, i.first_seen_at DESC"
             }
             RssItemFilter::Done => {
@@ -5703,6 +5716,37 @@ what are we doing?? these are not the kinds of packages that any sane distro wou
         assert_eq!(unread_after_read[0].id, newer);
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].id, older);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn list_unread_excludes_hacker_news_and_news_lists_unread_hacker_news() -> Result<()> {
+        let (reader, root) = test_reader()?;
+        let normal = insert_test_item(&reader, "https://example.test/feed.xml", "normal-unread")?;
+        let hn_unread = insert_test_item(&reader, "https://hnrss.org/newest", "hn-unread")?;
+        let hn_read = insert_test_item(&reader, "https://hnrss.org/frontpage", "hn-read")?;
+        assert!(reader.mark_item_read(&hn_read, true)?);
+
+        let unread = reader.list_items(RssItemFilter::Unread, 10, 0, None)?;
+        let news = reader.list_items(RssItemFilter::News, 10, 0, None)?;
+        let all = reader.list_items(RssItemFilter::All, 10, 0, None)?;
+        let done = reader.list_items(RssItemFilter::Done, 10, 0, None)?;
+
+        assert_eq!(
+            unread
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![normal.as_str()]
+        );
+        assert_eq!(
+            news.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec![hn_unread.as_str()]
+        );
+        assert!(all.iter().any(|item| item.id == hn_unread));
+        assert!(all.iter().any(|item| item.id == hn_read));
+        assert!(done.iter().any(|item| item.id == hn_read));
         fs::remove_dir_all(root)?;
         Ok(())
     }

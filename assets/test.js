@@ -211,6 +211,7 @@ const rssSearchInput = {
   },
 };
 const rssSearchForm = { hidden: true };
+const passkeyRegisterButton = mockButton(true);
 const rssSearchToggle = {
   attributes: {},
   focused: false,
@@ -236,6 +237,7 @@ const elements = {
   "page-new-block-button": mockButton(false),
   "page-draft-banner": { hidden: true },
   "page-editor-status": { textContent: "", hidden: true },
+  "passkey-register-button": passkeyRegisterButton,
   "recent-pages": { innerHTML: "" },
   "recent-edits": { innerHTML: "" },
   "recent-panel": { hidden: true },
@@ -341,6 +343,12 @@ function fakeIndexedDb() {
 }
 const sandbox = {
   console,
+  atob(value) {
+    return Buffer.from(value, "base64").toString("binary");
+  },
+  btoa(value) {
+    return Buffer.from(value, "binary").toString("base64");
+  },
   document: {
     activeElement: null,
     documentElement: { scrollHeight: 1400 },
@@ -421,6 +429,7 @@ const sandbox = {
   },
   URLSearchParams,
   window: {
+    PublicKeyCredential: class PublicKeyCredential {},
     innerHeight: 700,
     scrollY: 500,
     scrollTo(leftOrOptions, top) {
@@ -481,6 +490,9 @@ this.__obrTest = {
   commitActiveEditorBlockForSave,
   stripEditorBlockTrailingWhitespaceForSave,
   syncEditorBlocksForSave,
+  refreshPasskeyRegisterButton,
+  preparePasskeyRequestOptions,
+  passkeyRegistrationTransports,
   rssItemHtml,
   handleRssListClick,
   markRssItemReadFromList,
@@ -496,6 +508,8 @@ this.__obrTest = {
   markTodo,
   sameRssItemsPage,
   sameRssItemDetail,
+  normalizeRssItemId,
+  currentRssDetailItemId,
   readRssResumeState,
   rememberRssListState,
   rememberRssDetailState,
@@ -562,6 +576,9 @@ const {
   commitActiveEditorBlockForSave,
   stripEditorBlockTrailingWhitespaceForSave,
   syncEditorBlocksForSave,
+  refreshPasskeyRegisterButton,
+  preparePasskeyRequestOptions,
+  passkeyRegistrationTransports,
   rssItemHtml,
   handleRssListClick,
   markRssItemReadFromList,
@@ -577,6 +594,8 @@ const {
   markTodo,
   sameRssItemsPage,
   sameRssItemDetail,
+  normalizeRssItemId,
+  currentRssDetailItemId,
   readRssResumeState,
   rememberRssListState,
   rememberRssDetailState,
@@ -622,6 +641,45 @@ const {
 function assertSource(expected) {
   assert.strictEqual(joinEditorBlocks(state.editorBlocks), expected);
   assert.strictEqual(pageEditor.value, expected);
+}
+
+async function assertPasskeyRegisterButtonMatchesAuthenticationMethod() {
+  passkeyRegisterButton.hidden = true;
+  fetchJsonResponses.push({ registered: true, can_register: true });
+  await refreshPasskeyRegisterButton();
+  assert.strictEqual(state.passkeyRegistered, true);
+  assert.strictEqual(passkeyRegisterButton.hidden, false);
+
+  fetchJsonResponses.push({ registered: true, can_register: false });
+  await refreshPasskeyRegisterButton();
+  assert.strictEqual(passkeyRegisterButton.hidden, true);
+}
+
+function assertPasskeyTransportFallback() {
+  const requestOptions = preparePasskeyRequestOptions({
+    publicKey: {
+      challenge: "AQI",
+      allowCredentials: [
+        { id: "AwQ", type: "public-key" },
+        { id: "BQY", type: "public-key", transports: ["internal"] },
+      ],
+    },
+  });
+  assert.deepStrictEqual(Array.from(requestOptions.publicKey.challenge), [1, 2]);
+  assert.deepStrictEqual(Array.from(requestOptions.publicKey.allowCredentials[0].id), [3, 4]);
+  assert.deepStrictEqual(
+    Array.from(requestOptions.publicKey.allowCredentials[0].transports),
+    ["internal", "hybrid"],
+  );
+  assert.deepStrictEqual(
+    Array.from(requestOptions.publicKey.allowCredentials[1].transports),
+    ["internal"],
+  );
+  assert.deepStrictEqual(
+    passkeyRegistrationTransports({ getTransports: () => ["internal", "hybrid"] }),
+    ["internal", "hybrid"],
+  );
+  assert.strictEqual(passkeyRegistrationTransports({}), undefined);
 }
 
 async function assertOptimisticTodoAdd() {
@@ -1325,6 +1383,9 @@ function assertRssResumeState() {
   const previousScrollY = sandbox.window.scrollY;
   const previousFilter = state.rssFilter;
   const previousQuery = rssSearchInput.value;
+  const previousView = state.view;
+  const previousCurrentFile = state.currentFile;
+  const previousSelectedItemId = state.rssSelectedItemId;
   const previousLocalStore = new Map(localStore);
   localStore.clear();
   try {
@@ -1351,10 +1412,27 @@ function assertRssResumeState() {
     assert.strictEqual(resume.mode, "detail");
     assert.strictEqual(resume.itemId, "rss-last-read");
     assert.strictEqual(resume.listY, 321);
+
+    const itemId = "303db8eb-17c1-50c1-97f9-63d08a73d257";
+    localStore.set(
+      "obr.rss.resume",
+      JSON.stringify({ mode: "detail", itemId: `${itemId}.md` }),
+    );
+    resume = readRssResumeState();
+    assert.strictEqual(resume.itemId, itemId);
+    assert.strictEqual(normalizeRssItemId(`${itemId}.md`), itemId);
+
+    state.view = "page";
+    state.currentFile = `rss:${itemId}.md`;
+    state.rssSelectedItemId = `${itemId}.md`;
+    assert.strictEqual(currentRssDetailItemId(), itemId);
   } finally {
     sandbox.window.scrollY = previousScrollY;
     state.rssFilter = previousFilter;
     rssSearchInput.value = previousQuery;
+    state.view = previousView;
+    state.currentFile = previousCurrentFile;
+    state.rssSelectedItemId = previousSelectedItemId;
     localStore.clear();
     for (const [key, value] of previousLocalStore) {
       localStore.set(key, value);
@@ -2016,6 +2094,8 @@ async function assertEntryOutboxPreservesCreatedAt() {
 }
 
 (async () => {
+  await assertPasskeyRegisterButtonMatchesAuthenticationMethod();
+  assertPasskeyTransportFallback();
   await assertOptimisticTodoAdd();
   assertInitialEditorBlockUsesCurrentReadingViewport();
   assertSourceEditorFocusesCurrentBlockOffset();

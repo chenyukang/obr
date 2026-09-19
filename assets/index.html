@@ -15,7 +15,7 @@
         } catch {}
       })();
     </script>
-    <link rel="stylesheet" href="/assets/style.css?v=20260628-source-edit-position">
+    <link rel="stylesheet" href="/assets/style.css?v=20260919-local-passkey">
   </head>
   <body>
     <div id="boot" class="boot-screen" role="status" aria-live="polite">
@@ -60,7 +60,7 @@
             <button id="random-note-button" type="button" aria-label="Open random note" title="Random note" data-icon="shuffle"></button>
             <button id="theme-toggle-button" type="button" aria-label="Theme" title="Theme" data-icon="moon"></button>
             <button id="outbox-button" class="outbox-button" type="button" data-icon="list-checks" aria-label="Show pending sync items" title="Pending sync items" hidden>0</button>
-            <button id="passkey-register-button" type="button" aria-label="Register passkey" title="Register passkey" data-icon="key" hidden></button>
+            <button id="passkey-register-button" type="button" aria-label="Add passkey" title="Add passkey" data-icon="key" hidden></button>
             <button id="logout-button" type="button" aria-label="Log out" title="Log out" data-icon="log-out"></button>
           </div>
         </div>
@@ -152,6 +152,7 @@
           <div class="rss-toolbar">
             <div class="rss-tabs" role="group" aria-label="RSS item state">
               <button id="rss-unread-filter" type="button" data-rss-filter="unread">Unread</button>
+              <button id="rss-news-filter" type="button" data-rss-filter="news">News</button>
               <button id="rss-done-filter" type="button" data-rss-filter="done">Done</button>
               <button id="rss-all-filter" type="button" data-rss-filter="all">All</button>
             </div>
@@ -256,6 +257,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-    <script src="/assets/app.js?v=20260628-source-edit-position"></script>
+    <script src="/assets/app.js?v=20260919-local-passkey"></script>
   </body>
 </html>

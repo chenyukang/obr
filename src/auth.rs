@@ -18,6 +18,7 @@ use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, cookie::
 use crate::config::Config;
 
 pub(crate) const AUTH_SESSION_KEY: &str = "authenticated";
+pub(crate) const PASSWORD_AUTH_SESSION_KEY: &str = "password_authenticated";
 const MAX_FAILED_LOGINS: u32 = 5;
 const LOGIN_LOCKOUT: Duration = Duration::from_secs(60);
 

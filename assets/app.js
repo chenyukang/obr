@@ -738,6 +738,11 @@ async function recoverOnlineStartup() {
 
 async function refreshCurrentViewAfterReconnect() {
   if (state.editorMode !== "closed") return;
+  const rssItemId = currentRssDetailItemId();
+  if (rssItemId) {
+    await openRssItem(rssItemId, { updateHistory: false });
+    return;
+  }
   if (state.view === "rss") {
     await showView("rss", {
       focusSearch: false,
@@ -2095,7 +2100,7 @@ async function login() {
     await refreshAuthOptions();
     showLogin();
     setLoginError(
-      "Password login is disabled here. Use passkey, or open localhost to use username/password.",
+      "Password login is disabled after two passkeys are registered. Use a passkey, or open localhost to use username/password.",
     );
     return;
   }
@@ -2119,13 +2124,7 @@ async function passkeyLogin() {
       credentials: "same-origin",
     });
     if (!start.ok) throw new Error(await start.text());
-    const requestOptions = await start.json();
-    requestOptions.publicKey.challenge = base64urlToUint8Array(
-      requestOptions.publicKey.challenge,
-    );
-    requestOptions.publicKey.allowCredentials?.forEach((credential) => {
-      credential.id = base64urlToUint8Array(credential.id);
-    });
+    const requestOptions = preparePasskeyRequestOptions(await start.json());
 
     const assertion = await navigator.credentials.get({
       publicKey: requestOptions.publicKey,
@@ -2203,17 +2202,37 @@ async function registerPasskey() {
           clientDataJSON: uint8ArrayToBase64url(
             new Uint8Array(credential.response.clientDataJSON),
           ),
+          transports: passkeyRegistrationTransports(credential.response),
         },
       }),
     });
     if (!finish.ok) throw new Error(await finish.text());
     state.passkeyRegistered = true;
-    el("passkey-register-button").hidden = true;
-    alert("Passkey registered.");
+    el("passkey-register-button").hidden = false;
+    alert("Passkey added.");
   } catch (error) {
     console.error(error);
     alert(error.message || "Passkey registration failed.");
   }
+}
+
+function preparePasskeyRequestOptions(requestOptions) {
+  requestOptions.publicKey.challenge = base64urlToUint8Array(
+    requestOptions.publicKey.challenge,
+  );
+  requestOptions.publicKey.allowCredentials?.forEach((credential) => {
+    credential.id = base64urlToUint8Array(credential.id);
+    if (!Array.isArray(credential.transports) || !credential.transports.length) {
+      credential.transports = ["internal", "hybrid"];
+    }
+  });
+  return requestOptions;
+}
+
+function passkeyRegistrationTransports(response) {
+  if (typeof response?.getTransports !== "function") return undefined;
+  const transports = response.getTransports();
+  return transports.length ? transports : undefined;
 }
 
 function setLoginError(message, hidden = false) {
@@ -2280,14 +2299,19 @@ function hideBoot() {
 }
 
 async function refreshPasskeyRegisterButton() {
+  const button = el("passkey-register-button");
+  button.hidden = true;
+  if (!window.PublicKeyCredential) {
+    return;
+  }
   try {
     const response = await request("/api/passkey/status");
     const status = await response.json();
     state.passkeyRegistered = Boolean(status.registered);
-    el("passkey-register-button").hidden = Boolean(status.registered);
+    button.hidden = !Boolean(status.can_register);
   } catch (error) {
     console.error(error);
-    el("passkey-register-button").hidden = true;
+    button.hidden = true;
   }
 }
 
@@ -3265,7 +3289,8 @@ async function markRssItemReadFromList(id, button) {
   }
 }
 
-async function openRssItem(id, options = {}) {
+async function openRssItem(rawId, options = {}) {
+  const id = normalizeRssItemId(rawId);
   if (!id) return;
   if (state.view === "rss" && !el("rss-view").hidden) saveViewScroll("rss");
   rememberRssDetailState(id);
@@ -4213,11 +4238,24 @@ function clearRssItemCache(id = "") {
   }
 }
 
+function normalizeRssItemId(value) {
+  const id = String(value || "").trim();
+  const legacyMarkdownId = id.match(
+    /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.md$/i,
+  );
+  return legacyMarkdownId ? legacyMarkdownId[1] : id;
+}
+
+function currentRssDetailItemId() {
+  if (!isRssDetailPage()) return "";
+  return normalizeRssItemId(state.rssSelectedItemId || state.currentFile.slice(4));
+}
+
 function readRssResumeState() {
   const saved = readJson(RSS_RESUME_KEY, {});
   return {
     mode: saved?.mode === "detail" ? "detail" : "list",
-    itemId: String(saved?.itemId || ""),
+    itemId: normalizeRssItemId(saved?.itemId),
     filter: String(saved?.filter || "unread"),
     query: String(saved?.query || ""),
     listY: Number.isFinite(saved?.listY) ? Math.max(0, saved.listY) : 0,
@@ -4259,12 +4297,13 @@ function restoreRssListControls(resume = readRssResumeState()) {
 }
 
 function rememberRssDetailState(itemId = state.rssSelectedItemId) {
-  if (!itemId) return;
+  const normalizedItemId = normalizeRssItemId(itemId);
+  if (!normalizedItemId) return;
   const saved = readRssResumeState();
   writeRssResumeState({
     ...saved,
     mode: "detail",
-    itemId,
+    itemId: normalizedItemId,
     filter: state.rssFilter,
     query: rssSearchQuery(),
   });

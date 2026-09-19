@@ -32,7 +32,9 @@ use webauthn_rs::prelude::{
 
 use crate::{
     app::AppState,
-    auth::{AUTH_SESSION_KEY, allows_local_password_login, verify_login},
+    auth::{
+        AUTH_SESSION_KEY, PASSWORD_AUTH_SESSION_KEY, allows_local_password_login, verify_login,
+    },
     error::{AppError, AppResult},
     markdown::{
         MarkdownBlock, auto_link_note_titles, ensure_inside, escape_html, escape_html_attr,
@@ -141,6 +143,12 @@ struct RssAnnotationResponse {
 
 #[derive(Serialize)]
 struct PasskeyStatus {
+    registered: bool,
+    can_register: bool,
+}
+
+#[derive(Serialize)]
+struct PasskeyAvailability {
     registered: bool,
 }
 
@@ -296,16 +304,28 @@ fn immutable_asset_cache_control() -> &'static str {
     "public, max-age=31536000, immutable"
 }
 
+fn password_login_allowed(passkey_count: usize, local_request: bool) -> bool {
+    passkey_count < 2 || local_request
+}
+
+async fn password_authenticated(session: &Session) -> AppResult<bool> {
+    Ok(session
+        .get::<bool>(PASSWORD_AUTH_SESSION_KEY)
+        .await?
+        .unwrap_or(false))
+}
+
 pub(crate) async fn login(
     State(state): State<Arc<AppState>>,
     session: Session,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<Response> {
-    if state.passkey_store.has_credentials() && !allows_local_password_login(&headers) {
+    let passkey_count = state.passkey_store.credential_count();
+    if !password_login_allowed(passkey_count, allows_local_password_login(&headers)) {
         return Ok((
             StatusCode::FORBIDDEN,
-            "password login is disabled outside localhost after passkey registration",
+            "password login is disabled outside localhost after two passkeys are registered",
         )
             .into_response());
     }
@@ -327,6 +347,7 @@ pub(crate) async fn login(
     state.login_limiter.record_success(&limiter_key);
     session.cycle_id().await?;
     session.insert(AUTH_SESSION_KEY, true).await?;
+    session.insert(PASSWORD_AUTH_SESSION_KEY, true).await?;
     Ok("ok".into_response())
 }
 
@@ -334,10 +355,13 @@ pub(crate) async fn auth_options(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let passkey_registered = state.passkey_store.has_credentials();
+    let passkey_count = state.passkey_store.credential_count();
     Ok(Json(AuthOptions {
-        passkey_registered,
-        password_login_allowed: !passkey_registered || allows_local_password_login(&headers),
+        passkey_registered: passkey_count > 0,
+        password_login_allowed: password_login_allowed(
+            passkey_count,
+            allows_local_password_login(&headers),
+        ),
     })
     .into_response())
 }
@@ -346,6 +370,13 @@ pub(crate) async fn passkey_register_start(
     State(state): State<Arc<AppState>>,
     session: Session,
 ) -> AppResult<Response> {
+    if !password_authenticated(&session).await? {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            "passkeys can only be added from a password-authenticated session",
+        )
+            .into_response());
+    }
     let _ = session.remove_value(PASSKEY_REGISTRATION_SESSION_KEY).await;
     let exclude_credentials = state.passkey_store.credential_ids();
     let exclude_credentials = if exclude_credentials.is_empty() {
@@ -373,6 +404,13 @@ pub(crate) async fn passkey_register_finish(
     session: Session,
     Json(credential): Json<RegisterPublicKeyCredential>,
 ) -> AppResult<Response> {
+    if !password_authenticated(&session).await? {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            "passkeys can only be added from a password-authenticated session",
+        )
+            .into_response());
+    }
     let registration_state: PasskeyRegistration = session
         .get(PASSKEY_REGISTRATION_SESSION_KEY)
         .await?
@@ -426,19 +464,24 @@ pub(crate) async fn passkey_login_finish(
     state.passkey_store.update_credential(&auth_result)?;
     session.cycle_id().await?;
     session.insert(AUTH_SESSION_KEY, true).await?;
+    session.insert(PASSWORD_AUTH_SESSION_KEY, false).await?;
     Ok("ok".into_response())
 }
 
 pub(crate) async fn passkey_available(State(state): State<Arc<AppState>>) -> AppResult<Response> {
-    Ok(Json(PasskeyStatus {
+    Ok(Json(PasskeyAvailability {
         registered: state.passkey_store.has_credentials(),
     })
     .into_response())
 }
 
-pub(crate) async fn passkey_status(State(state): State<Arc<AppState>>) -> AppResult<Response> {
+pub(crate) async fn passkey_status(
+    State(state): State<Arc<AppState>>,
+    session: Session,
+) -> AppResult<Response> {
     Ok(Json(PasskeyStatus {
         registered: state.passkey_store.has_credentials(),
+        can_register: password_authenticated(&session).await?,
     })
     .into_response())
 }
@@ -494,6 +537,7 @@ pub(crate) async fn rss_items(
         .into_response());
     };
     let filter = match query.state.as_deref() {
+        Some("news") => RssItemFilter::News,
         Some("done") => RssItemFilter::Done,
         Some("all") => RssItemFilter::All,
         _ => RssItemFilter::Unread,
@@ -1831,11 +1875,20 @@ mod tests {
 
     use super::{
         append_rss_annotation_markdown, ensure_image_preview, entry_body_already_exists,
-        entry_timestamp, new_rss_annotation_markdown, normalize_annotation_text, rel_to_vault,
-        resolve_attachment_path, rss_annotation_highlight_count, rss_annotation_item_markdown,
-        sanitize_annotation_filename,
+        entry_timestamp, new_rss_annotation_markdown, normalize_annotation_text,
+        password_login_allowed, rel_to_vault, resolve_attachment_path,
+        rss_annotation_highlight_count, rss_annotation_item_markdown, sanitize_annotation_filename,
     };
     use crate::rss::RssItemDetail;
+
+    #[test]
+    fn public_password_login_is_disabled_after_two_passkeys() {
+        assert!(password_login_allowed(0, false));
+        assert!(password_login_allowed(1, false));
+        assert!(!password_login_allowed(2, false));
+        assert!(!password_login_allowed(3, false));
+        assert!(password_login_allowed(2, true));
+    }
 
     #[test]
     fn entry_body_duplicate_check_uses_visible_content() {
